@@ -1,0 +1,50 @@
+{
+  "weixin": {
+    "sentry": {
+      "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_SENTRY_KEY",
+      "secret": "YOUR_SENTRY_SECRET",
+      "description": "哨兵事件推送（ Event告警）"
+    },
+    "status": {
+      "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_STATUS_KEY",
+      "secret": "YOUR_STATUS_SECRET",
+      "description": "系统状态通知（启动/网络/存储等）"
+    }
+  },
+  "compatibility_notes": {
+    "message_types": {
+      "text": {
+        "weixin_work": "✅ 完美支持",
+        "wechat_personal": "✅ 完美支持",
+        "recommendation": "适合简单文本通知"
+      },
+      "news": {
+        "weixin_work": "✅ 完美支持（图文卡片）",
+        "wechat_personal": "✅ 完美支持（图文卡片）",
+        "recommendation": "推荐使用！兼容性最好"
+      },
+      "markdown": {
+        "weixin_work": "✅ 支持（格式化文本）",
+        "wechat_personal": "⚠️ 显示为纯文本（格式丢失）",
+        "recommendation": "不推荐用于需要兼容个人微信的场景"
+      },
+      "image": {
+        "weixin_work": "✅ 支持",
+        "wechat_personal": "✅ 支持",
+        "recommendation": "适合发送截图"
+      }
+    },
+    "best_practices": [
+      "使用图文消息（news）类型：企业微信和个人微信都完美支持",
+      "避免使用 Markdown：个人微信会显示为乱码",
+      "图片使用 base64 上传：最大 2MB",
+      "文本消息用 Emoji 增强可读性：✅❌⚠️🚗📍🕐"
+    ]
+  },
+  "tesla_usb_integration": {
+    "sentry_monitor_script": "/opt/teslausb/scripts/sentry_monitor.py",
+    "status_daemon_script": "/opt/teslausb/scripts/status_daemon.py",
+    "config_file": "/etc/teslausb/weixin.json",
+    "log_file": "/var/log/teslausb/weixin.log"
+  }
+}

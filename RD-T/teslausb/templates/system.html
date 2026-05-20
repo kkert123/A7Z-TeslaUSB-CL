@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %} — 系统控制{% endblock %}
+{% block content %}
+<div class="page-header"><h2>⚙️ 系统控制</h2></div>
+
+<!-- 服务控制 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">TeslaUSB 服务</h3>
+  <div style="display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s4)">
+    <span class="status {% if service.active %}status-ok{% else %}status-err{% endif %}">{{ '运行中' if service.active else '已停止' }}</span>
+    {% if service.uptime %}<span style="font-size:var(--text-sm);color:var(--text-secondary)">运行时长: {{ service.uptime }}</span>{% endif %}
+  </div>
+  <div class="btn-group">
+    <button class="btn btn-primary btn-sm" onclick="serviceAction('restart')">🔄 重启服务</button>
+    <button class="btn btn-ghost btn-sm" onclick="serviceAction('stop')">⏹ 停止</button>
+    <button class="btn btn-ghost btn-sm" onclick="serviceAction('start')">▶ 启动</button>
+  </div>
+</div>
+
+<!-- 企业微信机器人 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">📱 企业微信机器人</h3>
+  {% if wecom.configured and wecom.bots %}
+  <div style="margin-bottom:var(--s3);font-size:var(--text-sm)">
+    {% for bot in wecom.bots %}
+    <div style="padding:10px 0;{% if not loop.first %}border-top:1px solid var(--border);{% endif %}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <strong>{{ bot.name }}</strong>
+        <code style="font-size:var(--text-xs);background:var(--bg-secondary);padding:2px 8px;border-radius:4px">...{{ bot.key_suffix }}</code>
+      </div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted)">{{ bot.desc }}</div>
+    </div>
+    {% endfor %}
+    <div style="margin-top:8px;font-size:var(--text-xs);color:var(--text-muted)">
+      配置文件: <code style="background:var(--bg-secondary);padding:1px 6px;border-radius:3px">config/sentry.json</code>
+    </div>
+  </div>
+  <div class="btn-group">
+    <button class="btn btn-primary btn-sm" onclick="testWecom()">📤 测试推送</button>
+  </div>
+  {% else %}
+  <div style="font-size:var(--text-sm);color:var(--text-muted);padding:8px 0">
+    未配置企业微信机器人。请在 <code style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px">config/sentry.json</code> 中设置 <code>wecom_status_webhook_key</code> 和/或 <code>wecom_sentry_webhook_key</code>。
+  </div>
+  {% endif %}
+  <div id="wecom-result" class="alert" style="display:none"></div>
+</div>
+
+<!-- 树莓派 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">树莓派</h3>
+  <div class="btn-group" style="margin-bottom:var(--s3)">
+    <button class="btn btn-warning btn-sm" onclick="systemReboot()">🔁 重启</button>
+    <button class="btn btn-danger btn-sm" onclick="systemShutdown()">🔌 关机</button>
+  </div>
+  <p style="font-size:var(--text-xs);color:var(--text-muted)">关机后需断电重新上电启动</p>
+</div>
+
+<!-- 操作结果 -->
+<div id="op-result" class="alert" style="display:none"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showResult(id, msg, ok){
+  var el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'alert ' + (ok ? 'alert-success' : 'alert-danger');
+  el.style.display = 'flex';
+  setTimeout(function(){ el.style.display = 'none'; }, 5000);
+}
+function serviceAction(a){
+  var labels = {restart:'重启', stop:'停止', start:'启动'};
+  if(!confirm('确定' + labels[a] + '服务？')) return;
+  fetch('/api/system/service', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:a})
+  }).then(function(r){return r.json();}).then(function(d){
+    showResult('op-result', d.message, d.success);
+    if(d.success) setTimeout(function(){ location.reload(); }, 2000);
+  }).catch(function(){ showResult('op-result', '请求失败', false); });
+}
+function systemReboot(){
+  if(!confirm('确定重启树莓派？')) return;
+  fetch('/api/system/reboot', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    showResult('op-result', d.message, d.success);
+  }).catch(function(){ showResult('op-result', '请求失败', false); });
+}
+function systemShutdown(){
+  if(!confirm('确定关机？')) return;
+  fetch('/api/system/shutdown', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    showResult('op-result', d.message, d.success);
+  }).catch(function(){ showResult('op-result', '请求失败', false); });
+}
+function testWecom(){
+  showResult('wecom-result', '正在发送测试消息...', true);
+  fetch('/api/system/wecom-test', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    showResult('wecom-result', d.message, d.success);
+  }).catch(function(e){ showResult('wecom-result', '请求失败: ' + e.message, false); });
+}
+</script>
+{% endblock %}

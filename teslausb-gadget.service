@@ -1,0 +1,28 @@
+[Unit]
+Description=TeslaUSB A7Z USB Gadget Daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/teslausb-gadgetd.pid
+
+# 启动守护进程
+ExecStart=/usr/bin/python3 /opt/radxa_data/teslausb-gadgetd.py start
+ExecStop=/usr/bin/python3 /opt/radxa_data/teslausb-gadgetd.py stop
+ExecReload=/usr/bin/python3 /opt/radxa_data/teslausb-gadgetd.py restart
+
+# 超时设置
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# 重启策略
+Restart=on-failure
+RestartSec=10
+
+# 日志设置
+StandardOutput=append:/var/log/teslausb-gadgetd.log
+StandardError=append:/var/log/teslausb-gadgetd.log
+
+[Install]
+WantedBy=multi-user.target

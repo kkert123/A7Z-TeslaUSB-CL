@@ -1,0 +1,18 @@
+[Unit]
+Description=TeslaUSB Sentry Monitor Service
+After=network-online.target teslausb-web.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/radxa_data/teslausb
+ExecStart=/usr/bin/python3 -u sentry_service.py --command start --config /opt/radxa_data/teslausb/config/sentry.json
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/teslausb-sentry.log
+StandardError=append:/var/log/teslausb-sentry.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""
+A7Z TeslaUSB 统一配置文件
+===========================
+所有模块应从此文件导入路径常量，避免路径碎片化。
+
+之前存在三套路径体系：
+  - app.py 使用 /mnt/teslacam 等
+  - media_service.py 使用 /media/cnlvan/cam 等
+  - clean_deploy 模块使用 /opt/teslausb-web/ 等
+
+现在统一为以下体系（A7Z 实际部署环境）。
+"""
+
+import os
+
+# ─── 数据根目录 ───
+DATA_ROOT = "/opt/radxa_data"
+TESLAUSB_ROOT = os.path.join(DATA_ROOT, "teslausb")
+
+# ─── 分区挂载点（A7Z NVMe 分区布局） ───
+PARTITIONS = {
+    "cam": "/mnt/teslacam",
+    "music": "/mnt/music",
+    "boombox": "/mnt/boombox",
+    "lightshow": "/mnt/lightshow",
+    "wraps": "/mnt/wraps",
+}
+
+# ─── TeslaCam 子目录 ───
+SENTRY_CLIPS_PATH = os.path.join(PARTITIONS["cam"], "TeslaCam", "SentryClips")
+RECENT_CLIPS_PATH = os.path.join(PARTITIONS["cam"], "TeslaCam", "RecentClips")
+SAVED_CLIPS_PATH = os.path.join(PARTITIONS["cam"], "TeslaCam", "SavedClips")
+
+# ─── 应用数据路径 ───
+CONFIG_DIR = os.path.join(TESLAUSB_ROOT, "config")
+DATA_DIR = os.path.join(TESLAUSB_ROOT, "data")
+STATIC_DIR = os.path.join(TESLAUSB_ROOT, "static")
+THUMBNAIL_DIR = os.path.join(STATIC_DIR, "thumbnails")
+
+# ─── 关键文件路径 ───
+SENTRY_STATE_FILE = os.path.join(DATA_DIR, "sentry_events.json")
+SENTRY_CONFIG_FILE = os.path.join(CONFIG_DIR, "sentry.json")
+PUSH_HEALTH_FILE = os.path.join(DATA_DIR, "push_health.json")
+APP_CONFIG_FILE = os.path.join(TESLAUSB_ROOT, "config.json")
+
+# ─── 日志路径 ───
+LOG_DIR = "/var/log"
+WEB_LOG = os.path.join(LOG_DIR, "teslausb.log")
+SENTRY_LOG = os.path.join(LOG_DIR, "teslausb-sentry.log")
+GADGET_LOG = os.path.join(LOG_DIR, "teslausb-gadgetd.log")
+WIFI_LOG = os.path.join(LOG_DIR, "wifi-smart-switch.log")
+
+# ─── USB Gadget 路径 ───
+GADGET_SCRIPT = "/opt/radxa_data/usb_gadget_init.sh"
+GADGET_SOCKET = "/tmp/teslausb-gadget.sock"
+GADGET_PID_FILE = "/var/run/teslausb-gadgetd.pid"
+
+# ─── 微信通知器数据路径 ───
+# 覆盖 weixin_notifier.py 的硬编码路径
+os.environ.setdefault("WECOM_DATA_DIR", DATA_DIR)

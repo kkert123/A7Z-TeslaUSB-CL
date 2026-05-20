@@ -1,0 +1,19 @@
+{
+  "_comment": "TeslaUSB A7Z 企业微信推送配置 — 双机器人架构",
+  "_instructions": "将下方 key 替换为您的企业微信群机器人 Webhook Key",
+  
+  "wecom_status_webhook_key": "YOUR_STATUS_BOT_KEY",
+  "wecom_sentry_webhook_key": "YOUR_SENTRY_BOT_KEY",
+  
+  "sentry_clips_path": "/mnt/teslacam/TeslaCam/SentryClips",
+  "state_file": "/opt/radxa_data/data/sentry_events.json",
+  
+  "home_delay_minutes": 30,
+  "away_confirm_timeout_minutes": 30,
+  "scan_interval_seconds": 10,
+  
+  "preview_enabled": true,
+  "watermark_enabled": true,
+  
+  "nas_base_path": "/mnt/nas/TeslaSentry"
+}

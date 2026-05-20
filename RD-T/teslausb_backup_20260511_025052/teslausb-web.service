@@ -1,0 +1,18 @@
+[Unit]
+Description=TeslaUSB Neo Web Manager
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/teslausb-web
+Environment="PYTHONUNBUFFERED=1"
+Environment="FLASK_APP=app.py"
+Environment="FLASK_ENV=production"
+ExecStart=/opt/teslausb-web/venv/bin/python -m flask run --host=0.0.0.0 --port=5000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

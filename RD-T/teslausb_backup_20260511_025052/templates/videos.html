@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %} — 视频管理{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>🎬 视频管理</h2>
+  <div class="btn-group">
+    <select class="form-select" id="folderSelect" onchange="loadFolder(this.value)" style="width:auto;min-width:160px;padding:6px 12px;font-size:var(--text-sm);">
+      {% for key, info in folders.items() %}
+      <option value="{{ key }}" {% if key == current_folder %}selected{% endif %}>{{ info.icon }} {{ info.desc }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+<!-- 统计 -->
+{% if total_events is defined %}
+<div class="stats-grid" style="margin-bottom:var(--s4)">
+  <div class="stat-card"><div class="stat-label">事件数</div><div class="stat-value">{{ total_events }}</div></div>
+  <div class="stat-card"><div class="stat-label">已上传</div><div class="stat-value" style="color:var(--success)">{{ uploaded_count }}</div></div>
+  <div class="stat-card"><div class="stat-label">总大小</div><div class="stat-value" style="font-size:var(--text-base)">{{ total_size }}</div></div>
+</div>
+{% endif %}
+
+<!-- 事件列表 -->
+{% if events %}
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s4);">
+  {% for event in events %}
+  <div class="card" style="padding:0;overflow:hidden;">
+    <!-- 缩略图 -->
+    {% if event.thumbnail %}
+    <a href="/videos/event/{{ current_folder }}/{{ event.id }}" style="display:block;">
+      <img src="{{ event.thumbnail }}" alt="" class="thumb" style="aspect-ratio:16/9;margin:0;border-radius:0;">
+    </a>
+    {% else %}
+    <div class="thumb" style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;border-radius:0;background:var(--bg-hover);">
+      <span style="font-size:32px;opacity:0.3">🎬</span>
+    </div>
+    {% endif %}
+
+    <!-- 信息 -->
+    <div style="padding:var(--s3) var(--s4);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--s2);">
+        <span style="font-weight:600;font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="{{ event.name }}">{{ event.name }}</span>
+        {% if event.uploaded %}
+        <span class="badge badge-success">已上传</span>
+        {% endif %}
+      </div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s2);">
+        {{ event.timestamp }} · {{ event.file_count }} 个文件 · {{ format_size(event.total_size) if event.total_size else '—' }}
+      </div>
+      {% if event.nas_path %}
+      <div style="font-size:var(--text-xs);color:var(--success);margin-bottom:var(--s2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ event.nas_path }}">NAS: {{ event.nas_path }}</div>
+      {% endif %}
+      <div class="btn-group">
+        {% if event.thumbnail %}
+        <a href="/videos/event/{{ current_folder }}/{{ event.id }}" class="btn btn-primary btn-sm">查看</a>
+        {% endif %}
+        <button class="btn btn-danger btn-sm" onclick="deleteEvent('{{ current_folder }}','{{ event.id }}')">删除</button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty"><div class="empty-icon">🎬</div><div class="empty-text">当前文件夹没有视频事件</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function loadFolder(f){window.location.href='?folder='+encodeURIComponent(f);}
+async function deleteEvent(folder,id){
+  if(!confirm('确定删除事件 '+id+'？此操作不可恢复！'))return;
+  try{const r=await fetch('/api/videos/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder,event_id:id})});
+  const d=await r.json();if(d.success){location.reload();}else{alert(d.error||'删除失败');}}
+  catch(e){alert('请求失败');}
+}
+</script>
+{% endblock %}

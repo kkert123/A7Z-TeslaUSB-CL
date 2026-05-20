@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific - runtime artifacts
+static/thumbnails/
+*.jpg
+*.png
+*.gif
+
+# Logs
+*.log
+logs/
+
+# Backup and temp files
+_backup_*/
+*.bak
+*.backup*
+*.b64
+
+# Config with secrets
+config.json
+weixin_config.json
+*.secret.*
+
+# Deployment artifacts
+.workbuddy/artifacts/
+.gstack/
+
+# Test and debug
+test_*.py
+_check_*.py
+_debug_*.py
+_diag_*.py
+_fix_*.py
+_deploy_*.py
+_download_*.py
+_verify_*.py
+_ssh_*.py
+_sync_*.py
+_*.sh
+_*.ps1

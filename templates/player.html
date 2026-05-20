@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Tesla Player</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text2: #8b949e;
+  --text3: #484f58;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d2991d;
+  --sidebar-w: 280px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  background:var(--bg);color:var(--text);height:100vh;overflow:hidden;
+  user-select:none;-webkit-user-select:none;
+}
+.app{display:flex;height:100vh}
+/* Sidebar */
+.sidebar{
+  width:var(--sidebar-w);flex-shrink:0;background:var(--bg2);
+  border-right:1px solid var(--border);display:flex;flex-direction:column;
+}
+.sidebar-head{
+  padding:12px 16px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;
+}
+.folder-tabs{display:flex;padding:6px 8px 0;gap:4px}
+.folder-tab{
+  flex:1;padding:6px 8px;background:transparent;border:none;
+  color:var(--text2);font-size:12px;cursor:pointer;border-radius:6px 6px 0 0;
+  transition:all .15s;text-align:center;
+}
+.folder-tab:hover{background:var(--bg3);color:var(--text)}
+.folder-tab.active{background:var(--bg);color:var(--accent);font-weight:600}
+.event-list{flex:1;overflow-y:auto;padding:8px;background:var(--bg)}
+.event-item{
+  padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:3px;
+  transition:all .15s;border:1px solid transparent;display:flex;gap:10px;align-items:center;
+}
+.event-item:hover{background:var(--bg3)}
+.event-item.active{background:var(--bg3);border-color:var(--accent)}
+.event-item .thumb{
+  width:64px;height:36px;border-radius:4px;background:var(--bg2);
+  flex-shrink:0;object-fit:cover;border:1px solid var(--border);
+}
+.event-item .info{flex:1;min-width:0}
+.event-item .time{font-size:12px;font-weight:600;white-space:nowrap}
+.event-item .meta{font-size:10px;color:var(--text2);margin-top:2px}
+.event-item .meta span{padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px}
+.event-item .meta .badge-sei{background:rgba(88,166,255,.15);color:var(--accent)}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:200px;color:var(--text3);font-size:13px;gap:8px}
+/* Main */
+.main{flex:1;display:flex;flex-direction:column;background:#000;min-width:0}
+.video-area{flex:1;position:relative;display:flex;align-items:center;justify-content:center}
+.video-area video{max-width:100%;max-height:100%;object-fit:contain}
+.hud-canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5}
+/* Speed curve on progress bar */
+.speed-curve{position:relative;height:36px;margin:0 16px;flex-shrink:0}
+.speed-curve canvas{width:100%;height:100%}
+/* Controls */
+.controls{background:var(--bg2);border-top:1px solid var(--border);padding:8px 16px 6px;flex-shrink:0}
+.progress-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.progress-bar{flex:1;height:5px;background:var(--bg3);border-radius:3px;cursor:pointer;position:relative}
+.progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .1s}
+.time{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums;min-width:45px;text-align:center}
+.ctrl-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}
+.btn{
+  background:var(--bg3);border:1px solid var(--border);color:var(--text);
+  padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px;
+  transition:all .15s;display:flex;align-items:center;gap:4px;white-space:nowrap;
+}
+.btn:hover{background:#30363d;border-color:var(--text2)}
+.btn:active{transform:scale(.95)}
+.btn.accent{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.accent:hover{background:#4090e0}
+.btn.danger{color:var(--red);border-color:var(--red)}
+.speed-sel{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer}
+/* Camera bar */
+.cam-bar{
+  display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:6px 12px;background:var(--bg2);border-top:1px solid var(--border);flex-shrink:0;
+  overflow-x:auto;-webkit-overflow-scrolling:touch;
+}
+.cam-btn{
+  background:var(--bg3);border:1px solid var(--border);color:var(--text2);
+  padding:5px 14px;border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s;
+}
+.cam-btn:hover{color:var(--text);background:#30363d}
+.cam-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.cam-btn.off{opacity:.3;cursor:not-allowed}
+/* Toast */
+.toast{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:100;
+  background:var(--bg3);border:1px solid var(--border);padding:10px 20px;
+  border-radius:8px;font-size:13px;pointer-events:none;opacity:0;transition:opacity .3s;
+}
+.toast.show{opacity:1}
+.toast.err{color:var(--red);border-color:var(--red)}
+.toast.ok{color:var(--green);border-color:var(--green)}
+.hidden{display:none!important}
+/* Scroll */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+/* Mobile */
+@media(max-width:768px){
+  .app{flex-direction:column}
+  .sidebar{width:100%;max-height:28vh;border-right:none;border-bottom:1px solid var(--border)}
+  .sidebar-head{padding:8px 12px;font-size:13px}
+  .folder-tab{font-size:11px;padding:4px 6px}
+  .event-item{padding:6px 8px}
+  .event-item .time{font-size:11px}
+  .event-item .thumb{width:48px;height:28px}
+  .main{flex:1;min-height:0}
+  .video-area{min-height:180px}
+  .hud-canvas{transform:scale(.8);transform-origin:top left}
+  .controls{padding:4px 8px 2px}
+  .speed-curve{height:24px;margin:0 8px}
+  .btn{padding:4px 8px;font-size:11px}
+  .cam-btn{padding:4px 10px;font-size:11px}
+  .speed-sel{padding:3px 6px;font-size:11px}
+  .lbl-txt{display:none}
+  .btn.accent .lbl-txt{display:inline}
+  .toast{bottom:10px;font-size:11px;padding:8px 14px}
+}
+@media(max-width:400px){
+  .sidebar{max-height:22vh}
+  .video-area{min-height:140px}
+  .hud-canvas{transform:scale(.6)}
+  .btn{padding:3px 6px;font-size:10px}
+  .cam-btn{padding:3px 8px;font-size:10px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-head">🎬 Tesla Player <span style="font-size:10px;opacity:.4;margin-left:auto">v5</span></div>
+    <div class="folder-tabs">
+      {% for key, info in folders.items() %}
+      <button class="folder-tab {% if key == initial_folder %}active{% endif %}" data-folder="{{ key }}" onclick="switchFolder('{{ key }}')">{{ info.icon }} {{ info.desc }}</button>
+      {% endfor %}
+    </div>
+    <div class="event-list" id="eventList">
+      <div class="empty-state"><span style="font-size:32px;opacity:.4">📂</span><span>选择文件夹</span></div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="video-area" id="videoArea">
+      <video id="video" playsinline preload="auto" style="display:none"></video>
+      <canvas class="hud-canvas" id="hud"></canvas>
+    </div>
+    <div class="speed-curve" id="speedCurve"><canvas id="spdCanvas"></canvas></div>
+    <div class="controls hidden" id="controls">
+      <div class="progress-row">
+        <span class="time" id="tNow">00:00</span>
+        <div class="progress-bar" id="pBar" onclick="seekClick(event)"><div class="progress-fill" id="pFill" style="width:0"></div></div>
+        <span class="time" id="tEnd">00:00</span>
+      </div>
+      <div class="ctrl-row">
+        <button class="btn" onclick="seekRel(-10)"><span class="lbl">⏮</span><span class="lbl-txt">10s</span></button>
+        <button class="btn accent" id="ppBtn" onclick="togglePlay()">▶<span class="lbl-txt"> 播放</span></button>
+        <button class="btn" onclick="seekRel(10)"><span class="lbl">⏭</span><span class="lbl-txt">10s</span></button>
+        <select class="speed-sel" id="spdSel" onchange="setSpeed(this.value)">
+          <option value="0.5">0.5x</option><option value="0.75">0.75x</option>
+          <option value="1" selected>1x</option><option value="1.5">1.5x</option><option value="2">2x</option>
+        </select>
+        <button class="btn" onclick="takeShot()"><span class="lbl">📷</span><span class="lbl-txt">截图</span></button>
+        <button class="btn" onclick="doDownload()"><span class="lbl">⬇</span><span class="lbl-txt">下载</span></button>
+        <button class="btn" onclick="doClip()"><span class="lbl">✂</span><span class="lbl-txt">裁剪</span></button>
+      </div>
+    </div>
+    <div class="cam-bar hidden" id="camBar">
+      <button class="cam-btn" data-cam="front" onclick="switchCam('front')"><span class="lbl">⬆</span><span class="lbl-txt"> 前</span></button>
+      <button class="cam-btn" data-cam="back" onclick="switchCam('back')"><span class="lbl">⬇</span><span class="lbl-txt"> 后</span></button>
+      <button class="cam-btn" data-cam="left" onclick="switchCam('left')"><span class="lbl">⬅</span><span class="lbl-txt"> 左</span></button>
+      <button class="cam-btn" data-cam="right" onclick="switchCam('right')"><span class="lbl">➡</span><span class="lbl-txt"> 右</span></button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const VIDEO=v=document.getElementById(v),HUD=document.getElementById('hud'),HCTX=HUD.getContext('2d'),
+  SPC=document.getElementById('spdCanvas'),SPX=SPC.getContext('2d'),TOAST=document.getElementById('toast'),
+  PF=document.getElementById('pFill'),PB=document.getElementById('pBar'),
+  TN=document.getElementById('tNow'),TE=document.getElementById('tEnd'),
+  PPB=document.getElementById('ppBtn'),SPDSEL=document.getElementById('spdSel'),
+  CTL=document.getElementById('controls'),CBAR=document.getElementById('camBar'),
+  EL=document.getElementById('eventList');
+
+let S={folder:'{{ initial_folder }}',event:'{{ initial_event }}',cam:'front',cams:{},telem:null,events:[]};
+const FPS=30,TELEM_STEP=5;
+
+function $(id){return document.getElementById(id)}
+async function api(u,opts){const r=await fetch(u,opts);return r.json()}
+
+// Navigation
+async function switchFolder(f){
+  if(S.folder!==f){S.event='';S.cam='front'}
+  S.folder=f;
+  resetPlayer();
+  document.querySelectorAll('.folder-tab').forEach(t=>t.classList.toggle('active',t.dataset.folder===f));
+  await loadEvents()
+}
+async function loadEvents(){
+  EL.innerHTML='<div class="empty-state"><div class="spinner"></div>加载中...</div>';
+  try{
+    const d=await api('/api/player/events?folder='+S.folder);
+    if(!d||!d.success)throw new Error(d?.error||'API error');
+    S.events=d.events||[];renderEvents()
+  }catch(e){
+    EL.innerHTML='<div class="empty-state"><span style="font-size:32px;opacity:.4">❌</span><span>加载失败: '+e.message+'</span></div>'
+  }
+}
+function renderEvents(){
+  if(!S.events.length){EL.innerHTML='<div class="empty-state"><span style="font-size:32px;opacity:.4">🎬</span><span>无视频</span></div>';return}
+  EL.innerHTML=S.events.map(e=>{
+    const thumb=e.thumbnail?`<img class="thumb" src="${e.thumbnail}">`:'<div class="thumb"></div>';
+    return `<div class="event-item ${e.id===S.event?'active':''}" onclick="pickEvent('${e.id}')">
+      ${thumb}<div class="info"><div class="time">${e.timestamp||e.id}</div>
+      <div class="meta">${e.camera_count}📷${e.location?` · ${e.location}`:''}</div></div></div>`
+  }).join('')
+}
+async function pickEvent(id){
+  S.event=id;S.cam='front';resetPlayer();
+  document.querySelectorAll('.event-item').forEach(el=>{
+    el.classList.toggle('active',el.getAttribute('onclick')?.includes(id))
+  });
+  const d=await api('/api/player/event/'+S.folder+'/'+id);
+  S.cams=d.cameras||{};updateCamBar();
+  const first=Object.keys(S.cams)[0];
+  if(first)switchCam(first)
+}
+function updateCamBar(){
+  document.querySelectorAll('.cam-btn[data-cam]').forEach(b=>{
+    const c=b.dataset.cam;
+    b.classList.toggle('active',c===S.cam);
+    b.classList.toggle('off',!S.cams[c])
+  })
+}
+async function switchCam(c){
+  S.cam=c;resetPlayer();
+  const cd=S.cams[c];if(!cd)return toast('摄像头不可用','err');
+  VIDEO.src=cd.play_url;VIDEO.style.display='block';
+  CTL.classList.remove('hidden');CBAR.classList.remove('hidden');
+  updateCamBar();loadTelem()
+}
+async function loadTelem(){
+  S.telem=null;
+  const d=await api(`/api/player/telemetry/${S.folder}/${S.event}/${S.cam}`);
+  if(d.success&&d.available){S.telem=d;console.log('Telem:',d.frame_count,'frames')}
+}
+
+// HUD + Speed curve
+function resizeHUD(){
+  const r=document.getElementById('videoArea').getBoundingClientRect();
+  HUD.width=r.width;HUD.height=r.height;
+  SPC.width=SPC.parentElement.clientWidth;SPC.height=SPC.parentElement.clientHeight;
+}
+function startHUD(){
+  resizeHUD();window.addEventListener('resize',resizeHUD);
+  let lf=-1;
+  function draw(){
+    requestAnimationFrame(draw);
+    const w=HUD.width,h=HUD.height;HCTX.clearRect(0,0,w,h);
+    const m=Math.max(8,Math.floor(Math.min(w,h)/45));
+    // Always: video info overlay
+    HCTX.fillStyle='rgba(0,0,0,.6)';HCTX.fillRect(m,m,Math.min(260,w-m*2),44);
+    HCTX.fillStyle='#fff';HCTX.font=`bold ${m+3}px system-ui`;HCTX.textAlign='left';
+    HCTX.fillText([S.cam].join(''),m+8,m+16);
+    HCTX.fillStyle='rgba(255,255,255,.5)';HCTX.font=`${m+1}px system-ui`;
+    HCTX.fillText(`${S.event||''} · ${fmt(VIDEO.currentTime||0)}`,m+8,m+32);
+    // Telemetry overlay
+    const frames=S.telem?.frames;if(!frames||!frames.length)return;
+    const fi=Math.min(Math.floor(VIDEO.currentTime*FPS/TELEM_STEP),frames.length-1);
+    if(fi<0)return;const d=frames[fi];if(!d)return;
+    if(d._seq===lf)return;lf=d._seq;
+    const fs=Math.max(9,Math.min(15,w/55));
+    // Speed
+    const sp=d.speed_kmh||0,sx=m+55,sy=m+70;
+    HCTX.beginPath();HCTX.arc(sx,sy,35,0,Math.PI*2);
+    HCTX.strokeStyle='rgba(255,255,255,.18)';HCTX.lineWidth=3;HCTX.stroke();
+    HCTX.beginPath();
+    HCTX.arc(sx,sy,35,-Math.PI*.75,-Math.PI*.75+Math.min(sp/200,1)*Math.PI*1.5);
+    HCTX.strokeStyle=sp>120?'#f85149':'#58a6ff';HCTX.lineWidth=3.5;HCTX.stroke();
+    HCTX.fillStyle='#fff';HCTX.font=`bold ${fs+8}px system-ui`;HCTX.textAlign='center';
+    HCTX.fillText(Math.round(sp),sx,sy+4);
+    HCTX.font=`${fs-2}px system-ui`;HCTX.fillStyle='rgba(255,255,255,.4)';
+    HCTX.fillText('km/h',sx,sy+22);
+    // Gear
+    ['P','R','N','D'].forEach((g,i)=>{
+      HCTX.fillStyle=g===(d.gear_state||'P')?'#58a6ff':'rgba(255,255,255,.12)';
+      HCTX.font=`bold ${fs}px system-ui`;HCTX.textAlign='center';
+      HCTX.fillText(g,m+22+i*26,sy+52)
+    });
+    // AP
+    const ap=d.autopilot_state||'NONE';if(ap!=='NONE'){
+      const am={SELF_DRIVING:['FSD','#58a6ff'],AUTOSTEER:['AP','#3fb950'],TACC:['TACC','#888']};
+      const[lbl,clr]=am[ap]||[ap,'#888'];
+      HCTX.font=`bold ${fs}px system-ui`;HCTX.textAlign='right';
+      const tw=HCTX.measureText(lbl).width;
+      HCTX.fillStyle='rgba(0,0,0,.5)';HCTX.fillRect(w-m-tw-20,m,tw+24,fs+10);
+      HCTX.fillStyle=clr;HCTX.fillText(lbl,w-m-8,m+fs)
+    }
+    // Steering
+    const sa=d.steering_wheel_angle||0;
+    HCTX.fillStyle='rgba(255,255,255,.2)';HCTX.font=`${fs-2}px system-ui`;HCTX.textAlign='center';
+    HCTX.fillText(`↻ ${sa.toFixed(0)}°`,w/2,m+16);
+    // Blinkers
+    if(d.blinker_on_left||d.blinker_on_right){
+      if(Date.now()%1000<500){
+        HCTX.fillStyle='#d2991d';HCTX.font=`bold ${fs+4}px system-ui`;
+        if(d.blinker_on_left)HCTX.fillText('◀',m+60,sy+90);
+        if(d.blinker_on_right)HCTX.fillText('▶',w-m-60,sy+90)
+      }
+    }
+    // Brake
+    if(d.brake_applied){
+      HCTX.fillStyle='rgba(248,81,73,.4)';HCTX.beginPath();
+      HCTX.arc(w-m-25,h-m-35,12,0,Math.PI*2);HCTX.fill();
+      HCTX.fillStyle='#fff';HCTX.font=`bold ${fs-2}px system-ui`;HCTX.textAlign='center';
+      HCTX.fillText('●',w-m-25,h-m-15)
+    }
+    // GPS bottom
+    if(d.latitude_deg&&d.longitude_deg){
+      HCTX.fillStyle='rgba(255,255,255,.35)';HCTX.font=`${fs-3}px monospace`;HCTX.textAlign='left';
+      HCTX.fillText(`${d.latitude_deg.toFixed(4)}° ${d.longitude_deg.toFixed(4)}°`,m,h-m-8)
+    }
+    // Speed curve
+    drawSpeedCurve(frames)
+  }
+  requestAnimationFrame(draw)
+}
+function drawSpeedCurve(frames){
+  const w=SPC.width,h=SPC.height;if(!w||!h||!frames.length)return;
+  SPX.clearRect(0,0,w,h);
+  const dur=VIDEO.duration||60,pxPerSec=w/dur;
+  // Background grid
+  SPX.strokeStyle='rgba(255,255,255,.06)';SPX.lineWidth=1;
+  for(let i=0;i<w;i+=pxPerSec*10)SPX.stroke(new Path2D(`M${i}0 L${i}${h}`));
+  for(let sp=0;sp<=200;sp+=50){
+    const y=h-(sp/200)*h+4;
+    SPX.fillStyle='rgba(255,255,255,.15)';SPX.font='9px system-ui';SPX.textAlign='right';
+    SPX.fillText(sp,22,y+3)
+  }
+  // Playhead
+  const px=VIDEO.currentTime*pxPerSec;
+  SPX.strokeStyle='rgba(255,255,255,.3)';SPX.lineWidth=1;
+  SPX.stroke(new Path2D(`M${px}0 L${px}${h}`));
+  // Speed line
+  const pts=[];const step=TELEM_STEP/FPS;
+  for(let i=0;i<frames.length;i++){
+    const t=i*step;if(t>dur)break;
+    const sp=frames[i].speed_kmh||0;
+    pts.push({x:t*pxPerSec,y:h-(sp/200)*h+4})
+  }
+  if(pts.length<2)return;
+  SPX.beginPath();SPX.moveTo(pts[0].x,pts[0].y);
+  for(let i=1;i<pts.length;i++)SPX.lineTo(pts[i].x,pts[i].y);
+  SPX.strokeStyle='#58a6ff';SPX.lineWidth=1.5;SPX.stroke();
+  // Fill below
+  SPX.lineTo(pts[pts.length-1].x,h);SPX.lineTo(pts[0].x,h);SPX.closePath();
+  SPX.fillStyle='rgba(88,166,255,.08)';SPX.fill()
+}
+
+// Video controls
+function togglePlay(){VIDEO.paused?VIDEO.play():(VIDEO.pause())}
+function seekRel(s){VIDEO.currentTime=Math.max(0,Math.min(VIDEO.duration||0,VIDEO.currentTime+s))}
+function seekClick(e){const r=PB.getBoundingClientRect();VIDEO.currentTime=((e.clientX-r.left)/r.width)*(VIDEO.duration||0)}
+function setSpeed(v){VIDEO.playbackRate=parseFloat(v)}
+function fmt(s){if(!isFinite(s))return'00:00';const m=Math.floor(s/60),sec=Math.floor(s%60);return String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0')}
+VIDEO.addEventListener('loadedmetadata',()=>{TE.textContent=fmt(VIDEO.duration);resizeHUD()});
+VIDEO.addEventListener('timeupdate',()=>{
+  if(!VIDEO.duration)return;
+  PF.style.width=(VIDEO.currentTime/VIDEO.duration*100)+'%';
+  TN.textContent=fmt(VIDEO.currentTime)
+});
+VIDEO.addEventListener('play',()=>PPB.innerHTML='⏸<span class="lbl-txt"> 暂停</span>');
+VIDEO.addEventListener('pause',()=>PPB.innerHTML='▶<span class="lbl-txt"> 播放</span>');
+VIDEO.addEventListener('ended',()=>PPB.innerHTML='▶<span class="lbl-txt"> 播放</span>');
+
+// Actions
+async function takeShot(){
+  if(!S.event)return toast('请先选择事件','err');
+  toast('截图生成中...');
+  const d=await api('/api/player/screenshot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:S.folder,event_id:S.event,camera:S.cam,time_offset:VIDEO.currentTime})});
+  if(d.success)await pollTask(d.task_id,'截图')
+}
+async function doClip(){
+  if(!S.event)return toast('请先选择事件','err');
+  toast('裁剪中...');
+  const d=await api('/api/player/extract-clip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:S.folder,event_id:S.event,camera:S.cam,key_offset:VIDEO.currentTime})});
+  if(d.success)await pollTask(d.task_id,'裁剪')
+}
+async function pollTask(tid,label){
+  for(let i=0;i<30;i++){
+    await new Promise(r=>setTimeout(r,2000));
+    const d=await api('/api/player/task/'+tid);
+    if(d.status==='done'){toast(label+'完成 ✓','ok');const a=document.createElement('a');a.href=d.result_url;a.click();return}
+    if(d.status==='error'){toast(label+'失败: '+(d.error||''),'err');return}
+  }
+  toast(label+'超时','err')
+}
+function doDownload(){if(VIDEO.src){const a=document.createElement('a');a.href=VIDEO.src;a.click()}}
+
+// Keyboard
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
+  switch(e.key){
+    case' ':e.preventDefault();togglePlay();break;
+    case'ArrowLeft':e.preventDefault();seekRel(-10);break;
+    case'ArrowRight':e.preventDefault();seekRel(10);break;
+    case'1':switchCam('front');break;case'2':switchCam('back');break;
+    case'3':switchCam('left');break;case'4':switchCam('right');break;
+    case'f':case'F':takeShot();break;
+    case'd':case'D':doDownload();break;
+    case'c':case'C':doClip();break;
+  }
+});
+
+// Helpers
+function resetPlayer(){
+  VIDEO.pause();VIDEO.src='';VIDEO.style.display='none';
+  PF.style.width='0';TN.textContent='00:00';TE.textContent='00:00';
+  PPB.innerHTML='▶<span class="lbl-txt"> 播放</span>';S.telem=null;
+  CTL.classList.add('hidden');CBAR.classList.add('hidden');
+}
+function toast(msg,type){
+  const t=TOAST;t.textContent=msg;t.className='toast show '+(type||'');
+  clearTimeout(t._tid);t._tid=setTimeout(()=>t.className='toast',2500)
+}
+
+// Init
+(function(){
+  resizeHUD();startHUD();
+  switchFolder(S.folder).then(()=>{
+    if(S.event)pickEvent(S.event)
+  });
+})()
+</script>
+</body>
+</html>

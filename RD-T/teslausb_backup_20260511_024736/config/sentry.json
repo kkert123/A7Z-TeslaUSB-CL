@@ -1,0 +1,23 @@
+{
+  "sentry_clips_path": "/media/cnlvan/cam/TeslaCam/SentryClips",
+  "state_file": "/opt/teslausb-web/data/sentry_events.json",
+  "home_delay_minutes": 30,
+  "away_confirm_timeout_minutes": 30,
+  "scan_interval_seconds": 10,
+  "wecom_webhook_url": "",
+  "teslamate_url": "http://100.111.252.121:7777",
+  "home_location": "家",
+  "home_wifi_ssids": [
+    "CD"
+  ],
+  "hotspot_ssids": [
+    "van1"
+  ],
+  "wifi_interface": "wlan0",
+  "nas_base_path": "/mnt/nas/TeslaSentry",
+  "preview_enabled": true,
+  "watermark_enabled": true,
+  "debug": false,
+  "wecom_sentry_webhook_key": "c761ee36-87cb-425f-bc34-d07f29e952ae",
+  "wecom_status_webhook_key": "30885751-322d-423f-92b3-3140e60005da"
+}

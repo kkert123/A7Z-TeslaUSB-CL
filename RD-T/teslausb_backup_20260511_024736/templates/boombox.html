@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+{% block title %}— Boombox 音频{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>🔊 Boombox 音频管理</h2>
+  <span class="timestamp" id="lastUpdate">{{ now }}</span>
+</div>
+
+<div class="info-box">
+  <p>💡 Boombox 功能允许您的 Tesla 播放自定义音频文件。支持的格式：MP3, WAV, M4A</p>
+</div>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<!-- 上传区域 -->
+<div class="section">
+  <h3>上传音频文件</h3>
+  <div class="upload-area" id="uploadArea">
+    <div class="upload-icon">📁</div>
+    <div class="upload-text">
+      <strong>点击选择文件</strong> 或将文件拖拽到此处
+    </div>
+    <div class="upload-hint">支持格式：MP3, WAV, M4A</div>
+    <input type="file" id="fileInput" accept=".mp3,.wav,.m4a,audio/*" style="display:none" multiple>
+  </div>
+  <div class="upload-progress" id="uploadProgress" style="display:none">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+    </div>
+    <div class="progress-text" id="progressText">上传中... 0%</div>
+  </div>
+</div>
+
+<!-- 文件列表 -->
+<div class="section">
+  <h3>音频文件列表 <span class="refresh-hint" id="countHint">{{ files|length }} 个文件</span></h3>
+  
+  {% if files %}
+  <div class="file-grid" id="fileGrid">
+    {% for file in files %}
+    <div class="file-card" data-filename="{{ file.filename }}" data-folder="{{ file.folder }}">
+      <div class="file-icon">🎵</div>
+      <div class="file-info">
+        <div class="file-name" title="{{ file.filename }}">{{ file.filename }}</div>
+        <div class="file-meta">
+          <span>📁 {{ file.folder or '根目录' }}</span>
+          <span>💾 {{ file.size }}</span>
+          <span>📅 {{ file.modified }}</span>
+        </div>
+      </div>
+      <div class="file-actions">
+        <button class="btn btn-danger btn-sm" onclick="confirmDelete('{{ file.filename }}', '{{ file.folder or '' }}')">
+          🗑️ 删除
+        </button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">🎵</div>
+    <h3>暂无音频文件</h3>
+    <p>点击上方上传区域添加 Boombox 音频文件</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let deleteFilename = null;
+let deleteFolder = null;
+
+// 上传区域交互
+const uploadArea = document.getElementById('uploadArea');
+const fileInput = document.getElementById('fileInput');
+
+uploadArea.addEventListener('click', () => fileInput.click());
+
+uploadArea.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  uploadArea.classList.add('dragover');
+});
+
+uploadArea.addEventListener('dragleave', () => {
+  uploadArea.classList.remove('dragover');
+});
+
+uploadArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadArea.classList.remove('dragover');
+  const files = e.dataTransfer.files;
+  handleFiles(files);
+});
+
+fileInput.addEventListener('change', (e) => {
+  handleFiles(e.target.files);
+});
+
+// 处理文件上传
+async function handleFiles(files) {
+  if (!files.length) return;
+  
+  const formData = new FormData();
+  for (let i = 0; i < files.length; i++) {
+    formData.append('file', files[i]);
+    formData.append('folder', '');
+  }
+  
+  showProgress(0);
+  
+  try {
+    const response = await fetch('/media/api/boombox/upload', {
+      method: 'POST',
+      body: formData
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+      showProgress(100, '上传成功！');
+      setTimeout(() => location.reload(), 1000);
+    } else {
+      showProgress(0, '上传失败：' + result.error, true);
+    }
+  } catch (error) {
+    showProgress(0, '请求失败：' + error.message, true);
+  }
+}
+
+// 显示上传进度
+function showProgress(percent, text, isError = false) {
+  const progressEl = document.getElementById('uploadProgress');
+  const fillEl = document.getElementById('progressFill');
+  const textEl = document.getElementById('progressText');
+  
+  progressEl.style.display = 'block';
+  fillEl.style.width = percent + '%';
+  
+  if (text) {
+    textEl.textContent = text;
+    if (isError) {
+      fillEl.className = 'progress-fill progress-err';
+    } else {
+      fillEl.className = 'progress-fill';
+    }
+  } else {
+    textEl.textContent = '上传中... ' + percent + '%';
+  }
+}
+
+// 删除确认
+function confirmDelete(filename, folder) {
+  deleteFilename = filename;
+  deleteFolder = folder;
+  
+  if (!confirm('确定要删除 "' + filename + '" 吗？此操作不可恢复。')) return;
+  
+  doDelete();
+}
+
+// 执行删除
+async function doDelete() {
+  try {
+    const response = await fetch('/media/api/boombox/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        filename: deleteFilename,
+        folder: deleteFolder
+      })
+    });
+    
+    const result = await response.json();
+    
+    if (result.success) {
+      showToast('删除成功', false);
+      setTimeout(() => location.reload(), 1000);
+    } else {
+      showToast('删除失败：' + result.error, true);
+    }
+  } catch (error) {
+    showToast('请求失败：' + error.message, true);
+  }
+}
+
+// Toast 通知
+function showToast(message, isError = false) {
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + (isError ? 'error' : '');
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  
+  setTimeout(() => {
+    toast.classList.add('show');
+  }, 10);
+  
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
+}
+</script>
+
+<style>
+.info-box {
+  background: #1f2d4d;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+
+.upload-area {
+  background: #1f2d4d;
+  border: 2px dashed #2a2a4a;
+  border-radius: 12px;
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.upload-area:hover {
+  border-color: #e94560;
+  background: #16213e;
+}
+
+.upload-area.dragover {
+  border-color: #e94560;
+  background: #16213e;
+}
+
+.upload-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.upload-text {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.upload-hint {
+  font-size: 13px;
+  color: #888;
+}
+
+.upload-progress {
+  margin-top: 16px;
+  padding: 16px;
+  background: #1f2d4d;
+  border-radius: 8px;
+}
+
+.progress-text {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 14px;
+  color: #888;
+}
+
+.file-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: #1f2d4d;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  transition: all 0.2s;
+}
+
+.file-card:hover {
+  border-color: #e94560;
+  transform: translateY(-2px);
+}
+
+.file-icon {
+  font-size: 32px;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  font-weight: 500;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: #888;
+}
+
+.file-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: #666;
+}
+
+.empty-icon {
+  font-size: 64px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.empty-state h3 {
+  font-size: 18px;
+  margin-bottom: 8px;
+  color: #888;
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #28a745;
+  color: #fff;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  z-index: 1001;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+
+.toast.show {
+  opacity: 1;
+}
+
+.toast.error {
+  background: #dc3545;
+}
+</style>
+{% endblock %}

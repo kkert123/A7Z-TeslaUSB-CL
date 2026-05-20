@@ -1,0 +1,325 @@
+#!/bin/bash
+
+# WiFi智能切换脚本（两阶段检测优化版 v2.0）
+# 用法：
+#   wifi_smart_switch.sh --quick  # 快速检测（每2分钟）
+#   wifi_smart_switch.sh --full   # 完整检测（每5分钟）
+
+# WiFi优先级配置（数值越高优先级越高）
+declare -A WIFI_PRIORITY=(
+    ["CD"]=400
+    ["C12345"]=300
+    ["HP-00J6O"]=200
+    ["C123"]=100
+    ["189-AP"]=50
+)
+
+# 日志文件
+LOG_FILE="/var/log/wifi-smart-switch.log"
+
+# 锁文件（防止并发执行）
+LOCK_FILE="/var/run/wifi-smart-switch.lock"
+
+# 状态文件（记录上次切换时间）
+STATE_FILE="/var/run/wifi-smart-switch.state"
+
+# 切换冷却时间（秒），避免频繁切换
+SWITCH_COOLDOWN=300  # 5分钟
+
+# 记录日志（带日志轮转）
+log_message() {
+    local message="$1"
+    
+    # 日志轮转：超过1MB时备份
+    if [ -f "$LOG_FILE" ]; then
+        local log_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+        if [ "$log_size" -gt 1048576 ]; then
+            mv "$LOG_FILE" "${LOG_FILE}.old"
+            touch "$LOG_FILE"
+        fi
+    fi
+    
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
+}
+
+# 获取上次切换时间
+get_last_switch_time() {
+    if [ -f "$STATE_FILE" ]; then
+        cat "$STATE_FILE" 2>/dev/null
+    else
+        echo "0"
+    fi
+}
+
+# 更新切换时间
+set_last_switch_time() {
+    date +%s > "$STATE_FILE"
+}
+
+# 检查是否可以切换（冷却时间检查）
+can_switch() {
+    local last_switch=$(get_last_switch_time)
+    local current_time=$(date +%s)
+    local time_diff=$((current_time - last_switch))
+    
+    if [ "$time_diff" -lt "$SWITCH_COOLDOWN" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# 获取当前连接的WiFi
+get_current_wifi() {
+    local wifi=$(nmcli -t -f DEVICE,STATE,CONNECTION device status | grep '^wlan0:connected:' | cut -d':' -f3)
+    if [ -z "$wifi" ]; then
+        wifi=$(nmcli -t -f SSID,ACTIVE device wifi | grep ':yes$' | cut -d':' -f1)
+    fi
+    if [ -z "$wifi" ] && command -v iwgetid &> /dev/null; then
+        wifi=$(iwgetid -r)
+    fi
+    echo "$wifi"
+}
+
+# 检测网络连通性（优化：并行检测）
+check_wifi_connection() {
+    local ping_success=0
+    local pids=()
+    
+    # 并行 ping 检测（提高效率）
+    for target in "12.127.12.8" "12.127.12.245" "baidu.com"; do
+        (ping -c 2 -W 3 "$target" > /dev/null 2>&1 && echo "success_$target") &
+        pids+=($!)
+    done
+    
+    # 等待任意一个成功（最多等待4秒）
+    for i in {1..40}; do
+        for pid in "${pids[@]}"; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                # 进程已结束，检查是否成功
+                wait "$pid" 2>/dev/null && ping_success=1 && break 2
+            fi
+        done
+        sleep 0.1
+    done
+    
+    # 杀死未完成的 ping 进程
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null
+    done
+    
+    if [ $ping_success -eq 1 ]; then
+        log_message "连通性检测成功"
+        echo "true"
+        return 0
+    else
+        log_message "所有检测目标都无法ping通"
+        echo "false"
+        return 1
+    fi
+}
+
+# 获取可用的WiFi列表（按优先级排序，包含信号强度）
+get_available_wifis() {
+    local available_wifis=()
+    
+    while read -r line; do
+        [ -z "$line" ] && continue
+        
+        # 解析SSID和信号强度
+        local ssid=$(echo "$line" | cut -d':' -f1)
+        local signal=$(echo "$line" | cut -d':' -f2)
+        
+        [ -z "$ssid" ] && continue
+        ssid=$(echo "$ssid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # 只添加配置了优先级的WiFi
+        if [ -n "${WIFI_PRIORITY[$ssid]}" ]; then
+            available_wifis+=("$ssid:$signal")
+        fi
+    done < <(nmcli -t -f SSID,SIGNAL device wifi list | grep -v '^--' | grep -v '^:' | sort -u)
+    
+    # 按优先级排序（数值越高越优先），同时考虑信号强度
+    for item in "${available_wifis[@]}"; do
+        local ssid=$(echo "$item" | cut -d':' -f1)
+        local signal=$(echo "$item" | cut -d':' -f2)
+        echo "${WIFI_PRIORITY[$ssid]}:$signal:$ssid"
+    done | sort -t':' -k1 -rn -k2 -rn | cut -d':' -f3-
+}
+
+# 切换到指定的WiFi（带重试机制）
+switch_to_wifi() {
+    local target_wifi="$1"
+    local max_retries=3
+    local retry_count=0
+    
+    # 检查冷却时间
+    if ! can_switch; then
+        local last_switch=$(get_last_switch_time)
+        local current_time=$(date +%s)
+        local remaining=$((SWITCH_COOLDOWN - (current_time - last_switch)))
+        log_message "切换冷却中，还需等待 ${remaining} 秒"
+        return 1
+    fi
+    
+    log_message "正在切换到WiFi: $target_wifi"
+    nmcli device disconnect wlan0 2>/dev/null
+    sleep 2
+    
+    # 重试循环
+    while [ $retry_count -lt $max_retries ]; do
+        if nmcli device wifi connect "$target_wifi" 2>&1; then
+            log_message "成功切换到WiFi: $target_wifi"
+            # 记录切换时间
+            set_last_switch_time
+            return 0
+        else
+            retry_count=$((retry_count + 1))
+            log_message "切换失败，重试 ($retry_count/$max_retries)"
+            sleep 2
+        fi
+    done
+    
+    log_message "切换失败: $target_wifi (已重试 $max_retries 次)"
+    return 1
+}
+
+# 快速检测模式（每2分钟）
+quick_check() {
+    log_message "========================================"
+    log_message "开始快速检测..."
+    
+    local current_wifi=$(get_current_wifi)
+    log_message "当前WiFi: '$current_wifi'"
+    
+    local is_connected=$(check_wifi_connection)
+    local failure_count_file="/var/run/wifi-failure-count"
+    
+    if [ "$is_connected" = "true" ]; then
+        log_message "网络连通正常，无需进一步检测"
+        # 重置失败计数器
+        rm -f "$failure_count_file"
+        log_message "快速检测完成"
+        log_message "========================================"
+        return 0
+    else
+        # 增加失败计数
+        local failure_count=0
+        if [ -f "$failure_count_file" ]; then
+            failure_count=$(cat "$failure_count_file")
+        fi
+        failure_count=$((failure_count + 1))
+        echo "$failure_count" > "$failure_count_file"
+        
+        log_message "网络不通（连续失败 $failure_count 次）"
+        
+        # 只有连续失败2次才触发完整检测
+        if [ $failure_count -ge 2 ]; then
+            log_message "触发完整检测"
+            log_message "========================================"
+            full_check
+        else
+            log_message "等待下次检测确认"
+            log_message "========================================"
+        fi
+    fi
+}
+
+# 完整检测模式（每5分钟）
+full_check() {
+    log_message "========================================"
+    log_message "开始完整检测..."
+    
+    local current_wifi=$(get_current_wifi)
+    log_message "当前WiFi: '$current_wifi'"
+    
+    local is_connected=$(check_wifi_connection)
+    log_message "网络连通性: $is_connected"
+    
+    # 信号强度阈值（低于此值不切换，避免连接到信号很弱的WiFi）
+    local SIGNAL_THRESHOLD=30
+    
+    if [ "$is_connected" = "true" ]; then
+        log_message "网络连通正常"
+        local available_wifis=$(get_available_wifis)
+        log_message "可用WiFi: $(echo $available_wifis | cut -d':' -f3-)"
+        
+        for item in $available_wifis; do
+            local wifi=$(echo "$item" | cut -d':' -f3-)
+            local signal=$(echo "$item" | cut -d':' -f2)
+            local priority=$(echo "$item" | cut -d':' -f1)
+            
+            if [ -n "${WIFI_PRIORITY[$wifi]}" ] && [ -n "${WIFI_PRIORITY[$current_wifi]}" ]; then
+                if [ "$priority" -gt "${WIFI_PRIORITY[$current_wifi]}" ]; then
+                    # 检查信号强度
+                    if [ "$signal" -lt "$SIGNAL_THRESHOLD" ]; then
+                        log_message "WiFi $wifi 优先级更高但信号较弱 ($signal < $SIGNAL_THRESHOLD)，跳过"
+                        continue
+                    fi
+                    log_message "发现更高优先级WiFi: $wifi (优先级:$priority > ${WIFI_PRIORITY[$current_wifi]}, 信号:$signal)"
+                    switch_to_wifi "$wifi"
+                    break
+                fi
+            fi
+        done
+    else
+        log_message "网络不通，尝试重新连接..."
+        local available_wifis=$(get_available_wifis)
+        log_message "可用WiFi: $(echo $available_wifis | cut -d':' -f3-)"
+        
+        for item in $available_wifis; do
+            local wifi=$(echo "$item" | cut -d':' -f3-)
+            local signal=$(echo "$item" | cut -d':' -f2)
+            
+            if [ -n "${WIFI_PRIORITY[$wifi]}" ]; then
+                # 重连时也检查信号强度
+                if [ "$signal" -lt "$SIGNAL_THRESHOLD" ]; then
+                    log_message "WiFi $wifi 信号较弱 ($signal < $SIGNAL_THRESHOLD)，跳过"
+                    continue
+                fi
+                log_message "尝试连接到: $wifi (优先级: ${WIFI_PRIORITY[$wifi]}, 信号:$signal)"
+                if nmcli device wifi connect "$wifi"; then
+                    log_message "成功连接到: $wifi"
+                    break
+                fi
+            fi
+        done
+    fi
+    
+    log_message "完整检测完成"
+    log_message "========================================"
+}
+
+# 主函数
+main() {
+    # 检查是否已有实例运行
+    if [ -f "$LOCK_FILE" ]; then
+        local pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+            log_message "脚本已在运行 (PID: $pid)，退出"
+            exit 1
+        fi
+    fi
+    
+    # 创建锁文件
+    echo $$ > "$LOCK_FILE"
+    
+    # 确保脚本退出时删除锁文件
+    trap "rm -f $LOCK_FILE" EXIT
+    
+    # 根据参数选择运行模式
+    case "$1" in
+        --quick)
+            quick_check
+            ;;
+        --full)
+            full_check
+            ;;
+        *)
+            # 默认执行完整检测
+            full_check
+            ;;
+    esac
+}
+
+# 执行主函数
+main "$@"

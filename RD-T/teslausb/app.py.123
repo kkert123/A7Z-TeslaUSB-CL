@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+from flask import Flask, render_template, request, jsonify
+from datetime import datetime
+import os
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return render_template('dashboard.html',
+        service={'active': True, 'uptime': 'N/A'},
+        sys_stats={'cpu_percent': 0, 'cpu_temp': None, 'cpu_temp_min': None, 'cpu_temp_avg': None, 'cpu_temp_max': None, 'mem_used_mb': 0, 'mem_total_mb': 1, 'mem_percent': 0, 'swap_used_mb': 0, 'swap_total_mb': 0, 'load_1min': 0, 'load_5min': 0, 'load_15min': 0},
+        wifi={'connected': False, 'ssid': 'N/A', 'signal': None},
+        ip_info={'local': 'N/A', 'tailscale': 'N/A'},
+        disk_total=None,
+        disk={},
+        now=datetime.now().strftime("%H:%M:%S"),
+        fmt_bytes=lambda b: f"{b/1024/1024:.2f} MB" if b else "0 MB"
+    )
+
+@app.route('/api/system/stats')
+def api_stats():
+    return jsonify({'success': True, 'time': datetime.now().strftime("%H:%M:%S")})
+
+@app.route('/sentry')
+def sentry(): return render_template('sentry.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/videos')
+def videos(): return render_template('videos.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/upload')
+def upload(): return render_template('upload_progress.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/wifi')
+def wifi(): return render_template('wifi.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/media')
+def media(): return render_template('media.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/logs')
+def logs(): return render_template('logs.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/analytics')
+def analytics(): return render_template('analytics.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/system')
+def system(): return render_template('system.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/boombox')
+def boombox(): return render_template('boombox.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/lightshow')
+def lightshow(): return render_template('lightshow.html', now=datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/wraps')
+def wraps(): return render_template('wraps.html', now=datetime.now().strftime("%H:%M:%S"))
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+# 添加缺失的页面路由
+@app.route('/sentry')
+def sentry_page():
+    return render_template('sentry.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/videos')
+def videos_page():
+    return render_template('videos.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/upload')
+def upload_page():
+    return render_template('upload_progress.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/wifi')
+def wifi_page():
+    return render_template('wifi.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/logs')
+def logs_page():
+    return render_template('logs.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/boombox')
+def boombox_page():
+    return render_template('boombox.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/lightshow')
+def lightshow_page():
+    return render_template('lightshow.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+@app.route('/wraps')
+def wraps_page():
+    return render_template('wraps.html', now=datetime.datetime.now().strftime("%H:%M:%S"))
+
+# 添加 API：系统统计
+@app.route('/api/system/stats')
+def api_system_stats():
+    return jsonify({'success': True, 'time': datetime.datetime.now().strftime("%H:%M:%S")})
+
+# 添加 API：模式切换
+MODE_FILE = '/opt/teslausb-web/data/mode.txt'
+
+@app.route('/api/mode/status')
+def api_mode_status():
+    try:
+        mode = 'present'
+        if os.path.exists(MODE_FILE):
+            with open(MODE_FILE, 'r') as f:
+                mode = f.read().strip()
+        return jsonify({'success': True, 'mode': mode})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/mode/switch', methods=['POST'])
+def api_mode_switch():
+    try:
+        data = request.get_json()
+        new_mode = data.get('mode', 'present')
+        
+        if new_mode not in ['present', 'edit']:
+            return jsonify({'success': False, 'error': 'Invalid mode'}), 400
+        
+        os.makedirs(os.path.dirname(MODE_FILE), exist_ok=True)
+        with open(MODE_FILE, 'w') as f:
+            f.write(new_mode)
+        
+        return jsonify({'success': True, 'mode': new_mode})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500

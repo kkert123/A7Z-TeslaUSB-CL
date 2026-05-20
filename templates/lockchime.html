@@ -1,0 +1,549 @@
+{% extends "base.html" %}
+{% block title %}— Lock Chime{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>🔔 Lock Chime 管理</h2>
+  <span class="timestamp" id="lastUpdate">{{ now }}</span>
+</div>
+
+<div class="info-box">
+  <p>💡 Lock Chime 是 Tesla 锁车/解锁时的自定义音效。将 WAV 文件上传后点击"激活"，系统会自动将其作为 <code>LockChime.wav</code> 放置到 Boombox 分区根目录。</p>
+  <p>📁 文件位置：<code>/mnt/boombox/LockChime.wav</code></p>
+</div>
+
+<!-- 当前状态卡片 -->
+<div class="status-cards" id="statusCards">
+  <div class="status-card" id="activeCard">
+    <div class="card-label">当前激活</div>
+    <div class="card-value" id="activeName">
+      {% if current_chime.active %}
+      🟢 LockChime.wav
+      {% else %}
+      ⚪ 未设置
+      {% endif %}
+    </div>
+    <div class="card-meta" id="activeMeta">
+      {% if current_chime.active %}
+      {{ current_chime.size }} · {{ current_chime.modified }}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="status-card" id="holidayCard">
+    <div class="card-label">节日状态</div>
+    <div class="card-value" id="holidayName">
+      {% if holiday_chime.in_holiday %}
+      🎉 {{ holiday_chime.label }}
+      {% else %}
+      📅 无节日
+      {% endif %}
+    </div>
+    <div class="card-meta" id="holidayMeta">
+      {% if holiday_chime.in_holiday %}
+      推荐音效: {{ holiday_chime.filename }}
+      {% if holiday_chime.exists %} ✅ 已就绪{% else %} ❌ 未上传{% endif %}
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if holiday_chime.in_holiday %}
+<div class="holiday-banner" id="holidayBanner">
+  <span>🎉 当前处于「{{ holiday_chime.label }}」节日期间</span>
+  <button class="btn btn-accent btn-sm" id="holidayApplyBtn" onclick="applyHoliday()">
+    🔄 切换为节日音效
+  </button>
+</div>
+{% endif %}
+
+<!-- 上传区域 -->
+<div class="section">
+  <h3>上传音效文件</h3>
+  <div class="upload-area" id="uploadArea">
+    <div class="upload-icon">🎵</div>
+    <div class="upload-text">
+      <strong>点击选择文件</strong> 或将文件拖拽到此处
+    </div>
+    <div class="upload-hint">仅支持 WAV 格式，Tesla 要求单声道 16bit 48kHz</div>
+    <input type="file" id="fileInput" accept=".wav,audio/wav" style="display:none">
+  </div>
+  <div class="upload-progress" id="uploadProgress" style="display:none">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+    </div>
+    <div class="progress-text" id="progressText">上传中...</div>
+  </div>
+</div>
+
+<!-- 音效列表 -->
+<div class="section">
+  <h3>可用音效 <span class="refresh-hint" id="countHint"></span></h3>
+  
+  <div class="file-grid" id="fileGrid">
+    <div class="empty-state" id="emptyState">
+      <div class="empty-icon">🔔</div>
+      <h3>暂无音效文件</h3>
+      <p>点击上方上传区域添加 Lock Chime 音效</p>
+    </div>
+  </div>
+</div>
+
+<!-- 节日配置参考 -->
+<div class="section">
+  <h3>📅 节日自动切换规则</h3>
+  <div class="holiday-table" id="holidayTable">
+    <div class="holiday-row holiday-header">
+      <span>节日</span><span>日期范围</span><span>文件名</span>
+    </div>
+  </div>
+  <p class="hint-text">💡 手动点击「切换为节日音效」即可应用。自动切换功能通过 cron timer 实现。</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const uploadArea = document.getElementById('uploadArea');
+const fileInput = document.getElementById('fileInput');
+
+// ── 初始化 ──
+document.addEventListener('DOMContentLoaded', loadList);
+
+async function loadList() {
+  try {
+    const resp = await fetch('/api/lockchime/list');
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.error);
+    renderList(data);
+    renderStatus(data);
+    renderHolidays(data.holidays || []);
+  } catch (e) {
+    console.error('加载列表失败:', e);
+    document.getElementById('fileGrid').innerHTML = 
+      '<div class="empty-state"><h3>⚠️ 加载失败</h3><p>' + e.message + '</p></div>';
+  }
+}
+
+function renderList(data) {
+  const files = data.files || [];
+  const grid = document.getElementById('fileGrid');
+  document.getElementById('countHint').textContent = files.length + ' 个文件';
+
+  if (files.length === 0) {
+    grid.innerHTML = `<div class="empty-state" id="emptyState">
+      <div class="empty-icon">🔔</div>
+      <h3>暂无音效文件</h3>
+      <p>点击上方上传区域添加 Lock Chime 音效</p>
+    </div>`;
+    return;
+  }
+
+  grid.innerHTML = files.map(f => `
+    <div class="file-card" data-filename="${f.filename}">
+      <div class="file-icon">${f.active ? '🟢' : '🎵'}</div>
+      <div class="file-info">
+        <div class="file-name" title="${f.filename}">
+          ${f.filename}
+          ${f.active ? '<span class="badge badge-active">ACTIVE</span>' : ''}
+        </div>
+        <div class="file-meta">
+          <span>💾 ${f.size}</span>
+          <span>📅 ${f.modified}</span>
+        </div>
+      </div>
+      <div class="file-actions">
+        ${!f.active ? `<button class="btn btn-accent btn-sm" onclick="activateChime('${f.filename}')">▶ 激活</button>` : ''}
+        <button class="btn btn-danger btn-sm" onclick="confirmDelete('${f.filename}')">🗑️ 删除</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderStatus(data) {
+  const active = data.active || {};
+  const holiday = data.holiday || {};
+
+  if (active.active) {
+    document.getElementById('activeName').textContent = '🟢 LockChime.wav';
+    document.getElementById('activeMeta').textContent = active.size + ' · ' + active.modified;
+  } else {
+    document.getElementById('activeName').textContent = '⚪ 未设置';
+    document.getElementById('activeMeta').textContent = '';
+  }
+
+  if (holiday.in_holiday) {
+    document.getElementById('holidayName').textContent = '🎉 ' + holiday.label;
+    document.getElementById('holidayMeta').textContent = 
+      '推荐音效: ' + holiday.filename + (holiday.exists ? ' ✅ 已就绪' : ' ❌ 未上传');
+  } else {
+    document.getElementById('holidayName').textContent = '📅 无节日';
+    document.getElementById('holidayMeta').textContent = '';
+  }
+}
+
+function renderHolidays(holidays) {
+  const table = document.getElementById('holidayTable');
+  holidays.forEach(h => {
+    const row = document.createElement('div');
+    row.className = 'holiday-row';
+    row.innerHTML = `<span>${h.label}</span><span>${h.start} ~ ${h.end}</span><span><code>${h.filename}</code></span>`;
+    table.appendChild(row);
+  });
+}
+
+// ── 上传 ──
+uploadArea.addEventListener('click', () => fileInput.click());
+uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+uploadArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadArea.classList.remove('dragover');
+  handleUpload(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', (e) => handleUpload(e.target.files));
+
+async function handleUpload(files) {
+  if (!files.length) return;
+  const fd = new FormData();
+  fd.append('file', files[0]);
+  showProgress(30, '上传中...');
+
+  try {
+    const resp = await fetch('/api/lockchime/upload', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (data.success) {
+      showProgress(100, '上传成功！');
+      setTimeout(() => { hideProgress(); loadList(); }, 800);
+    } else {
+      showProgress(0, '失败: ' + data.error, true);
+    }
+  } catch (e) {
+    showProgress(0, '请求失败: ' + e.message, true);
+  }
+}
+
+function showProgress(pct, text, err) {
+  const el = document.getElementById('uploadProgress');
+  const fill = document.getElementById('progressFill');
+  const txt = document.getElementById('progressText');
+  el.style.display = 'block';
+  fill.style.width = pct + '%';
+  fill.className = 'progress-fill' + (err ? ' progress-err' : '');
+  txt.textContent = text;
+}
+
+function hideProgress() {
+  document.getElementById('uploadProgress').style.display = 'none';
+}
+
+// ── 激活 ──
+async function activateChime(filename) {
+  if (!confirm(`确定要激活 "${filename}" 为 Lock Chime 吗？`)) return;
+  try {
+    const resp = await fetch('/api/lockchime/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast(data.message, false);
+      loadList();
+    } else {
+      showToast(data.error, true);
+    }
+  } catch (e) {
+    showToast('请求失败: ' + e.message, true);
+  }
+}
+
+// ── 删除 ──
+function confirmDelete(filename) {
+  if (!confirm(`确定要删除 "${filename}" 吗？此操作不可恢复。`)) return;
+  doDelete(filename);
+}
+
+async function doDelete(filename) {
+  try {
+    const resp = await fetch('/api/lockchime/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast(data.message, false);
+      loadList();
+    } else {
+      showToast(data.error, true);
+    }
+  } catch (e) {
+    showToast('请求失败: ' + e.message, true);
+  }
+}
+
+// ── 节日应用 ──
+async function applyHoliday() {
+  try {
+    const resp = await fetch('/api/lockchime/holiday-apply', { method: 'POST' });
+    const data = await resp.json();
+    if (data.success) {
+      showToast(data.message, false);
+      loadList();
+    } else {
+      showToast(data.error, true);
+    }
+  } catch (e) {
+    showToast('请求失败: ' + e.message, true);
+  }
+}
+
+// ── Toast ──
+function showToast(msg, err) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (err ? ' error' : '');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 3000);
+}
+</script>
+
+<style>
+.info-box {
+  background: #1f2d4d;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  color: #aab;
+  font-size: 14px;
+}
+
+.info-box code {
+  background: #16213e;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 13px;
+  color: #e94560;
+}
+
+.status-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.status-card {
+  background: #1f2d4d;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.card-label {
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.card-value {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.card-meta {
+  font-size: 12px;
+  color: #888;
+}
+
+.holiday-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: linear-gradient(135deg, #1a3a2a, #1f2d4d);
+  border: 1px solid #2a6a3a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btn-accent {
+  background: #e94560;
+  color: #fff;
+  border: none;
+}
+
+.btn-accent:hover {
+  background: #d63852;
+}
+
+.badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.badge-active {
+  background: #28a745;
+  color: #fff;
+}
+
+.upload-area {
+  background: #1f2d4d;
+  border: 2px dashed #2a2a4a;
+  border-radius: 12px;
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.upload-area:hover, .upload-area.dragover {
+  border-color: #e94560;
+  background: #16213e;
+}
+
+.upload-icon { font-size: 48px; margin-bottom: 12px; }
+.upload-text { font-size: 16px; margin-bottom: 8px; }
+.upload-hint { font-size: 13px; color: #888; }
+
+.upload-progress {
+  margin-top: 16px;
+  padding: 16px;
+  background: #1f2d4d;
+  border-radius: 8px;
+}
+
+.progress-text {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 14px;
+  color: #888;
+}
+
+.file-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: #1f2d4d;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  transition: all 0.2s;
+}
+
+.file-card:hover {
+  border-color: #e94560;
+  transform: translateY(-2px);
+}
+
+.file-icon { font-size: 32px; }
+.file-info { flex: 1; min-width: 0; }
+
+.file-name {
+  font-weight: 500;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: #888;
+}
+
+.file-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: #666;
+}
+
+.empty-icon { font-size: 64px; margin-bottom: 16px; opacity: 0.5; }
+.empty-state h3 { font-size: 18px; margin-bottom: 8px; color: #888; }
+
+.holiday-table {
+  background: #1f2d4d;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.holiday-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  padding: 10px 16px;
+  font-size: 14px;
+  border-bottom: 1px solid #16213e;
+}
+
+.holiday-row:last-child { border-bottom: none; }
+.holiday-header {
+  font-weight: 600;
+  color: #888;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.holiday-row code {
+  background: #16213e;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #e94560;
+  font-size: 12px;
+}
+
+.hint-text {
+  font-size: 13px;
+  color: #888;
+  margin-top: 8px;
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #28a745;
+  color: #fff;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  z-index: 1001;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+
+.toast.show { opacity: 1; }
+.toast.error { background: #dc3545; }
+</style>
+{% endblock %}

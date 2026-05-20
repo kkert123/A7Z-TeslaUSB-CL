@@ -1,0 +1,97 @@
+/* ========== 模式切换按钮样式 ========== */
+.mode-switch-container {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 15px;
+    padding: 5px 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    backdrop-filter: blur(10px);
+}
+
+.mode-switch-label {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.8);
+    margin-right: 8px;
+    white-space: nowrap;
+}
+
+.mode-switch {
+    position: relative;
+    display: inline-block;
+    width: 50px;
+    height: 24px;
+}
+
+.mode-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.mode-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #2196F3;
+    transition: .4s;
+    border-radius: 24px;
+}
+
+.mode-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .4s;
+    border-radius: 50%;
+}
+
+input:checked + .mode-slider {
+    background-color: #4CAF50;
+}
+
+input:checked + .mode-slider:before {
+    transform: translateX(26px);
+}
+
+.mode-status {
+    font-size: 11px;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.mode-status.present {
+    background: rgba(33, 150, 243, 0.2);
+    color: #2196F3;
+}
+
+.mode-status.edit {
+    background: rgba(76, 175, 80, 0.2);
+    color: #4CAF50;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .mode-switch-container {
+        margin-left: 10px;
+        padding: 4px 8px;
+    }
+    
+    .mode-switch-label {
+        font-size: 11px;
+    }
+    
+    .mode-status {
+        font-size: 10px;
+    }
+}

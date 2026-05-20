@@ -1,0 +1,111 @@
+#!/bin/bash
+
+# WiFi智能切换脚本（守护进程版 v2.4）
+# 该版本自带循环检测机制，不再依赖外部 cron 定时器
+# 逻辑：快速检测(每2分钟) -> 完整检测(每5分钟)
+
+# --- 配置区 ---
+declare -A WIFI_PRIORITY=( ["CD"]=400["C12345"]=300 ["HP-00J6O"]=200["C123"]=100 ["189-AP"]=50 )
+LOG_FILE="/var/log/wifi-smart-switch.log"
+LOCK_FILE="/var/run/wifi-smart-switch.lock"
+STATE_FILE="/var/run/wifi-smart-switch.state"
+FAILURE_COUNT_FILE="/var/run/wifi-failure-count"
+SWITCH_COOLDOWN=300
+SIGNAL_THRESHOLD=30
+
+# --- 核心函数 ---
+log_message() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"; }
+
+get_current_wifi() {
+    local wifi=$(nmcli -t -f DEVICE,STATE,CONNECTION device status 2>/dev/null | grep '^wlan0:connected:' | cut -d':' -f3)[ -z "$wifi" ] && wifi=$(nmcli -t -f SSID,ACTIVE device wifi 2>/dev/null | grep ':yes$' | cut -d':' -f1)
+    [ -z "$wifi" ] && command -v iwgetid &>/dev/null && wifi=$(iwgetid -r 2>/dev/null)
+    echo "$wifi"
+}
+
+check_wifi_connection() {
+    local temp_file=$(mktemp)
+    local pids=""
+    for target in "12.127.12.8" "12.127.12.245" "baidu.com"; do
+        ( ping -c 2 -W 3 "$target" > /dev/null 2>&1 && echo "success" >> "$temp_file" ) &
+        pids="$pids $!"
+    done
+    for i in {1..40}; do [ -s "$temp_file" ] && break; sleep 0.1; done
+    for p in $pids; do kill -9 $p 2>/dev/null; done
+    local res="false"; [ -s "$temp_file" ] && res="true"
+    rm -f "$temp_file"
+    echo "$res"
+}
+
+get_available_wifis() {
+    while IFS= read -r line; do
+        [ -z "$line" ] || [ "$line" == "--" ] && continue
+        local ssid=$(echo "$line" | sed 's/\\:/===COLON===/g' | awk -F':' '{for(i=1;i<NF;i++) printf "%s%s",$i,(i<NF-1)?":":""}' | sed 's/===COLON===/:/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local signal=$(echo "$line" | sed 's/\\:/===COLON===/g' | awk -F':' '{print $NF}' | tr -d '[:space:]')
+        [[ "$signal" =~ ^[0-9]+$ ]] || signal=0
+        if[ -n "${WIFI_PRIORITY[$ssid]}" ]; then echo "${WIFI_PRIORITY[$ssid]}:$signal:$ssid"; fi
+    done < <(nmcli -t -f SSID,SIGNAL device wifi list 2>/dev/null) | sort -t':' -k1 -rn -k2 -rn | cut -d':' -f3-
+}
+
+switch_to_wifi() {
+    local target_wifi="$1"
+    local last_s=$([ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo 0 )
+    if[ $(( $(date +%s) - last_s )) -lt "$SWITCH_COOLDOWN" ]; then return 1; fi
+    log_message "正在切换到: $target_wifi"
+    nmcli device disconnect wlan0 2>/dev/null; sleep 2
+    if nmcli device wifi connect "$target_wifi" 2>&1 >/dev/null; then
+        log_message "切换成功"; date +%s > "$STATE_FILE"; return 0
+    fi
+    return 1
+}
+
+quick_check() {
+    log_message "快速检测开始..."
+    if[ "$(check_wifi_connection)" = "true" ]; then
+        rm -f "$FAILURE_COUNT_FILE"; log_message "网络正常"
+    else
+        local count=$( [ -f "$FAILURE_COUNT_FILE" ] && cat "$FAILURE_COUNT_FILE" || echo 0 )
+        count=$((count + 1)); echo "$count" > "$FAILURE_COUNT_FILE"
+        log_message "网络不通 (失败 $count 次)"[ $count -ge 2 ] && full_check
+    fi
+}
+
+full_check() {
+    log_message "完整检测开始..."
+    local cur=$(get_current_wifi)
+    local is_conn=$(check_wifi_connection)
+    local avail=$(get_available_wifis)
+    
+    if[ "$is_conn" = "true" ]; then
+        for item in $avail; do
+            if [ ${WIFI_PRIORITY[$item]:-0} -gt ${WIFI_PRIORITY[$cur]:-0} ]; then
+                log_message "发现更优网络: $item，切换中..."; switch_to_wifi "$item"; break
+            fi
+        done
+    else
+        log_message "网络断开，尝试连接..."
+        for item in $avail; do
+            if nmcli device wifi connect "$item" 2>&1 >/dev/null; then log_message "重连 $item 成功"; break; fi
+        done
+    fi
+    log_message "完整检测完成"
+}
+
+# --- 主守护逻辑 ---
+main() {
+    if [ -f "$LOCK_FILE" ] && ps -p $(cat "$LOCK_FILE") >/dev/null 2>&1; then exit 1; fi
+    echo $$ > "$LOCK_FILE"; trap "rm -f $LOCK_FILE" EXIT
+    
+    # 支持单次参数调用，或进入守护模式
+    if [ "$1" == "--quick" ] ||[ "$1" == "--full" ]; then
+        [ "$1" == "--quick" ] && quick_check || full_check
+    else
+        log_message "守护进程启动，开始自动循环..."
+        while true; do
+            quick_check
+            sleep 120    # 2分钟一次快检
+            full_check
+            sleep 180    # 再等3分钟（合起来5分钟一次全检）
+        done
+    fi
+}
+main "$@"

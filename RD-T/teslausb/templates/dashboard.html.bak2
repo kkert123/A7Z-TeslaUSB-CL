@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %} — 仪表盘{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>仪表盘</h2>
+  <span class="badge" id="lastUpdate">{{ now }}</span>
+</div>
+
+<!-- 系统状态卡片 -->
+<div class="info-grid">
+  <!-- TeslaUSB 服务 -->
+  <div class="info-card">
+    <div class="info-card-icon">⚙️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">TeslaUSB 服务</div>
+      <div class="info-card-value {% if service.active %}status-ok{% else %}status-err{% endif %}" id="svc-status">
+        {{ '运行中' if service.active else '已停止' }}
+      </div>
+      {% if service.uptime %}
+      <div class="info-card-sub" id="svc-uptime">已运行 {{ service.uptime }}</div>
+      {% endif %}
+      {% if system_uptime %}
+      <div class="info-card-sub" style="color:var(--text-muted);font-size:var(--text-xs)">系统已运行 {{ system_uptime }}</div>
+      {% endif %}
+      
+    </div>
+  </div>
+
+  <!-- CPU -->
+  <div class="info-card">
+    <div class="info-card-icon">📊</div>
+    <div class="info-card-body">
+      <div class="info-card-label">CPU 使用率</div>
+      <div class="info-card-value {% if sys_stats.cpu_percent > 80 %}status-warn{% endif %}" id="cpu-percent">{{ sys_stats.cpu_percent }}%</div>
+      <div class="progress-row" style="margin-top:6px">
+        <div class="progress"><div class="progress-fill {% if sys_stats.cpu_percent > 80 %}warn{% endif %}" id="cpu-bar" style="width:{{ sys_stats.cpu_percent }}%"></div></div>
+      </div>
+      <div class="info-card-sub">负载: <span id="load-vals">{{ sys_stats.load_1min }} / {{ sys_stats.load_5min }} / {{ sys_stats.load_15min }}</span></div>
+    </div>
+  </div>
+
+  <!-- 温度 -->
+  <div class="info-card">
+    <div class="info-card-icon">🌡️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">CPU 温度</div>
+      <div class="info-card-value {% if sys_stats.cpu_temp and sys_stats.cpu_temp > 70 %}status-warn{% endif %}" id="cpu-temp">
+        {% if sys_stats.cpu_temp is not none %}{{ sys_stats.cpu_temp }}°C{% else %}—{% endif %}
+      </div>
+      {% if sys_stats.cpu_temp_min is not none %}
+      <div class="info-card-sub" id="temp-stats">低 {{ sys_stats.cpu_temp_min }}° · 均 {{ sys_stats.cpu_temp_avg }}° · 高 {{ sys_stats.cpu_temp_max }}°</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 内存 -->
+  <div class="info-card">
+    <div class="info-card-icon">💾</div>
+    <div class="info-card-body">
+      <div class="info-card-label">内存</div>
+      <div class="info-card-value" id="mem-usage">{{ sys_stats.mem_used_mb }} / {{ sys_stats.mem_total_mb }} MB</div>
+      <div class="progress-row" style="margin-top:6px">
+        <div class="progress"><div class="progress-fill {% if sys_stats.mem_percent > 85 %}warn{% endif %}" id="mem-bar" style="width:{{ sys_stats.mem_percent }}%"></div></div>
+        <span class="progress-pct" id="mem-pct">{{ sys_stats.mem_percent }}%</span>
+      </div>
+      {% if sys_stats.swap_total_mb > 0 %}
+      <div class="info-card-sub">SWAP {{ sys_stats.swap_used_mb }} / {{ sys_stats.swap_total_mb }} MB</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 网络 -->
+  <div class="info-card">
+    <div class="info-card-icon">🌐</div>
+    <div class="info-card-body">
+      <div class="info-card-label">网络</div>
+      <div class="info-card-value" style="font-size:var(--text-base)">
+        <span class="status {% if wifi.connected %}status-ok{% else %}status-warn{% endif %}" id="wifi-ssid">{{ wifi.ssid if wifi.connected else '未连接' }}</span>
+        {% if wifi.signal is not none %}<span style="font-size:var(--text-xs);color:var(--text-muted);margin-left:4px" id="wifi-signal">{{ wifi.signal }}%</span>{% endif %}
+      </div>
+      <div class="net-row"><span class="net-type">本地</span><span class="net-value" id="ip-local">{{ ip_info.local or '—' }}</span></div>
+      <div class="net-row"><span class="net-type">TS</span><span class="net-value" id="ip-tailscale">{{ ip_info.tailscale or '—' }}</span></div>
+    </div>
+  </div>
+
+  <!-- 系统磁盘 -->
+  <div class="info-card">
+    <div class="info-card-icon">💿</div>
+    <div class="info-card-body">
+      <div class="info-card-label">系统磁盘</div>
+      <div class="info-card-value" id="disk-total">{% if disk_total %}{{ fmt_bytes(disk_total.used) }} / {{ fmt_bytes(disk_total.total) }}{% else %}—{% endif %}</div>
+      <div class="progress-row" style="margin-top:6px">
+        <div class="progress"><div class="progress-fill {% if disk_total and disk_total.percent > 85 %}warn{% endif %}" id="disk-total-bar" style="width:{{ disk_total.percent if disk_total else 0 }}%"></div></div>
+        <span class="progress-pct" id="disk-total-pct">{{ disk_total.percent if disk_total else 0 }}%</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 磁盘分区 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s4)">
+    磁盘分区 <span style="font-size:var(--text-xs);color:var(--text-muted);font-weight:400" id="disk-refresh-hint">（自动刷新）</span>
+  </h3>
+  <div class="disk-grid" id="disk-grid">
+    {% for name, info in disk.items() %}
+    <div class="disk-card {% if not info.mounted %}unmounted{% endif %}" data-name="{{ name }}">
+      <div class="disk-name">{{ name }}</div>
+      {% if info.mounted %}
+      <div class="progress-row">
+        <div class="progress"><div class="progress-fill {% if info.percent > 90 %}danger{% elif info.percent > 75 %}warn{% endif %}" style="width:{{ info.percent }}%"></div></div>
+        <span class="progress-pct">{{ info.percent }}%</span>
+      </div>
+      <div class="disk-detail">{{ fmt_bytes(info.used) }} / {{ fmt_bytes(info.total) }} · 剩余 {{ fmt_bytes(info.free) }}</div>
+      {% else %}
+      <div class="disk-detail" style="color:var(--danger)">未挂载</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fmtBytes(b){if(!b)return'0 B';const k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(2))+' '+s[i];}
+
+// 每30秒刷新
+setInterval(async()=>{
+  try{
+    const r=await fetch('/api/system/stats'),d=await r.json();
+    const s=d.service,w=d.wifi,ip=d.ip,y=d.sys;
+    // 服务
+    const se=document.getElementById('svc-status');
+    if(se){se.textContent=s.active?'运行中':'已停止';se.className='info-card-value '+(s.active?'status-ok':'status-err');}
+    const su=document.getElementById('svc-uptime');
+    if(su&&s.uptime)su.textContent='已运行 '+s.uptime;
+    // 系统运行时间（在 sys_stats 中）
+    if(y.system_uptime){const el=document.querySelector('#svc-uptime').parentElement.querySelector('.info-card-sub:last-child');if(el)el.textContent='系统已运行 '+y.system_uptime;}
+    // CPU
+    const ce=document.getElementById('cpu-percent'),cb=document.getElementById('cpu-bar'),lv=document.getElementById('load-vals');
+    if(ce&&y.cpu_percent!=null){ce.textContent=y.cpu_percent+'%';ce.className='info-card-value'+(y.cpu_percent>80?' status-warn':'');if(cb){cb.style.width=y.cpu_percent+'%';cb.className='progress-fill'+(y.cpu_percent>80?' warn':'');}}
+    if(lv)lv.textContent=y.load_1min+' / '+y.load_5min+' / '+y.load_15min;
+    // 温度
+    const te=document.getElementById('cpu-temp');
+    if(te&&y.cpu_temp!=null){te.textContent=y.cpu_temp+'°C';te.className='info-card-value'+(y.cpu_temp>70?' status-warn':'');}
+    // 内存
+    const me=document.getElementById('mem-usage'),mb=document.getElementById('mem-bar'),mp=document.getElementById('mem-pct');
+    if(me)me.textContent=y.mem_used_mb+' / '+y.mem_total_mb+' MB';
+    if(mb){mb.style.width=y.mem_percent+'%';mb.className='progress-fill'+(y.mem_percent>85?' warn':'');}
+    if(mp)mp.textContent=y.mem_percent+'%';
+    // 网络
+    const ws=document.getElementById('wifi-ssid'),wl=document.getElementById('ip-local'),wt=document.getElementById('ip-tailscale');
+    if(ws&&w){ws.textContent=w.ssid||'未连接';ws.className='status '+(w.connected?'status-ok':'status-warn');}
+    if(wl&&ip)wl.textContent=ip.local||'—';
+    if(wt&&ip)wt.textContent=ip.tailscale||'—';
+    // 磁盘
+    if(d.disk_total){const de=document.getElementById('disk-total'),db=document.getElementById('disk-total-bar'),dp=document.getElementById('disk-total-pct');
+    if(de)de.textContent=fmtBytes(d.disk_total.used)+' / '+fmtBytes(d.disk_total.total);if(db)db.style.width=d.disk_total.percent+'%';if(dp)dp.textContent=d.disk_total.percent+'%';}
+    // 时间
+    const ts=document.getElementById('lastUpdate');if(ts)ts.textContent=d.time;
+  }catch(e){}
+},30000);
+
+// 磁盘分区每2分钟刷新
+setInterval(async()=>{
+  try{
+    const r=await fetch('/api/system/stats'),d=await r.json();if(!d.disk)return;
+    Object.entries(d.disk).forEach(([n,i])=>{const c=document.querySelector('.disk-card[data-name="'+n+'"]');if(!c)return;
+    if(i.mounted){c.classList.remove('unmounted');const b=c.querySelector('.progress-fill'),p=c.querySelector('.progress-pct'),t=c.querySelector('.disk-detail');
+    if(b){b.style.width=i.percent+'%';b.className='progress-fill'+(i.percent>90?' danger':i.percent>75?' warn':'');}
+    if(p)p.textContent=i.percent+'%';if(t)t.textContent=fmtBytes(i.used)+' / '+fmtBytes(i.total)+' · 剩余 '+fmtBytes(i.free);
+    }else{c.classList.add('unmounted');const t=c.querySelector('.disk-detail');if(t){t.style.color='var(--danger)';t.textContent='未挂载';}}});
+    const h=document.getElementById('disk-refresh-hint');if(h)h.textContent='（'+d.time+' 更新）';
+  }catch(e){}
+},120000);
+</script>
+{% endblock %}

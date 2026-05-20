@@ -1,0 +1,356 @@
+{% extends "base.html" %}
+{% block title %} — 仪表盘{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>仪表盘</h2>
+  <span class="badge" id="lastUpdate">{{ now }}</span>
+</div>
+
+<!-- 系统状态卡片 -->
+<div class="info-grid">
+  <!-- TeslaUSB 服务 -->
+  <div class="info-card">
+    <div class="info-card-icon">⚙️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">TeslaUSB 服务</div>
+      <div class="info-card-value {% if service.active %}status-ok{% else %}status-err{% endif %}" id="svc-status" data-prev="">
+        {{ '运行中' if service.active else '已停止' }}
+      </div>
+      {% if service.uptime %}
+      <div class="info-card-sub" id="svc-uptime">服务已运行 {{ service.uptime }}</div>
+      {% endif %}
+      <div class="info-card-sub" id="sys-uptime-text" style="font-size:11px;color:var(--text-muted)">系统运行: {{ sys_stats.system_uptime }}</div>
+    </div>
+  </div>
+
+  <!-- CPU -->
+  <div class="info-card">
+    <div class="info-card-icon">📊</div>
+    <div class="info-card-body">
+      <div class="info-card-label">CPU 使用率</div>
+      <div class="info-card-value {% if sys_stats.cpu_percent > 80 %}status-warn{% endif %}" id="cpu-percent" data-prev="">
+        {{ sys_stats.cpu_percent }}%
+      </div>
+      <div class="progress-row" style="margin-top:6px">
+        <div class="progress"><div class="progress-fill {% if sys_stats.cpu_percent > 80 %}warn{% endif %}" id="cpu-bar" style="width:{{ sys_stats.cpu_percent }}%"></div></div>
+      </div>
+      <div class="info-card-sub">负载: <span id="load-vals">{{ sys_stats.load_1min }} / {{ sys_stats.load_5min }} / {{ sys_stats.load_15min }}</span></div>
+    </div>
+  </div>
+
+  <!-- 温度 -->
+  <div class="info-card">
+    <div class="info-card-icon">🌡️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">CPU 温度</div>
+      <div class="info-card-value {% if sys_stats.cpu_temp and sys_stats.cpu_temp > 70 %}status-warn{% endif %}" id="cpu-temp" data-prev="">
+        {% if sys_stats.cpu_temp is not none %}{{ sys_stats.cpu_temp }}°C{% else %}—{% endif %}
+      </div>
+      {% if sys_stats.cpu_temp_min is not none %}
+      <div class="info-card-sub" id="temp-stats" style="display:flex;gap:4px;align-items:center">
+        <span style="color:var(--text-muted);font-size:10px;min-width:28px">CPU</span>
+        <span style="font-size:10px">低 {{ sys_stats.cpu_temp_min }}° · 均 {{ sys_stats.cpu_temp_avg }}° · 高 {{ sys_stats.cpu_temp_max }}°</span>
+      </div>
+      {% endif %}
+      {% if sys_stats.nvme_temp_fields is not none and sys_stats.nvme_temp_fields.current is not none %}
+      <div class="info-card-sub" style="display:flex;gap:4px;align-items:center;margin-top:2px" id="nvme-temp-text">
+        <span style="color:var(--accent);font-size:10px;min-width:28px;font-weight:600">M.2</span>
+        <span style="font-size:10px">{{ sys_stats.nvme_temp_fields.current }}°C</span>
+      </div>
+      <div class="info-card-sub" style="display:flex;gap:4px;align-items:center" id="nvme-temp-stats">
+        <span style="min-width:28px"></span>
+        <span style="font-size:10px;color:var(--text-muted)">低 {{ sys_stats.nvme_temp_fields.min }}° · 均 {{ sys_stats.nvme_temp_fields.avg }}° · 高 {{ sys_stats.nvme_temp_fields.max }}°</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 内存 -->
+  <div class="info-card">
+    <div class="info-card-icon">💾</div>
+    <div class="info-card-body">
+      <div class="info-card-label">内存</div>
+      <div class="info-card-value" id="mem-usage" data-prev="">{{ sys_stats.mem_used_mb }} / {{ sys_stats.mem_total_mb }} MB</div>
+      <div class="progress-row" style="margin-top:6px">
+        <div class="progress"><div class="progress-fill {% if sys_stats.mem_percent > 85 %}warn{% endif %}" id="mem-bar" style="width:{{ sys_stats.mem_percent }}%"></div></div>
+        <span class="progress-pct" id="mem-pct">{{ sys_stats.mem_percent }}%</span>
+      </div>
+      {% if sys_stats.swap_total_mb > 0 %}
+      <div class="info-card-sub">SWAP {{ sys_stats.swap_used_mb }} / {{ sys_stats.swap_total_mb }} MB</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 🆕 哨兵事件 -->
+  <div class="info-card">
+    <div class="info-card-icon">🛡️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">哨兵事件</div>
+      <div class="info-card-value" id="sentry-count" data-prev="">{{ sentry_events if sentry_events else '—' }}</div>
+      <div class="info-card-sub">
+        <span id="sentry-detail">{% if sentry_events %}共 {{ sentry_events }} 个事件{% else %}加载中...{% endif %}</span>
+        <a href="/videos" style="font-size:var(--text-xs);color:var(--accent);margin-left:6px">查看 →</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 网络 -->
+  <div class="info-card">
+    <div class="info-card-icon">🌐</div>
+    <div class="info-card-body">
+      <div class="info-card-label">网络</div>
+      <div class="info-card-value" style="font-size:var(--text-base)">
+        <span class="status {% if wifi.connected %}status-ok{% else %}status-warn{% endif %}" id="wifi-ssid">{{ wifi.ssid if wifi.connected else '未连接' }}</span>
+        {% if wifi.signal is not none %}<span style="font-size:var(--text-xs);color:var(--text-muted);margin-left:4px" id="wifi-signal">{{ wifi.signal }}%</span>{% endif %}
+      </div>
+      <div class="net-row"><span class="net-type">本地</span><span class="net-value" id="ip-local">{{ ip_info.local or '—' }}</span></div>
+      <div class="net-row"><span class="net-type">TS</span><span class="net-value" id="ip-tailscale">{{ ip_info.tailscale or '—' }}</span></div>
+    </div>
+  </div>
+
+  <!-- 🆕 网络吞吐 -->
+  <div class="info-card">
+    <div class="info-card-icon">📡</div>
+    <div class="info-card-body">
+      <div class="info-card-label">网络吞吐</div>
+      <div class="info-card-value" style="font-size:var(--text-sm)">
+        <span style="display:flex;gap:8px">
+          <span>↓ <span id="net-rx" style="font-weight:600">—</span></span>
+          <span>↑ <span id="net-tx" style="font-weight:600">—</span></span>
+        </span>
+      </div>
+      <div class="info-card-sub" id="net-throughput-detail">实时速率</div>
+    </div>
+  </div>
+
+  <!-- 系统磁盘 -->
+  <div class="info-card">
+    <div class="info-card-icon">💿</div>
+    <div class="info-card-body">
+      <div class="info-card-label">系统磁盘</div>
+      <div class="info-card-value" id="disk-total">{% if disk_total %}{{ fmt_bytes(disk_total.used) }} / {{ fmt_bytes(disk_total.total) }}{% else %}—{% endif %}</div>
+      <div class="progress-row" style="margin-top:6px">
+        <div class="progress"><div class="progress-fill {% if disk_total and disk_total.percent > 85 %}warn{% endif %}" id="disk-total-bar" style="width:{{ disk_total.percent if disk_total else 0 }}%"></div></div>
+        <span class="progress-pct" id="disk-total-pct">{{ disk_total.percent if disk_total else 0 }}%</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 磁盘分区 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s4)">
+    磁盘分区 <span style="font-size:var(--text-xs);color:var(--text-muted);font-weight:400" id="disk-refresh-hint">（实时）</span>
+  </h3>
+  <div class="disk-grid" id="disk-grid">
+    {% for name, info in disk.items() %}
+    <div class="disk-card {% if not info.mounted %}unmounted{% endif %}" data-name="{{ name }}">
+      <div class="disk-name">{{ name }}</div>
+      {% if info.mounted %}
+      <div class="progress-row">
+        <div class="progress"><div class="progress-fill {% if info.percent > 90 %}danger{% elif info.percent > 75 %}warn{% endif %}" style="width:{{ info.percent }}%"></div></div>
+        <span class="progress-pct">{{ info.percent }}%</span>
+      </div>
+      <div class="disk-detail">{{ fmt_bytes(info.used) }} / {{ fmt_bytes(info.total) }} · 剩余 {{ fmt_bytes(info.free) }}</div>
+      {% elif info.total > 0 %}
+      <div class="disk-detail" style="color:var(--warning)">{{ fmt_bytes(info.total) }} · 当前未挂载（缓存）</div>
+      {% else %}
+      <div class="disk-detail" style="color:var(--danger)">未挂载</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fmtBytes(b){if(!b)return'0 B';const k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(2))+' '+s[i];}
+
+// ── 数值闪烁动画 ──
+function flashValue(el, newVal, fmtFn) {
+  if (!el) return;
+  const prev = el.dataset.prev || '';
+  const next = typeof fmtFn === 'function' ? fmtFn(newVal) : String(newVal !== undefined && newVal !== null ? newVal : '');
+  if (prev && prev !== next && next !== '') {
+    el.classList.remove('flash-update');
+    void el.offsetWidth; // force reflow
+    el.classList.add('flash-update');
+  }
+  el.dataset.prev = next;
+  return next;
+}
+
+function rateBytes(bps) {
+  if (!bps || bps < 0) return '0 B/s';
+  const u = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  let v = bps, i = 0;
+  while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+  return v.toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+}
+
+let lastRx = 0, lastTx = 0, lastNetTime = 0;
+
+// ── SSE 实时推送（替代轮询） ──
+let statsRetries = 0;
+function startStatsStream() {
+  const es = new EventSource('/api/system/stats-stream');
+  es.onmessage = function(e) {
+    statsRetries = 0;
+    try {
+      const d = JSON.parse(e.data);
+      updateDashboard(d);
+    } catch(ex) {}
+  };
+  es.onerror = function() {
+    es.close();
+    statsRetries++;
+    const delay = Math.min(statsRetries * 3000, 30000);
+    setTimeout(startStatsStream, delay);
+  };
+}
+
+function updateDashboard(d) {
+  const s = d.service, w = d.wifi, ip = d.ip, y = d.sys;
+
+  // 服务
+  const se = document.getElementById('svc-status');
+  if (se) {
+    const txt = (s && s.active) ? '运行中' : '已停止';
+    flashValue(se, txt);
+    se.className = 'info-card-value ' + ((s && s.active) ? 'status-ok' : 'status-err');
+  }
+  const su = document.getElementById('svc-uptime');
+  if (su && s && s.uptime) su.textContent = '已运行 ' + s.uptime;
+
+  // CPU
+  const ce = document.getElementById('cpu-percent'), cb = document.getElementById('cpu-bar'), lv = document.getElementById('load-vals');
+  if (ce && y && y.cpu_percent != null) {
+    flashValue(ce, y.cpu_percent, v => v + '%');
+    ce.className = 'info-card-value' + (y.cpu_percent > 80 ? ' status-warn' : '');
+    if (cb) { cb.style.width = y.cpu_percent + '%'; cb.className = 'progress-fill' + (y.cpu_percent > 80 ? ' warn' : ''); }
+  }
+  if (lv && y) lv.textContent = (y.load_1min||0).toFixed(1) + ' / ' + (y.load_5min||0).toFixed(1) + ' / ' + (y.load_15min||0).toFixed(1);
+
+  // 温度
+  const te = document.getElementById('cpu-temp');
+  if (te && y && y.cpu_temp != null) {
+    flashValue(te, y.cpu_temp, v => v + '°C');
+    te.className = 'info-card-value' + (y.cpu_temp > 70 ? ' status-warn' : '');
+  }
+
+  // 温度统计
+  const tse = document.getElementById('temp-stats');
+  if (tse && y && y.cpu_temp_min != null) {
+    // tse now has <span>CPU</span><span>stats</span> structure
+    const statsSpan = tse.querySelector('span:last-child');
+    if (statsSpan) statsSpan.textContent = '低 ' + y.cpu_temp_min + '° · 均 ' + y.cpu_temp_avg + '° · 高 ' + y.cpu_temp_max + '°';
+  }
+  // NVMe 温度
+  const nte = document.getElementById('nvme-temp-text');
+  if (nte && y && y.nvme_temp_fields && y.nvme_temp_fields.current != null) {
+    const valSpan = nte.querySelector('span:last-child');
+    if (valSpan) valSpan.textContent = y.nvme_temp_fields.current + '°C';
+  }
+  const nts = document.getElementById('nvme-temp-stats');
+  if (nts && y && y.nvme_temp_fields) {
+    const f = y.nvme_temp_fields;
+    const statsSpan = nts.querySelector('span:last-child');
+    if (statsSpan) statsSpan.textContent = '低 ' + (f.min || '?') + '° · 均 ' + (f.avg || '?') + '° · 高 ' + (f.max || '?') + '°';
+  }
+
+  // 内存
+  const me = document.getElementById('mem-usage'), mb = document.getElementById('mem-bar'), mp = document.getElementById('mem-pct');
+  if (me && y) {
+    flashValue(me, y.mem_used_mb, v => v + ' / ' + y.mem_total_mb + ' MB');
+  }
+  if (mb && y) { mb.style.width = y.mem_percent + '%'; mb.className = 'progress-fill' + (y.mem_percent > 85 ? ' warn' : ''); }
+  if (mp && y) mp.textContent = y.mem_percent + '%';
+
+  // 网络
+  const ws = document.getElementById('wifi-ssid'), wl = document.getElementById('ip-local'), wt = document.getElementById('ip-tailscale');
+  if (ws && w) {
+    ws.textContent = (w.ssid || '未连接');
+    ws.className = 'status ' + (w.connected ? 'status-ok' : 'status-warn');
+  }
+  if (wl && ip) wl.textContent = ip.local || '—';
+  if (wt && ip) wt.textContent = ip.tailscale || '—';
+  const wsg = document.getElementById('wifi-signal');
+  if (wsg && w && w.signal != null) wsg.textContent = w.signal + '%';
+
+  // 网络吞吐（基于已有数据估算）
+  if (y && y.net_rx !== undefined && y.net_tx !== undefined) {
+    const rx = document.getElementById('net-rx'), tx = document.getElementById('net-tx');
+    const nd = document.getElementById('net-throughput-detail');
+    const now = Date.now();
+    if (lastNetTime > 0 && lastRx >= 0 && lastTx >= 0) {
+      const dt = (now - lastNetTime) / 1000;
+      if (dt > 0) {
+        const rxRate = (y.net_rx - lastRx) / dt;
+        const txRate = (y.net_tx - lastTx) / dt;
+        if (rx) rx.textContent = rateBytes(rxRate);
+        if (tx) tx.textContent = rateBytes(txRate);
+        if (nd) nd.textContent = '实时速率';
+      }
+    }
+    lastRx = y.net_rx;
+    lastTx = y.net_tx;
+    lastNetTime = now;
+  }
+
+  // 哨兵事件
+  const sc = document.getElementById('sentry-count'), sd = document.getElementById('sentry-detail');
+  if (sc && d.sentry_events !== undefined) {
+    flashValue(sc, d.sentry_events, v => String(v));
+    if (sd) {
+      if (d.sentry_events > 0) {
+        sd.textContent = '共 ' + d.sentry_events + ' 个事件';
+        sd.style.color = '';
+      } else {
+        sd.textContent = '暂无哨兵事件';
+        sd.style.color = 'var(--text-muted)';
+      }
+    }
+  }
+
+  // 磁盘
+  if (d.disk_total) {
+    const de = document.getElementById('disk-total'), db = document.getElementById('disk-total-bar'), dp = document.getElementById('disk-total-pct');
+    if (de) de.textContent = fmtBytes(d.disk_total.used) + ' / ' + fmtBytes(d.disk_total.total);
+    if (db) { db.style.width = d.disk_total.percent + '%'; db.className = 'progress-fill' + (d.disk_total.percent > 85 ? ' warn' : ''); }
+    if (dp) dp.textContent = d.disk_total.percent + '%';
+  }
+
+  // 磁盘分区
+  if (d.disk) {
+    Object.entries(d.disk).forEach(([n, i]) => {
+      const c = document.querySelector('.disk-card[data-name="' + n + '"]');
+      if (!c) return;
+      if (i.mounted) {
+        c.classList.remove('unmounted');
+        const b = c.querySelector('.progress-fill'), p = c.querySelector('.progress-pct'), t = c.querySelector('.disk-detail');
+        if (b) { b.style.width = i.percent + '%'; b.className = 'progress-fill' + (i.percent > 90 ? ' danger' : i.percent > 75 ? ' warn' : ''); }
+        if (p) p.textContent = i.percent + '%';
+        if (t) { t.textContent = fmtBytes(i.used) + ' / ' + fmtBytes(i.total) + ' · 剩余 ' + fmtBytes(i.free); t.style.color = ''; }
+      } else if (i.total > 0) {
+        c.classList.add('unmounted');
+        const t = c.querySelector('.disk-detail');
+        if (t) { t.style.color = 'var(--warning)'; t.textContent = fmtBytes(i.total) + ' · 当前未挂载（缓存）'; }
+      } else {
+        c.classList.add('unmounted');
+        const t = c.querySelector('.disk-detail');
+        if (t) { t.style.color = 'var(--danger)'; t.textContent = '未挂载'; }
+      }
+    });
+  }
+
+  // 时间
+  const ts = document.getElementById('lastUpdate');
+  if (ts) ts.textContent = d.time || '';
+  const dh = document.getElementById('disk-refresh-hint');
+  if (dh && d.time) dh.textContent = '（' + d.time + ' 更新）';
+}
+
+startStatsStream();
+</script>
+{% endblock %}

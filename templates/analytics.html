@@ -1,0 +1,605 @@
+{% extends "base.html" %}
+
+{% block title %} · 统计分析{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>📊 统计分析</h2>
+  <span class="timestamp" id="lastUpdate">{{ now }}</span>
+</div>
+
+<!-- 概览卡片 -->
+<div class="info-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:var(--s6)">
+  <div class="info-card">
+    <div class="info-card-icon">🛡️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">哨兵事件</div>
+      <div class="info-card-value" id="stat-events">—</div>
+    </div>
+  </div>
+  <div class="info-card">
+    <div class="info-card-icon">✅</div>
+    <div class="info-card-body">
+      <div class="info-card-label">上传成功率</div>
+      <div class="info-card-value" id="stat-rate">—</div>
+    </div>
+  </div>
+  <div class="info-card">
+    <div class="info-card-icon">💾</div>
+    <div class="info-card-body">
+      <div class="info-card-label">磁盘健康</div>
+      <div class="info-card-value" id="stat-disk">—</div>
+    </div>
+  </div>
+  <div class="info-card">
+    <div class="info-card-icon">🖥️</div>
+    <div class="info-card-body">
+      <div class="info-card-label">系统健康</div>
+      <div class="info-card-value" id="stat-health">—</div>
+    </div>
+  </div>
+</div>
+
+<!-- 推送健康状态 -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s3)">
+    <h3 style="font-size:var(--text-base);font-weight:600">📢 推送健康</h3>
+    <button class="btn btn-sm" onclick="loadPushHealth()">🔄 刷新</button>
+  </div>
+  <div id="push-health-list">
+    <div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
+  </div>
+</div>
+
+<!-- 事件统计 -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s3)">
+    <h3 style="font-size:var(--text-base);font-weight:600">🛡️ 哨兵事件统计</h3>
+    <button class="btn btn-sm" onclick="loadSummary()">🔄 刷新</button>
+  </div>
+  <div class="info-grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+    <div style="text-align:center;padding:var(--s2)">
+      <div style="font-size:var(--text-2xl);font-weight:700" id="evt-total">0</div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted)">总事件</div>
+    </div>
+    <div style="text-align:center;padding:var(--s2)">
+      <div style="font-size:var(--text-2xl);font-weight:700;color:var(--success)" id="evt-uploaded">0</div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted)">已上传</div>
+    </div>
+    <div style="text-align:center;padding:var(--s2)">
+      <div style="font-size:var(--text-2xl);font-weight:700;color:var(--warning)" id="evt-pending">0</div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted)">待处理</div>
+    </div>
+    <div style="text-align:center;padding:var(--s2)">
+      <div style="font-size:var(--text-2xl);font-weight:700;color:var(--danger)" id="evt-failed">0</div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted)">失败</div>
+    </div>
+  </div>
+  <!-- 上传成功率进度条 -->
+  <div style="margin-top:var(--s3)">
+    <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);margin-bottom:4px">
+      <span>上传成功率</span>
+      <span id="evt-rate-text">0%</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="evt-rate-bar" style="width:0%"></div></div>
+  </div>
+</div>
+
+<!-- 磁盘使用 -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">💾 磁盘使用</h3>
+  <div id="disk-list"></div>
+</div>
+
+<!-- 系统健康 -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🖥️ 系统状态</h3>
+  <div id="health-details" style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
+</div>
+
+<!-- 服务状态 -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">⚙️ 服务状态</h3>
+  <div id="services-list"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- 清理管理（增强版）                          -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s3)">
+    <h3 style="font-size:var(--text-base);font-weight:600">🧹 清理管理</h3>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="loadCleanupPolicies()">🔄 刷新</button>
+    </div>
+  </div>
+
+  <!-- 分区磁盘状态（带阈值指示） -->
+  <div style="margin-bottom:var(--s4)">
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📊 分区状态</div>
+    <div id="cleanup-partitions">
+      <div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
+    </div>
+  </div>
+
+  <!-- 清理策略展示 -->
+  <div style="margin-bottom:var(--s4)">
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📋 清理策略</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--s2)" id="cleanup-policy-grid">
+      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+        <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘警告阈值</div>
+        <div style="font-size:var(--text-lg);font-weight:700;color:var(--warning)" id="policy-warn">85%</div>
+      </div>
+      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+        <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘严重阈值</div>
+        <div style="font-size:var(--text-lg);font-weight:700;color:var(--danger)" id="policy-crit">90%</div>
+      </div>
+      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+        <div style="font-size:var(--text-xs);color:var(--text-muted)">预览图保留天数</div>
+        <div style="font-size:var(--text-lg);font-weight:700" id="policy-preview-days">7天</div>
+      </div>
+      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+        <div style="font-size:var(--text-xs);color:var(--text-muted)">日志保留天数</div>
+        <div style="font-size:var(--text-lg);font-weight:700" id="policy-log-days">30天</div>
+      </div>
+    </div>
+
+    <!-- 清理顺序 -->
+    <div style="margin-top:var(--s2);font-size:var(--text-xs);color:var(--text-muted)">
+      <strong>清理顺序：</strong>
+      <ol style="margin:4px 0 0 16px;padding:0" id="cleanup-order-list">
+        <li>已上传成功的哨兵视频（最旧优先）</li>
+        <li>过期预览图（&gt;7天）</li>
+        <li>过期临时文件（&gt;1天）</li>
+        <li>旧日志文件（&gt;30天）</li>
+        <li>未上传的旧哨兵视频（仅严重/紧急模式）</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- 手动操作区 -->
+  <div style="margin-bottom:var(--s4)">
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">🔧 手动操作</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-sm" id="btn-preview" onclick="runCleanupPreview()">
+        🔍 预览清理（dry-run）
+      </button>
+      <button class="btn btn-sm btn-danger" id="btn-execute" onclick="runCleanupExecute()">
+        ⚡ 立即执行清理
+      </button>
+    </div>
+    <!-- 操作输出区 -->
+    <div id="cleanup-output" style="display:none;margin-top:var(--s3)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-size:var(--text-xs);font-weight:600;color:var(--text-secondary)" id="cleanup-output-title">输出</span>
+        <button style="background:none;border:none;cursor:pointer;font-size:var(--text-xs);color:var(--text-muted)" onclick="document.getElementById('cleanup-output').style.display='none'">✕ 关闭</button>
+      </div>
+      <pre id="cleanup-output-text" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:var(--s3);font-size:11px;overflow-x:auto;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary)"></pre>
+    </div>
+  </div>
+
+  <!-- 清理历史记录 -->
+  <div>
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📜 清理历史</div>
+    <div id="cleanup-history-list">
+      <div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+function fmtBytes(b){
+  if(!b||b===0)return '0 B';
+  const u=['B','KB','MB','GB','TB'];
+  for(let i=0;i<u.length;i++){if(b<1024)return b.toFixed(1)+' '+u[i];b/=1024;}
+  return b.toFixed(1)+' PB';
+}
+
+function fmtTime(ts){
+  if(!ts)return '—';
+  return new Date(ts).toLocaleString('zh-CN',{hour12:false});
+}
+
+// ── 通用工具：错误状态 + 重试按钮 ──────────────────────────────
+
+function renderError(elId, retryFn, message) {
+  const msg = message || '数据加载失败 — 请检查服务是否正常运行';
+  document.getElementById(elId).innerHTML = `
+    <div style="padding:var(--s3);background:var(--danger-soft);border:1px solid rgba(239,68,68,0.2);border-radius:var(--r-md)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:var(--s2)">
+        <span style="font-size:var(--text-sm);color:var(--danger)">⚠️ ${msg}</span>
+        <button class="btn btn-sm btn-danger" onclick="${retryFn.name}()">🔄 重试</button>
+      </div>
+    </div>`;
+}
+
+function renderEmpty(elId, title, hint) {
+  const h = hint || '';
+  document.getElementById(elId).innerHTML = `
+    <div style="text-align:center;padding:var(--s5) var(--s3)">
+      <div style="font-size:32px;opacity:0.3;margin-bottom:var(--s2)">📭</div>
+      <div style="font-size:var(--text-sm);color:var(--text-muted);margin-bottom:4px">${title}</div>
+      ${h ? `<div style="font-size:var(--text-xs);color:var(--text-muted);opacity:0.7">${h}</div>` : ''}
+    </div>`;
+}
+
+// ── 推送健康 ──────────────────────────────────────────────────
+
+async function loadPushHealth(){
+  const el='push-health-list';
+  document.getElementById(el).innerHTML='<div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>';
+  try{
+    const r=await fetch('/api/analytics/push-health');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(!d.success){renderEmpty(el,'企业微信未配置','在 config/sentry.json 中填入 wecom_sentry_webhook_key 和 wecom_status_webhook_key 即可启用推送');return;}
+    const bots=d.bots||{};
+    const entries=Object.entries(bots);
+    if(!entries.length){
+      renderEmpty(el,'暂无推送机器人','在 config/sentry.json 中配置 Webhook Key 后，推送状态将在此显示');
+      return;
+    }
+    document.getElementById(el).innerHTML=entries.map(([id,bot])=>{
+      const total=bot.total_pushes||0;
+      const success=bot.success_count||0;
+      const fail=bot.fail_count||0;
+      const rate=total>0?Math.round(success/total*100):0;
+      const rateColor=rate>=90?'var(--success)':rate>=70?'var(--warning)':'var(--danger)';
+      const recentFails=bot.recent_failures||[];
+      return `<div style="padding:var(--s3) 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <strong style="font-size:var(--text-sm)">${bot.name||id}</strong>
+            <span style="font-size:var(--text-xs);color:var(--text-muted);margin-left:8px">共推送 ${total} 次</span>
+          </div>
+          <span style="font-size:var(--text-sm);font-weight:700;color:${rateColor}">${rate}%</span>
+        </div>
+        <div style="display:flex;gap:16px;margin-top:4px;font-size:var(--text-xs)">
+          <span style="color:var(--success)">✅ 成功 ${success}</span>
+          <span style="color:var(--danger)">❌ 失败 ${fail}</span>
+          <span style="color:var(--text-muted)">最近成功: ${bot.last_success_time?(bot.last_success_time?new Date(bot.last_success_time*1000).toLocaleString('zh-CN',{hour12:false}):'—')('zh-CN',{hour12:false}):'—'}</span>
+        </div>
+        ${recentFails.length?`<div style="margin-top:4px;font-size:var(--text-xs);color:var(--danger)">
+          最近失败: ${recentFails.slice(-2).map(f=>`<span style="margin-right:8px">${new Date(f.time*1000).toLocaleTimeString('zh-CN',{hour12:false})} ${f.error||''}</span>`).join('')}
+        </div>`:''}
+      </div>`;
+    }).join('');
+  }catch(e){
+    console.error('loadPushHealth error:',e);
+    renderError(el, loadPushHealth, '推送数据加载失败');
+  }
+}
+
+// ── 事件统计 + 系统健康 ──────────────────────────────────────
+
+async function loadSummary(){
+  try{
+    const r=await fetch('/api/analytics/summary');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(!d.success){throw new Error(d.error||'API 返回失败');}
+
+    // 事件统计
+    const e=d.events||{};
+    document.getElementById('evt-total').textContent=e.total||0;
+    document.getElementById('evt-uploaded').textContent=e.uploaded||0;
+    document.getElementById('evt-pending').textContent=e.pending||0;
+    document.getElementById('evt-failed').textContent=e.failed||0;
+    document.getElementById('evt-rate-text').textContent=(e.upload_rate||0)+'%';
+    document.getElementById('evt-rate-bar').style.width=(e.upload_rate||0)+'%';
+    document.getElementById('stat-events').textContent=e.total||0;
+    document.getElementById('stat-rate').textContent=(e.upload_rate||0)+'%';
+
+    // 空状态引导：无事件时
+    if(!e.total){
+      document.getElementById('evt-rate-text').textContent='N/A';
+      document.getElementById('evt-rate-bar').style.width='0%';
+    }
+
+    // 系统健康
+    const h=d.health||{};
+    const healthy=h.healthy!==false;
+    document.getElementById('stat-health').textContent=healthy?'✅ 正常':'⚠️ 异常';
+    document.getElementById('stat-health').style.color=healthy?'var(--success)':'var(--danger)';
+
+    let healthHtml='';
+    if(h.metrics){
+      if(h.metrics.cpu_load!==undefined) healthHtml+=`<div>CPU 负载: ${h.metrics.cpu_load.toFixed(1)}%</div>`;
+      if(h.metrics.memory) healthHtml+=`<div>内存: ${h.metrics.memory.used_mb}MB / ${h.metrics.memory.total_mb}MB (${h.metrics.memory.percent.toFixed(1)}%)</div>`;
+      if(h.metrics.temperature!==undefined) healthHtml+=`<div>CPU 温度: ${h.metrics.temperature.toFixed(1)}°C</div>`;
+      if(h.metrics.network!==undefined) healthHtml+=`<div>网络: ${h.metrics.network?'✅ 在线':'❌ 离线'}</div>`;
+    }
+    if(h.issues&&h.issues.length) healthHtml+=`<div style="color:var(--danger);margin-top:8px">⚠️ ${h.issues.join('<br>⚠️ ')}</div>`;
+    if(!healthHtml) healthHtml='<span style="color:var(--text-muted)">系统运行正常，无异常指标</span>';
+    document.getElementById('health-details').innerHTML=healthHtml;
+
+    document.getElementById('lastUpdate').textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  }catch(e){
+    console.error('loadSummary error:',e);
+    document.getElementById('stat-events').textContent='—';
+    document.getElementById('stat-rate').textContent='—';
+    document.getElementById('stat-health').textContent='—';
+    document.getElementById('health-details').innerHTML=`
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s2) 0">
+        <span style="font-size:var(--text-sm);color:var(--danger)">⚠️ 统计数据加载失败</span>
+        <button class="btn btn-sm" onclick="loadSummary()">🔄 重试</button>
+      </div>`;
+  }
+}
+
+// ── 磁盘使用 ──────────────────────────────────────────────────
+
+async function loadDisk(){
+  try{
+    const r=await fetch('/api/analytics/disk');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(!d.success){throw new Error(d.error||'API 返回失败');}
+    const disks=d.disks||{};
+    const entries=Object.entries(disks);
+    if(!entries.length){
+      renderEmpty('disk-list','磁盘数据不可用','分区可能未挂载，请检查 /mnt/teslacam 等挂载点');
+      document.getElementById('stat-disk').textContent='—';
+      return;
+    }
+    const mountedDisks = Object.values(disks).filter(dk=>dk.mounted);
+    const allHealthy = mountedDisks.length > 0 && mountedDisks.every(dk=>dk.percent<90);
+    document.getElementById('stat-disk').textContent=allHealthy?'✅ 正常':'⚠️ 紧张';
+
+    document.getElementById('disk-list').innerHTML=entries.map(([name,dk])=>{
+      if(!dk.mounted){
+        const hasCache = dk.total > 0;
+        return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong>${name}</strong>
+          <span style="font-size:var(--text-xs);color:${hasCache?'var(--warning)':'var(--text-muted)'}">${hasCache?fmtBytes(dk.total)+' · 缓存':'未挂载'}</span>
+        </div>
+        <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">挂载点: ${dk.mount||'未知'}</div>
+      </div>`;
+      }
+      const pct=dk.percent||0;
+      const cls=pct>90?'danger':pct>80?'warn':'';
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong>${name}</strong>
+          <span style="font-size:var(--text-xs);color:var(--text-muted)">${fmtBytes(dk.used)} / ${fmtBytes(dk.total)}</span>
+        </div>
+        <div class="progress-bar" style="margin-top:4px"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>
+        <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">${pct}% 使用 · ${fmtBytes(dk.free)} 可用</div>
+      </div>`;
+    }).join('');
+  }catch(e){
+    console.error('loadDisk error:',e);
+    renderError('disk-list', loadDisk, '磁盘数据加载失败');
+    document.getElementById('stat-disk').textContent='—';
+  }
+}
+
+// ── 服务状态 ──────────────────────────────────────────────────
+
+async function loadServices(){
+  try{
+    const r=await fetch('/api/analytics/services');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(!d.success){throw new Error(d.error||'API 返回失败');}
+    const svcs=d.services||{};
+    const entries=Object.entries(svcs);
+    if(!entries.length){
+      renderEmpty('services-list','服务状态不可用','systemd 可能未正常运行，请通过 SSH 检查');
+      return;
+    }
+    document.getElementById('services-list').innerHTML=entries.map(([name,svc])=>{
+      const ok=svc.active;
+      const timerInfo=svc.timer_next?' (下次: '+svc.timer_next+')':'';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span>${name}${timerInfo?'<span style="font-size:var(--text-xs);color:var(--text-muted)">'+timerInfo+'</span>':''}</span>
+        <span style="color:${ok?'var(--success)':'var(--danger)'}">${ok?'● 运行中':'○ 已停止'}</span>
+      </div>`;
+    }).join('');
+  }catch(e){
+    console.error('loadServices error:',e);
+    renderError('services-list', loadServices, '服务状态加载失败');
+  }
+}
+
+// ═══════════════════════════════════════════
+// 清理管理相关函数
+// ═══════════════════════════════════════════
+
+async function loadCleanupPolicies(){
+  try{
+    const r=await fetch('/api/cleanup/policies');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(!d.success) throw new Error(d.error||'API 返回失败');
+    const p=d.policies||{};
+
+    // 更新策略数值
+    const thr=p.disk_thresholds||{};
+    document.getElementById('policy-warn').textContent=(thr.warning||85)+'%';
+    document.getElementById('policy-crit').textContent=(thr.critical||90)+'%';
+    const ret=p.retention||{};
+    document.getElementById('policy-preview-days').textContent=(ret.previews_days||7)+'天';
+    document.getElementById('policy-log-days').textContent=(ret.logs_days||30)+'天';
+
+    // 渲染清理顺序
+    const order=p.cleanup_order||[];
+    if(order.length){
+      document.getElementById('cleanup-order-list').innerHTML=order.map(o=>`<li>${o}</li>`).join('');
+    }
+
+    // 渲染分区状态
+    const parts=p.partitions||{};
+    const partEntries=Object.entries(parts);
+    if(!partEntries.length){
+      document.getElementById('cleanup-partitions').innerHTML='<div style="font-size:var(--text-sm);color:var(--text-muted);padding:var(--s2) 0">无分区数据 — 磁盘可能未挂载</div>';
+      return;
+    }
+    document.getElementById('cleanup-partitions').innerHTML=partEntries.map(([name,pt])=>{
+      if(pt.status==='未挂载'){
+        const cachedInfo = pt.total_fmt ? `${pt.total_fmt} · 缓存` : (pt.total_gb ? `${pt.total_gb}GB · 缓存` : '未挂载');
+        return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:var(--text-sm)"><strong>${name}</strong> <span style="color:var(--warning)">${cachedInfo}</span> · <span style="font-size:var(--text-xs);color:var(--text-muted)">${pt.path||''}</span></div>`;
+      }
+      if(pt.status==='错误')return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:var(--text-sm)"><strong>${name}</strong> <span style="color:var(--danger)">错误: ${pt.error||''}</span></div>`;
+      const pct=pt.percent||0;
+      const statusColor=pct>95?'var(--danger)':pct>90?'var(--danger)':pct>85?'var(--warning)':'var(--success)';
+      const statusLabel=pct>95?'🔴 紧急':pct>90?'🟠 严重':pct>85?'🟡 警告':'🟢 正常';
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-size:var(--text-sm);font-weight:600">${name}
+            <span style="font-size:var(--text-xs);color:var(--text-muted);font-weight:400;margin-left:6px">${pt.path||''}</span>
+          </span>
+          <span style="font-size:var(--text-xs);color:${statusColor};font-weight:600">${statusLabel} ${pct}%</span>
+        </div>
+        <div style="position:relative;height:8px;background:var(--bg-secondary);border-radius:4px;overflow:hidden">
+          <div style="position:absolute;top:0;left:0;height:100%;width:${pct}%;background:${pct>90?'var(--danger)':pct>85?'var(--warning)':'var(--success)'};border-radius:4px;transition:width 0.3s"></div>
+          <div style="position:absolute;top:0;left:85%;height:100%;width:2px;background:var(--warning);opacity:0.8"></div>
+          <div style="position:absolute;top:0;left:90%;height:100%;width:2px;background:var(--danger);opacity:0.8"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted);margin-top:3px">
+          <span>已用 ${pt.used_gb||0}GB / ${pt.total_gb||0}GB</span>
+          <span>剩余 ${pt.free_gb||0}GB</span>
+        </div>
+      </div>`;
+    }).join('');
+
+    // 同时刷新清理历史
+    loadCleanupHistory();
+  }catch(e){
+    console.error('loadCleanupPolicies error:',e);
+    document.getElementById('cleanup-partitions').innerHTML=`
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s2)">
+        <span style="font-size:var(--text-sm);color:var(--danger)">⚠️ 清理策略加载失败</span>
+        <button class="btn btn-sm" onclick="loadCleanupPolicies()">🔄 重试</button>
+      </div>`;
+  }
+}
+
+async function loadCleanupHistory(){
+  try{
+    const r=await fetch('/api/cleanup/history');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(!d.success) throw new Error(d.error||'API 返回失败');
+    const hist=d.history||[];
+    const el=document.getElementById('cleanup-history-list');
+    if(!hist.length){
+      el.innerHTML='<div style="font-size:var(--text-sm);color:var(--text-muted);padding:var(--s2) 0;text-align:center">📭 暂无清理记录 — 系统尚未触发过自动或手动清理</div>';
+      return;
+    }
+    el.innerHTML=hist.map(c=>{
+      const ts=c.timestamp?new Date(c.timestamp).toLocaleString('zh-CN',{hour12:false}):'—';
+      const freed=c.freed_bytes?fmtBytes(c.freed_bytes):'0 B';
+      const deleted=c.deleted_files||0;
+      const mode=c.mode||'';
+      const modeColor=mode==='emergency'?'var(--danger)':mode==='critical'?'var(--warning)':mode==='warning'?'var(--warning)':'var(--success)';
+      const modeLabel=mode==='emergency'?'🔴 紧急':mode==='critical'?'🟠 严重':mode==='warning'?'🟡 警告':'🟢 常规';
+      const actions=c.actions||[];
+      return `<div style="padding:var(--s2) 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:var(--text-sm);color:var(--text-muted)">${ts}</span>
+          <span style="font-size:var(--text-xs);color:${modeColor};font-weight:600">${modeLabel}</span>
+        </div>
+        <div style="display:flex;gap:16px;margin-top:3px;font-size:var(--text-sm)">
+          <span>🗑️ 删除 <strong>${deleted}</strong> 个文件</span>
+          <span>💾 释放 <strong style="color:var(--success)">${freed}</strong></span>
+        </div>
+        ${actions.length?`<div style="margin-top:4px">${actions.map(a=>`
+          <div style="font-size:var(--text-xs);color:var(--text-muted);padding:1px 0;padding-left:8px;border-left:2px solid var(--border)">
+            ${a.type||''}: ${a.file||a.description||a}
+            ${a.size?` (${fmtBytes(a.size)})`:''}
+          </div>`).join('')}</div>`:''}
+      </div>`;
+    }).join('');
+  }catch(e){
+    console.error('loadCleanupHistory error:',e);
+    document.getElementById('cleanup-history-list').innerHTML=`
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s2)">
+        <span style="font-size:var(--text-sm);color:var(--danger)">⚠️ 清理历史加载失败</span>
+        <button class="btn btn-sm" onclick="loadCleanupHistory()">🔄 重试</button>
+      </div>`;
+  }
+}
+
+async function runCleanupPreview(){
+  const btn=document.getElementById('btn-preview');
+  const outDiv=document.getElementById('cleanup-output');
+  const outText=document.getElementById('cleanup-output-text');
+  const outTitle=document.getElementById('cleanup-output-title');
+
+  btn.disabled=true;
+  btn.textContent='🔄 预览中...';
+  outTitle.textContent='预览结果（dry-run，不会实际删除）';
+  outDiv.style.display='block';
+  outText.textContent='正在运行预览，请稍候...';
+
+  try{
+    const r=await fetch('/api/cleanup/preview',{method:'POST'});
+    const d=await r.json();
+    if(d.success){
+      let output=d.output||'（无输出）';
+      if(d.errors) output+= '\n\n[stderr]\n'+d.errors;
+      outText.textContent=output;
+    }else{
+      outText.textContent='预览失败: '+(d.error||'未知错误');
+    }
+  }catch(e){
+    outText.textContent='请求失败: '+e.message;
+  }finally{
+    btn.disabled=false;
+    btn.textContent='🔍 预览清理（dry-run）';
+  }
+}
+
+async function runCleanupExecute(){
+  if(!confirm('确认立即执行清理？\n此操作将根据策略删除符合条件的文件，无法撤销！')){return;}
+
+  const btn=document.getElementById('btn-execute');
+  const outDiv=document.getElementById('cleanup-output');
+  const outText=document.getElementById('cleanup-output-text');
+  const outTitle=document.getElementById('cleanup-output-title');
+
+  btn.disabled=true;
+  btn.textContent='⚡ 执行中...';
+  outTitle.textContent='执行结果';
+  outDiv.style.display='block';
+  outText.textContent='正在执行清理，请稍候...';
+
+  try{
+    const r=await fetch('/api/cleanup/execute',{method:'POST'});
+    const d=await r.json();
+    if(d.success){
+      let output=d.output||'（无输出）';
+      if(d.errors) output+='\n\n[stderr]\n'+d.errors;
+      outText.textContent=output;
+      // 刷新分区状态和历史
+      setTimeout(()=>{loadCleanupPolicies();},1000);
+    }else{
+      outText.textContent='执行失败: '+(d.error||'未知错误')+'\n\n'+((d.output||'')+(d.errors||''));
+    }
+  }catch(e){
+    outText.textContent='请求失败: '+e.message;
+  }finally{
+    btn.disabled=false;
+    btn.textContent='⚡ 立即执行清理';
+  }
+}
+
+// 初始加载
+loadPushHealth();
+loadSummary();
+loadDisk();
+loadServices();
+loadCleanupPolicies();
+
+// 每 30 秒刷新
+setInterval(()=>{loadPushHealth();loadSummary();loadDisk();loadServices();loadCleanupPolicies();},30000);
+</script>
+
+<style>
+/* btn-danger 样式补充 */
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{opacity:0.85}
+</style>
+{% endblock %}

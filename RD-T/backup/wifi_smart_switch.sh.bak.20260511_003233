@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# WiFi智能切换脚本
+# 功能：检测当前WiFi连通性，自动切换到优先级更高的网络
+
+# WiFi优先级配置（数值越高优先级越高）
+declare -A WIFI_PRIORITY=(
+    ["C123"]=400
+    ["C12345"]=300
+    ["HP-00J6O"]=200
+    ["CD"]=100
+    ["189-AP"]=50
+)
+
+# 日志文件
+LOG_FILE="/var/log/wifi-smart-switch.log"
+
+# 记录日志
+log_message() {
+    local message="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_FILE"
+}
+
+# 获取当前连接的WiFi
+get_current_wifi() {
+    local wifi=$(nmcli -t -f DEVICE,STATE,CONNECTION device status | grep '^wlan0:connected:' | cut -d':' -f3)
+    if [ -z "$wifi" ]; then
+        wifi=$(nmcli -t -f SSID,ACTIVE device wifi | grep ':yes$' | cut -d':' -f1)
+    fi
+    if [ -z "$wifi" ] && command -v iwgetid &> /dev/null; then
+        wifi=$(iwgetid -r)
+    fi
+    echo "$wifi"
+}
+
+# 检测网络连通性
+check_wifi_connection() {
+    local wifi=$(get_current_wifi)
+    if [ -z "$wifi" ]; then
+        echo "false"
+        return 1
+    fi
+    
+    local ping_targets=("12.127.12.8" "12.127.12.245" "baidu.com")
+    local ping_success=0
+    
+    for target in "${ping_targets[@]}"; do
+        if ping -c 2 -W 3 "$target" > /dev/null 2>&1; then
+            log_message "连通性检测成功: $target"
+            ping_success=1
+            break
+        fi
+    done
+    
+    if [ $ping_success -eq 1 ]; then
+        echo "true"
+        return 0
+    else
+        log_message "所有检测目标都无法ping通"
+        echo "false"
+        return 1
+    fi
+}
+
+# 获取可用的WiFi列表（按优先级排序）
+get_available_wifis() {
+    local available_wifis=()
+    
+    # 扫描可用的WiFi，使用进程替换避免子shell问题
+    # 添加 sort -u 去重
+    while read -r ssid; do
+        [ -z "$ssid" ] && continue
+        ssid=$(echo "$ssid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -n "${WIFI_PRIORITY[$ssid]}" ]; then
+            available_wifis+=("$ssid")
+        fi
+    done < <(nmcli -t -f SSID device wifi list | grep -v '^--' | grep -v '^$' | sort -u)
+    
+    # 按优先级排序（数值越高越优先）
+    for ssid in "${available_wifis[@]}"; do
+        echo "${WIFI_PRIORITY[$ssid]}:$ssid"
+    done | sort -t':' -k1 -rn | cut -d':' -f2-
+}
+
+# 切换到指定的WiFi
+switch_to_wifi() {
+    local target_wifi="$1"
+    log_message "正在切换到WiFi: $target_wifi"
+    nmcli device disconnect wlan0 2>/dev/null
+    sleep 2
+    if nmcli device wifi connect "$target_wifi"; then
+        log_message "成功切换到WiFi: $target_wifi"
+        return 0
+    else
+        log_message "切换失败: $target_wifi"
+        return 1
+    fi
+}
+
+# 主函数
+main() {
+    log_message "========================================"
+    log_message "开始检查WiFi连接..."
+    
+    local current_wifi=$(get_current_wifi)
+    log_message "当前WiFi: '$current_wifi'"
+    
+    local is_connected=$(check_wifi_connection)
+    log_message "网络连通性: $is_connected"
+    
+    if [ "$is_connected" = "true" ]; then
+        log_message "网络连通正常"
+        local available_wifis=$(get_available_wifis)
+        log_message "可用WiFi: $available_wifis"
+        
+        for wifi in $available_wifis; do
+            if [ -n "${WIFI_PRIORITY[$wifi]}" ] && [ -n "${WIFI_PRIORITY[$current_wifi]}" ]; then
+                if [ "${WIFI_PRIORITY[$wifi]}" -gt "${WIFI_PRIORITY[$current_wifi]}" ]; then
+                    log_message "发现更高优先级WiFi: $wifi (${WIFI_PRIORITY[$wifi]} > ${WIFI_PRIORITY[$current_wifi]})"
+                    switch_to_wifi "$wifi"
+                    break
+                fi
+            fi
+        done
+    else
+        log_message "网络不通，尝试重新连接..."
+        local available_wifis=$(get_available_wifis)
+        log_message "可用WiFi: $available_wifis"
+        
+        for wifi in $available_wifis; do
+            if [ -n "${WIFI_PRIORITY[$wifi]}" ]; then
+                log_message "尝试连接到: $wifi (优先级: ${WIFI_PRIORITY[$wifi]})"
+                if nmcli device wifi connect "$wifi"; then
+                    log_message "成功连接到: $wifi"
+                    break
+                fi
+            fi
+        done
+    fi
+    
+    log_message "WiFi检查完成"
+    log_message "========================================"
+}
+
+main

@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %} — 实时日志{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>📋 实时日志</h2>
+  <div class="btn-group">
+    <span class="badge badge-info" id="log-count">0 行</span>
+    <select id="log-source" onchange="restartStream()" style="padding:4px 8px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);font-size:var(--text-xs);font-family:var(--font)">
+      <option value="">全部日志</option>
+      <option value="teslausb-web">TeslaUSB Web</option>
+      <option value="kernel">内核 (Kernel)</option>
+      <option value="systemd">systemd</option>
+      <option value="cron">Cron</option>
+      <option value="smbd">Samba</option>
+    </select>
+    <input type="text" id="log-search" placeholder="搜索..." oninput="applyFilter()"
+      style="padding:4px 10px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);font-size:var(--text-xs);width:140px;font-family:var(--font)">
+    <button id="btn-pause" onclick="togglePause()" class="btn btn-ghost btn-sm">⏸ 暂停</button>
+    <button onclick="clearLog()" class="btn btn-ghost btn-sm">🗑 清屏</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--text-secondary);cursor:pointer;">
+      <input type="checkbox" id="auto-scroll" checked> 自动滚动
+    </label>
+  </div>
+</div>
+<div id="log-box" class="log-box"><div id="log-content"></div></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let paused = false, source = null, logLines = [];
+let lineCount = 0;
+
+function startStream(){
+  if (source) { source.close(); source = null; }
+
+  const unit = document.getElementById('log-source').value;
+  let url = '/api/logs/stream';
+  if (unit) url += '?unit=' + encodeURIComponent(unit);
+
+  source = new EventSource(url);
+  source.onmessage = function(e){
+    if (paused) return;
+    try {
+      const data = JSON.parse(e.data);
+      const text = typeof data === 'string' ? data : (data.text || data.line || JSON.stringify(data));
+      appendLine(text, data.timestamp || '');
+    } catch(ex) {
+      appendLine(String(e.data), '');
+    }
+  };
+  source.onerror = function(){
+    appendLine('', '⚠ 连接断开，5秒后重连...');
+    source.close();
+    setTimeout(startStream, 5000);
+  };
+}
+
+function appendLine(text, ts) {
+  if (ts === '⚠ 连接断开，5秒后重连...') {
+    const c = document.getElementById('log-content');
+    const d = document.createElement('div');
+    d.className = 'log-line log-warn';
+    d.textContent = ts;
+    d.style.paddingLeft = '0';
+    c.appendChild(d);
+    updateCount();
+    scrollIfNeeded();
+    return;
+  }
+
+  const searchTerm = document.getElementById('log-search').value.toLowerCase();
+  lineCount++;
+
+  // 解析日志格式: 2026-05-16T10:30:45+0800 hostname process[pid]: message
+  let displayTs = ts, displayMsg = text;
+  if (!ts && text) {
+    // 尝试从文本中提取 ISO 时间戳
+    const m = text.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})\s/);
+    if (m) {
+      try {
+        const d = new Date(m[1]);
+        displayTs = d.toLocaleTimeString('zh-CN', { hour12: false });
+        displayMsg = text.substring(m[0].length);
+      } catch(e) { displayTs = ''; displayMsg = text; }
+    }
+  }
+
+  const c = document.getElementById('log-content');
+  const d = document.createElement('div');
+  d.className = 'log-line';
+  d.dataset.raw = (displayMsg || '').toLowerCase();
+
+  // 着色
+  if (/error|fail|fatal|critical|err/i.test(displayMsg)) d.classList.add('log-error');
+  else if (/warn|warning/i.test(displayMsg)) d.classList.add('log-warn');
+  else if (/success|ok|done|started|active/i.test(displayMsg)) d.classList.add('log-success');
+
+  // 时间戳
+  if (displayTs) {
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'log-ts';
+    tsSpan.textContent = displayTs;
+    d.appendChild(tsSpan);
+  }
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'log-msg';
+  msgSpan.textContent = displayMsg;
+
+  // 搜索高亮
+  if (searchTerm && displayMsg.toLowerCase().includes(searchTerm)) {
+    d.classList.add('log-highlight');
+    // 简单高亮：按匹配词拆分
+    const re = new RegExp('(' + searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    msgSpan.innerHTML = displayMsg.replace(re, '<mark>$1</mark>');
+  }
+
+  d.appendChild(msgSpan);
+  c.appendChild(d);
+
+  // 限制行数
+  while (c.children.length > 1000) c.removeChild(c.firstChild);
+
+  // 搜索过滤
+  if (searchTerm && !displayMsg.toLowerCase().includes(searchTerm)) {
+    d.style.display = 'none';
+  }
+
+  updateCount();
+  scrollIfNeeded();
+}
+
+function scrollIfNeeded() {
+  if (document.getElementById('auto-scroll').checked) {
+    const b = document.getElementById('log-box');
+    b.scrollTop = b.scrollHeight;
+  }
+}
+
+function updateCount() {
+  const el = document.getElementById('log-count');
+  if (el) {
+    const visible = document.querySelectorAll('#log-content .log-line:not([style*="display: none"])').length;
+    el.textContent = visible + ' 行';
+    el.className = 'badge badge-info';
+  }
+}
+
+function applyFilter() {
+  const searchTerm = document.getElementById('log-search').value.toLowerCase();
+  const lines = document.querySelectorAll('#log-content .log-line');
+  lines.forEach(d => {
+    if (!d.dataset.raw) { d.style.display = ''; return; }
+    d.style.display = (searchTerm && !d.dataset.raw.includes(searchTerm)) ? 'none' : '';
+    // 重新高亮
+    const msgSpan = d.querySelector('.log-msg');
+    if (msgSpan) {
+      const raw = d.dataset.raw;
+      if (searchTerm && raw.includes(searchTerm)) {
+        const re = new RegExp('(' + searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+        msgSpan.innerHTML = raw.replace(re, '<mark>$1</mark>');
+        d.classList.add('log-highlight');
+      } else {
+        msgSpan.textContent = raw;
+        d.classList.remove('log-highlight');
+      }
+    }
+  });
+  updateCount();
+}
+
+function togglePause() {
+  paused = !paused;
+  document.getElementById('btn-pause').textContent = paused ? '▶ 继续' : '⏸ 暂停';
+}
+
+function clearLog() {
+  document.getElementById('log-content').innerHTML = '';
+  lineCount = 0;
+  updateCount();
+}
+
+function restartStream() {
+  clearLog();
+  startStream();
+}
+
+startStream();
+</script>
+
+<style>
+.log-ts {
+  color: var(--text-muted);
+  margin-right: 10px;
+  font-size: 11px;
+  flex-shrink: 0;
+  min-width: 70px;
+}
+.log-line {
+  display: flex;
+  align-items: baseline;
+}
+.log-msg { word-break: break-all; }
+.log-highlight { background: rgba(245, 158, 11, 0.08); }
+.log-highlight mark {
+  background: rgba(245, 158, 11, 0.35);
+  color: var(--warning);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+</style>
+{% endblock %}

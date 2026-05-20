@@ -1,0 +1,19 @@
+[0;1;32m●[0m teslausb-mode.service - TeslaUSB Mode Controller - Auto Present Mode
+     Loaded: loaded (/etc/systemd/system/teslausb-mode.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (exited)[0m since Tue 2026-05-12 10:59:25 CST; 12h ago
+   Main PID: 1011 (code=exited, status=0/SUCCESS)
+      Tasks: 0 (limit: 1117)
+     Memory: 0B
+        CPU: 0
+     CGroup: /system.slice/teslausb-mode.service
+
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1062]:     LUN 3: /dev/nvme0n1p5 -> BOOMBOX
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1062]: 
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1062]:   提示: 分区已被 USB 独占，本地无法挂载
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1062]:   恢复: sudo bash /opt/radxa_data/usb_gadget_init.sh stop
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1139]: [2026-05-12 10:59:25] [INFO] ✅ Present Mode 激活成功！Tesla 可以识别 USB 设备
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1142]: [2026-05-12 10:59:25] [INFO]   模式: Present Mode (连接 Tesla)
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1145]: [2026-05-12 10:59:25] [INFO]   USB Gadget: 已激活
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1148]: [2026-05-12 10:59:25] [INFO]   Samba: 已停止
+5月 12 10:59:25 radxa-cubie-a7z present_usb.sh[1151]: [2026-05-12 10:59:25] [INFO]   TeslaCam: 只读挂载
+5月 12 10:59:25 radxa-cubie-a7z systemd[1]: Finished TeslaUSB Mode Controller - Auto Present Mode.

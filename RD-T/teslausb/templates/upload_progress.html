@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %} — 上传进度{% endblock %}
+{% block content %}
+<div class="page-header"><h2>⬆️ 上传进度</h2></div>
+
+<!-- 统计 -->
+<div class="stats-grid">
+  <div class="stat-card"><div class="stat-label">上传中</div><div class="stat-value status-ok" id="stat-active">{{ active_count }}</div></div>
+  <div class="stat-card"><div class="stat-label">等待中</div><div class="stat-value status-warn" id="stat-pending">{{ pending_count }}</div></div>
+  <div class="stat-card"><div class="stat-label">已完成</div><div class="stat-value" style="color:var(--info)" id="stat-completed">{{ completed_count }}</div></div>
+  <div class="stat-card"><div class="stat-label">失败</div><div class="stat-value status-err" id="stat-failed">{{ failed_count }}</div></div>
+</div>
+
+<!-- Tabs -->
+<div class="card">
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="active">上传中 ({{ active_count }})</button>
+    <button class="tab-btn" data-tab="pending">等待中 ({{ pending_count }})</button>
+    <button class="tab-btn" data-tab="completed">已完成 ({{ completed_count }})</button>
+    <button class="tab-btn" data-tab="failed">失败 ({{ failed_count }})</button>
+  </div>
+
+  <div class="tab-panel active" id="tab-active">
+    {% for item in (queue.active or []) %}
+    <div class="queue-item uploading" data-id="{{ item.id }}">
+      <div class="queue-header">
+        <div><div class="queue-name">{{ item.event_name }}</div><div class="queue-meta">{{ item.file_count }} 个文件 · {{ '在家' if item.location == 'home' else '外出' }} · {{ item.timestamp[:19] if item.timestamp else '未知' }}</div></div>
+        <span class="badge badge-success"><span class="spinner" style="width:12px;height:12px;border-width:1px"></span> 上传中</span>
+      </div>
+      <div class="progress-row"><div class="progress"><div class="progress-fill success" style="width:{{ item.progress }}%"></div></div><span class="progress-pct">{{ "%.1f"|format(item.progress) }}%</span></div>
+      <div class="btn-group" style="margin-top:var(--s3)"><button class="btn btn-danger btn-sm" onclick="cancelUpload('{{ item.id }}')">取消</button></div>
+    </div>
+    {% endfor %}
+    {% if not (queue.active) %}<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">没有正在上传的任务</div></div>{% endif %}
+  </div>
+
+  <div class="tab-panel" id="tab-pending">
+    {% for item in (queue.pending or []) %}
+    <div class="queue-item pending" data-id="{{ item.id }}">
+      <div class="queue-header">
+        <div><div class="queue-name">{{ item.event_name }}</div><div class="queue-meta">{{ item.file_count }} 个文件 · {{ item.timestamp[:19] if item.timestamp else '未知' }}</div></div>
+        <span class="badge badge-warning">{{ '待确认' if item.status == 'pending_confirm' else '等待上传' }}</span>
+      </div>
+      {% if item.status == 'pending_confirm' %}
+      <div class="btn-group" style="margin-top:var(--s3)"><a href="/sentry" class="btn btn-primary btn-sm">去确认</a></div>
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% if not (queue.pending) %}<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">没有等待中的任务</div></div>{% endif %}
+  </div>
+
+  <div class="tab-panel" id="tab-completed">
+    {% for item in (queue.completed or []) %}
+    <div class="queue-item completed">
+      <div class="queue-header">
+        <div><div class="queue-name">{{ item.event_name }}</div><div class="queue-meta">{{ item.file_count }} 个文件 · {{ item.timestamp[:19] if item.timestamp else '未知' }}</div></div>
+        <span class="badge badge-accent">✓ 完成</span>
+      </div>
+      {% if item.nas_path %}<div class="queue-meta" style="color:var(--success)">NAS: {{ item.nas_path }}</div>{% endif %}
+    </div>
+    {% endfor %}
+    {% if not (queue.completed) %}<div class="empty"><div class="empty-icon">📂</div><div class="empty-text">没有已完成的上传</div></div>{% endif %}
+  </div>
+
+  <div class="tab-panel" id="tab-failed">
+    {% for item in (queue.failed or []) %}
+    <div class="queue-item failed" data-id="{{ item.id }}">
+      <div class="queue-header">
+        <div><div class="queue-name">{{ item.event_name }}</div><div class="queue-meta">{{ item.timestamp[:19] if item.timestamp else '未知' }}</div></div>
+        <span class="badge badge-danger">{{ '已过期' if item.status == 'expired' else '失败' }}</span>
+      </div>
+      {% if item.error %}<div class="queue-meta" style="color:var(--danger)">错误: {{ item.error }}</div>{% endif %}
+      <div class="btn-group" style="margin-top:var(--s3)">
+        <button class="btn btn-primary btn-sm" onclick="retryUpload('{{ item.id }}')">重试</button>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.queue-item').remove()">忽略</button>
+      </div>
+    </div>
+    {% endfor %}
+    {% if not (queue.failed) %}<div class="empty"><div class="empty-icon">🎉</div><div class="empty-text">没有失败的任务</div></div>{% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Tab切换
+document.querySelectorAll('.tab-btn').forEach(t=>{t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));t.classList.add('active');
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));document.getElementById('tab-'+t.dataset.tab).classList.add('active');
+});});
+
+// 操作
+async function cancelUpload(id){if(!confirm('确定取消？'))return;try{const r=await fetch('/api/upload/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:id})});const d=await r.json();if(d.success)location.reload();else alert(d.error||'失败');}catch(e){alert('请求失败');}}
+async function retryUpload(id){try{const r=await fetch('/api/upload/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:id})});const d=await r.json();if(d.success){alert('已加入重试队列');location.reload();}else alert(d.error||'失败');}catch(e){alert('请求失败');}}
+
+// 自动刷新统计
+let busy=false;
+setInterval(async()=>{if(busy)return;busy=true;try{const r=await fetch('/api/upload/status'),d=await r.json();if(d.success){document.getElementById('stat-active').textContent=d.active.length;document.getElementById('stat-pending').textContent=d.pending.length;document.getElementById('stat-completed').textContent=d.completed.length;document.getElementById('stat-failed').textContent=d.failed.length;}}catch(e){}busy=false;},5000);
+</script>
+{% endblock %}

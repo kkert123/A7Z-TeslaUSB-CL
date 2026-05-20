@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %} — WiFi 管理{% endblock %}
+
+{% macro render_conn(conn) %}
+<div class="conn-card {% if conn.active %}connected{% endif %}" id="conn-{{ conn.name }}">
+  <!-- 顶部：名称 + 状态徽章 -->
+  <div class="conn-header">
+    <div class="conn-name">
+      {{ conn.name or conn.ssid }}
+      {% if conn.active %}<span class="badge badge-success">当前</span>{% endif %}
+    </div>
+    <div class="conn-meta">
+      {% if conn.ssid and conn.ssid != conn.name %}
+      <span class="meta-item"><span class="meta-label">SSID</span><span class="meta-val">{{ conn.ssid }}</span></span>
+      {% endif %}
+      <span class="meta-item"><span class="meta-label">优先级</span><span class="meta-val">{{ conn.priority }}</span></span>
+      <span class="meta-item">
+        <span class="meta-label">自动连接</span>
+        <span class="badge {% if conn.autoconnect %}badge-success{% else %}badge-warning{% endif %}">{{ '开' if conn.autoconnect else '关' }}</span>
+      </span>
+    </div>
+  </div>
+  <!-- 底部：操作按钮 -->
+  <div class="conn-actions">
+    <button class="btn btn-primary btn-sm" onclick="switchTo('{{ conn.name }}')">切换</button>
+    <button class="btn btn-ghost btn-sm" onclick="editPriority('{{ conn.name }}', {{ conn.priority }})">优先级</button>
+    <button class="btn btn-ghost btn-sm" onclick="editName('{{ conn.name }}')">重命名</button>
+    <button class="btn btn-ghost btn-sm" onclick="toggleAuto('{{ conn.name }}', {{ 'true' if conn.autoconnect else 'false' }})">{{ '关自动' if conn.autoconnect else '开自动' }}</button>
+    <button class="btn btn-sm" style="background:var(--danger-soft);color:var(--danger);border:1px solid var(--danger-soft)" onclick="delConn('{{ conn.name }}')">删除</button>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+<div class="page-header"><h2>📶 WiFi 管理</h2></div>
+
+{% if wifi_status %}
+<div class="alert alert-{% if wifi_status.success %}success{% elif wifi_status.action == 'reverted' %}warning{% else %}danger{% endif %}" id="wifi-alert">
+  <div>{{ wifi_status.message }}{% if wifi_status.timestamp %} <span style="opacity:0.7;font-size:var(--text-xs)">{{ wifi_status.timestamp }}</span>{% endif %}</div>
+  <button class="alert-close" onclick="dismissAlert()">✕</button>
+</div>
+{% endif %}
+
+<!-- 当前连接 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">当前连接</h3>
+  {% if current.connected %}
+  <div style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s3)">
+    <span class="status status-ok">已连接</span>
+    <strong style="font-size:var(--text-lg)">{{ current.ssid }}</strong>
+    {% if current.signal is not none %}
+    <span class="badge {% if current.signal >= 60 %}badge-success{% elif current.signal >= 30 %}badge-accent{% else %}badge-danger{% endif %}" style="font-size:10px">{{ current.signal }}%</span>
+    {% endif %}
+  </div>
+  <!-- 连接详情 - 直接展示，无需点击 -->
+  <div class="detail-grid" id="conn-details">
+    <div class="detail-item"><span class="label">MAC</span><span class="value" id="d-mac">加载中...</span></div>
+    <div class="detail-item"><span class="label">IP</span><span class="value" id="d-ip">加载中...</span></div>
+    <div class="detail-item"><span class="label">网关</span><span class="value" id="d-gw">加载中...</span></div>
+    <div class="detail-item"><span class="label">DNS</span><span class="value" id="d-dns">加载中...</span></div>
+    <div class="detail-item"><span class="label">信道</span><span class="value" id="d-ch">加载中...</span></div>
+    <div class="detail-item"><span class="label">频率</span><span class="value" id="d-freq">—</span></div>
+    <div class="detail-item"><span class="label">速率</span><span class="value" id="d-rate">—</span></div>
+  </div>
+  {% else %}
+  <span class="status status-warn">未连接 WiFi</span>
+  {% endif %}
+</div>
+
+<!-- AP 热点 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">📡 AP 热点</h3>
+  <div style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s3)">
+    <span id="ap-status-text">加载中...</span>
+    <span class="badge" id="ap-mode-badge">自动</span>
+    <button class="btn btn-ghost btn-sm" onclick="cycleApMode()">切换模式</button>
+  </div>
+  <div class="detail-grid" style="margin-bottom:var(--s3)">
+    <div class="detail-item"><span class="label">AP SSID</span><span class="value" id="ap-ssid">加载中...</span></div>
+    <div class="detail-item"><span class="label">状态</span><span class="value" id="ap-active-text">加载中...</span></div>
+  </div>
+  <div class="btn-group">
+    <button class="btn btn-primary btn-sm" onclick="apAction('start')">▶ 开启</button>
+    <button class="btn btn-danger btn-sm" onclick="apAction('stop')">⏹ 关闭</button>
+    <button class="btn btn-ghost btn-sm" onclick="editApConfig()">⚙️ 配置</button>
+  </div>
+</div>
+
+<!-- 已保存网络 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">
+    已保存网络
+    <span style="font-size:var(--text-xs);color:var(--text-muted);font-weight:400">（按优先级排序）</span>
+  </h3>
+  <div id="conn-list">
+    {% for conn in connections %}
+    {{ render_conn(conn) }}
+    {% endfor %}
+  </div>
+  {% if not connections %}
+  <p style="color:var(--text-muted);font-size:var(--text-sm)">暂无已保存的网络</p>
+  {% endif %}
+</div>
+
+<!-- 扫描 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">扫描</h3>
+  <button class="btn btn-primary btn-sm" id="scanBtn" onclick="scanWifi()">🔍 扫描</button>
+  <div id="scan-results" style="margin-top:var(--s3)"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* ── WiFi 详情 ── */
+function loadDetails(){
+  fetch('/api/wifi/details').then(r=>r.json()).then(d=>{
+    const info=d.data||d; // 兼容 {data:{}} 和直接返回
+    const s=v=>v||'—';
+    document.getElementById('d-mac').textContent=s(info.mac);
+    document.getElementById('d-ip').textContent=s(info.ip);
+    document.getElementById('d-gw').textContent=s(info.gateway);
+    document.getElementById('d-dns').textContent=Array.isArray(info.dns)&&info.dns.length?info.dns.join(', '):s(info.dns);
+    document.getElementById('d-ch').textContent=s(info.channel);
+    document.getElementById('d-freq').textContent=info.frequency?info.frequency+' MHz':'—';
+    document.getElementById('d-rate').textContent=s(info.rate);
+  }).catch(()=>{});
+}
+
+/* ── AP 管理 ── */
+let currentApMode='auto';
+function loadApStatus(){
+  fetch('/api/ap/status').then(r=>r.json()).then(d=>{
+    const active=d.active||d.ap_active||false;
+    document.getElementById('ap-active-text').textContent=active?'已开启':'已关闭';
+    document.getElementById('ap-status-text').textContent=active?'AP 开启':'AP 关闭';
+    document.getElementById('ap-status-text').className='status '+(active?'status-ok':'status-muted');
+  }).catch(()=>{});
+  // 获取 AP 配置
+  fetch('/api/ap/config').then(r=>r.json()).then(d=>{
+    document.getElementById('ap-ssid').textContent=d.ssid||'—';
+  }).catch(()=>{});
+  // 获取 AP 模式
+  fetch('/api/ap/mode?t='+Date.now()).catch(()=>{}); // 读取模式（如果有 GET 接口）
+}
+function apAction(a){
+  fetch('/api/ap/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message||d.error||'操作失败');}).catch(()=>alert('请求失败'));
+}
+const AP_MODES=['auto','force-on','force-off'];
+const AP_MODE_LABELS={'auto':'自动','force-on':'强制开启','force-off':'强制关闭'};
+const AP_MODE_CLASSES={'auto':'badge-accent','force-on':'badge-success','force-off':'badge-danger'};
+function cycleApMode(){
+  const idx=(AP_MODES.indexOf(currentApMode)+1)%AP_MODES.length;
+  const newMode=AP_MODES[idx];
+  if(!confirm('AP 模式切换为: '+AP_MODE_LABELS[newMode]+'？'))return;
+  fetch('/api/ap/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:newMode})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){currentApMode=newMode;updateApBadge();alert(d.message);}
+    else alert(d.message||'切换失败');
+  }).catch(()=>alert('请求失败'));
+}
+function updateApBadge(){
+  const badge=document.getElementById('ap-mode-badge');
+  badge.textContent=AP_MODE_LABELS[currentApMode]||currentApMode;
+  badge.className='badge '+(AP_MODE_CLASSES[currentApMode]||'');
+}
+function editApConfig(){
+  const curSsid=document.getElementById('ap-ssid').textContent;
+  const newSsid=prompt('AP SSID:', curSsid==='—'?'TeslaUSB-Setup':curSsid);
+  if(newSsid===null)return;
+  const newPass=prompt('AP 密码（8-63字符，留空不修改）:');
+  if(newPass===null)return;
+  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:newSsid,passphrase:newPass})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message||'保存失败');}).catch(()=>alert('请求失败'));
+}
+
+/* ── WiFi 连接管理 ── */
+function switchTo(id){
+  if(!confirm('确定切换到 '+id+'？\n切换后当前连接可能中断几秒。'))return;
+  fetch('/api/wifi/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:id})})
+  .then(r=>r.json()).then(d=>{location.reload();}).catch(()=>alert('请求失败'));
+}
+function delConn(id){
+  if(!confirm('确定删除连接 "'+id+'"？\n此操作不可恢复。'))return;
+  fetch('/api/wifi/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({con_name:id})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+function editPriority(name, curPriority){
+  const val=prompt(name+' 的优先级 (0-100，数字越大越优先):', curPriority);
+  if(val===null)return;
+  const num=parseInt(val,10);
+  if(isNaN(num)||num<0||num>100){alert('请输入 0-100 的整数');return;}
+  fetch('/api/wifi/priority',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({con_name:name,priority:num})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+function editName(name){
+  const newName=prompt('新连接名:', name);
+  if(newName===null||!newName.trim())return;
+  fetch('/api/wifi/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old_name:name,new_name:newName.trim()})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+function toggleAuto(name, currentState){
+  const newVal=!currentState;
+  const label=newVal?'开启':'关闭';
+  if(!confirm(label+' "'+name+'" 的自动连接？'))return;
+  fetch('/api/wifi/autoconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({con_name:name,autoconnect:newVal})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+
+/* ── WiFi 扫描 ── */
+function scanWifi(){
+  const b=document.getElementById('scanBtn');
+  b.disabled=true;b.textContent='扫描中...';
+  fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{
+    b.disabled=false;b.textContent='🔍 扫描';
+    const el=document.getElementById('scan-results');
+    if(d.networks&&d.networks.length){
+      el.innerHTML=d.networks.map(n=>{
+        const locked=n.secured?'🔒':'🔓';
+        const sigBadge=n.signal>=60?'badge-success':n.signal>=30?'badge-accent':'badge-danger';
+        return '<div class="wifi-item"><div style="flex:1;min-width:0"><div class="wifi-ssid">'+locked+' '+n.ssid+' <span class="badge '+sigBadge+'" style="font-size:10px">'+n.signal+'%</span></div></div><button class="btn btn-ghost btn-sm" onclick="connectNew(\''+n.ssid.replace(/'/g,"\\'")+'\')">连接</button></div>';
+      }).join('');
+    }else{
+      el.innerHTML='<p style="color:var(--text-muted);font-size:var(--text-sm)">未发现可用网络</p>';
+    }
+  }).catch(()=>{b.disabled=false;b.textContent='🔍 扫描';});
+}
+function connectNew(ssid){
+  const p=prompt('输入 '+ssid+' 的密码（开放网络留空）:');
+  if(p===null)return;
+  fetch('/api/wifi/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password:p})})
+  .then(r=>r.json()).then(d=>{location.reload();}).catch(()=>alert('请求失败'));
+}
+
+/* ── 关闭 WiFi 状态提示 ── */
+function dismissAlert(){
+  const el=document.getElementById('wifi-alert');
+  if(el)el.remove();
+  fetch('/api/wifi/status/dismiss',{method:'POST'}).catch(()=>{});
+}
+
+/* ── 页面加载 ── */
+loadDetails();
+loadApStatus();
+</script>
+{% endblock %}

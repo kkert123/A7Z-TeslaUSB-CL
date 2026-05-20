@@ -1,0 +1,13 @@
+[Unit]
+Description=TeslaUSB Scheduled exFAT Filesystem Check
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/radxa_data/fsck_check.sh
+StandardOutput=append:/var/log/teslausb-fsck.log
+StandardError=append:/var/log/teslausb-fsck.log
+
+[Install]
+WantedBy=multi-user.target

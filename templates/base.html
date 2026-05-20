@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeslaUSB Neo{% block title %}{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="/">
+      <svg class="nav-logo" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 17h14M5 17a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1l2-3h8l2 3h1a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2M5 17l-1 2M19 17l1 2M9 14h6M9 14a3 3 0 1 1-3-3M15 14a3 3 0 1 0 3-3"/>
+      </svg>
+      <span>TeslaUSB</span>
+    </a>
+
+    <!-- 桌面导航 -->
+    <ul class="nav-menu" id="navMenu">
+      <li><a href="/" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" data-page="dashboard">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span>仪表盘</span>
+      </a></li>
+      <li><a href="/sentry" class="nav-link {% if request.path == '/sentry' %}active{% endif %}" data-page="sentry">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>哨兵</span>
+      </a></li>
+      <li><a href="/videos" class="nav-link {% if request.path == '/videos' %}active{% endif %}" data-page="videos">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+        <span>视频</span>
+      </a></li>
+      <li><a href="/upload" class="nav-link {% if request.path == '/upload' %}active{% endif %}" data-page="upload">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>上传</span>
+      </a></li>
+      <li><a href="/wifi" class="nav-link {% if request.endpoint == 'wifi_page' %}active{% endif %}" data-page="wifi">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+        <span>WiFi</span>
+      </a></li>
+      <li><a href="/media" class="nav-link {% if request.path == '/media' %}active{% endif %}" data-page="media">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>
+        <span>媒体</span>
+      </a></li>
+      <li><a href="/lockchime" class="nav-link {% if request.path == '/lockchime' %}active{% endif %}" data-page="lockchime">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span>LockChime</span>
+      </a></li>
+      <li><a href="/logs" class="nav-link {% if request.endpoint == 'logs_page' %}active{% endif %}" data-page="logs">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span>日志</span>
+      </a></li>
+      <li><a href="/analytics" class="nav-link {% if request.path == '/analytics' %}active{% endif %}" data-page="analytics">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        <span>统计</span>
+      </a></li>
+      <li><a href="/system" class="nav-link {% if request.endpoint == 'system_page' %}active{% endif %}" data-page="system">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>系统</span>
+      </a></li>
+    </ul>
+
+    <div class="nav-actions">
+      <!-- 模式切换按钮 -->
+      <button class="mode-btn" id="modeBtn" onclick="toggleMode()" aria-label="切换 Present/Edit 模式" title="切换 USB 模式：Present (连接 Tesla) / Edit (网络访问)">
+        <svg class="icon-present" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+          <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>
+          <circle cx="12" cy="14" r="2"/>
+        </svg>
+        <svg class="icon-edit" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>
+        <span id="modeText">Present</span>
+      </button>
+
+      <!-- 主题切换 -->
+      <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" aria-label="切换主题">
+        <svg class="icon-sun" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+
+      <!-- 移动端菜单按钮 -->
+      <button class="menu-btn" id="menuBtn" onclick="toggleMenu()" aria-label="菜单">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- 移动端侧边栏遮罩 -->
+<div class="overlay" id="overlay" onclick="toggleMenu()"></div>
+
+<!-- Flash 消息 -->
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+  <div class="toast toast-{{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+<!-- 主内容区 -->
+<main class="main">
+  {% block content %}{% endblock %}
+</main>
+
+<!-- 页脚 -->
+<footer class="footer">
+  <span>TeslaUSB Neo &copy; 2026</span>
+  <span class="footer-sep">·</span>
+  <span id="footerTime"></span>
+</footer>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+// ── 导航切换 ──
+function toggleMenu() {
+  document.getElementById('navMenu').classList.toggle('open');
+  document.getElementById('overlay').classList.toggle('show');
+  document.getElementById('menuBtn').classList.toggle('active');
+}
+
+// 点击导航链接后关闭移动菜单
+document.querySelectorAll('.nav-link').forEach(a => {
+  a.addEventListener('click', () => {
+    if (window.innerWidth <= 768) toggleMenu();
+  });
+});
+
+// ── 主题切换 ──
+function toggleTheme() {
+  const html = document.documentElement;
+  const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
+  html.dataset.theme = next;
+  localStorage.setItem('theme', next);
+}
+
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.dataset.theme = saved;
+})();
+
+// ── 模式切换 ──
+let currentMode = 'present';
+
+async function toggleMode() {
+  const newMode = currentMode === 'present' ? 'edit' : 'present';
+  const btn = document.getElementById('modeBtn');
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch('/api/mode/switch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: newMode})
+    });
+
+    const data = await resp.json();
+
+    if (data.success) {
+      currentMode = newMode;
+      document.body.classList.toggle('mode-edit', newMode === 'edit');
+      document.getElementById('modeText').textContent = newMode === 'present' ? 'Present' : 'Edit';
+      showToast(`已切换到 ${newMode === 'present' ? 'Present (连接 Tesla)' : 'Edit (网络访问)'} 模式`, 'success');
+      
+      // 3秒后刷新页面（让模式切换生效）
+      setTimeout(() => location.reload(), 3000);
+    } else {
+      showToast(data.message || '模式切换失败', 'error');
+    }
+  } catch (err) {
+    showToast('网络错误：' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 获取当前模式
+async function fetchCurrentMode() {
+  try {
+    const resp = await fetch('/api/mode/status');
+    const data = await resp.json();
+    if (data.success) {
+      currentMode = data.mode || 'present';
+      document.body.classList.toggle('mode-edit', currentMode === 'edit');
+      document.getElementById('modeText').textContent = currentMode === 'present' ? 'Present' : 'Edit';
+    }
+  } catch (err) {
+    console.error('获取模式失败:', err);
+  }
+}
+
+// 页面加载时获取当前模式
+document.addEventListener('DOMContentLoaded', fetchCurrentMode);
+
+// Toast 提示函数
+if (typeof showToast !== 'function') {
+  function showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+  }
+}
+
+// ── 页脚时钟 ──
+function updateClock() {
+  const el = document.getElementById('footerTime');
+  if (el) el.textContent = new Date().toLocaleString('zh-CN', {hour12: false});
+}
+updateClock();
+setInterval(updateClock, 1000);
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
