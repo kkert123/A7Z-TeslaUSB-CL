@@ -665,7 +665,7 @@ def _ensure_ap_config_exists():
         if not os.path.exists(AP_CONFIG_FILE):
             default_config = {
                 "ssid": "TeslaUSB-Setup",
-                "passphrase": "teslausb123",
+                "passphrase": "CHANGE_ME_AP_PASSWORD",
                 "enabled": True
             }
             with open(AP_CONFIG_FILE, "w") as f:
@@ -681,7 +681,7 @@ def get_ap_config() -> dict:
         with open(AP_CONFIG_FILE, "r") as f:
             return json.load(f)
     except Exception:
-        return {"ssid": "TeslaUSB-Setup", "passphrase": "teslausb123", "enabled": True}
+        return {"ssid": "TeslaUSB-Setup", "passphrase": "CHANGE_ME_AP_PASSWORD", "enabled": True}
 
 
 def set_ap_config(ssid: str, passphrase: str) -> dict:
@@ -791,7 +791,7 @@ DEFAULT_WIFI_PRIORITY = {
 SWITCH_COOLDOWN_SEC = 300      # 切换冷却时间（秒）
 SIGNAL_THRESHOLD_DBM = 30      # 最低信号强度阈值
 CONNECT_WAIT_SEC = 2           # 连接等待间隔（秒）
-CONNECTIVITY_TARGETS = ["12.127.12.8", "12.127.12.245", "baidu.com"]
+CONNECTIVITY_TARGETS = ["8.8.8.8", "1.1.1.1", "baidu.com"]
 MAX_CONNECT_RETRIES = 3        # 单次切换重试次数
 
 
@@ -1258,7 +1258,7 @@ class WifiSmartSwitch:
         """生成 hostapd 配置文件"""
         config = get_ap_config()
         ssid = config.get("ssid", "TeslaUSB-Setup")
-        passphrase = config.get("passphrase", "teslausb123")
+        passphrase = config.get("passphrase", "CHANGE_ME_AP_PASSWORD")
 
         conf = f"""interface=wlan0
 driver=nl80211

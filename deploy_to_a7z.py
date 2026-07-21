@@ -10,10 +10,10 @@ import os
 import sys
 
 A7Z_CONFIG = {
-    'host': '100.116.18.42',
+    'host': '100.64.0.10',
     'port': 22,
     'username': 'radxa',
-    'password': 'radxa',
+    'password': os.environ.get("A7Z_PASSWORD", "CHANGE_ME_SSH_PASSWORD"),
     'remote_path': '/opt/radxa_data/teslausb/'
 }
 

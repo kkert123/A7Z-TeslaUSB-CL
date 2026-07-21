@@ -409,7 +409,7 @@ class LocationDetector:
     
     def __init__(
         self,
-        teslamate_url: str = "http://100.111.252.121:7777/",
+        teslamate_url: str = "http://100.64.0.11:7777/",
         home_location: str = "家",
         home_wifi_ssids: Optional[list[str]] = None,
         hotspot_ssids: Optional[list[str]] = None,
@@ -891,7 +891,7 @@ def init_location_detector(config: dict) -> "LocationDetector":
     """
     global _location_detector
     _location_detector = LocationDetector(
-        teslamate_url=config.get("teslamate_url", "http://100.111.252.121:7777/"),
+        teslamate_url=config.get("teslamate_url", "http://100.64.0.11:7777/"),
         home_location=config.get("home_location", "家"),
         home_wifi_ssids=config.get("home_wifi_ssids", []),
         hotspot_ssids=config.get("hotspot_ssids", []),

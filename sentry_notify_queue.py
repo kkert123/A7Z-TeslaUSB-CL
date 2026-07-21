@@ -29,7 +29,7 @@ HTTP_CHECK_URLS = [
     'http://www.qq.com',
     'http://www.aliyun.com',
 ]
-PING_TARGETS = ['12.127.12.8']
+PING_TARGETS = ['8.8.8.8']
 CHECK_INTERVAL_SEC = 30
 MAX_RETRIES = 10
 RETRY_DELAY_SEC = 300

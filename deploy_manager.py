@@ -60,11 +60,11 @@ class Config:
     """全局配置"""
 
     # A7Z 连接信息
-    A7Z_HOST = os.environ.get("A7Z_HOST", "100.116.18.42")
-    A7Z_HOST_FALLBACK = os.environ.get("A7Z_HOST_FALLBACK", "192.168.0.102")
+    A7Z_HOST = os.environ.get("A7Z_HOST", "100.64.0.10")
+    A7Z_HOST_FALLBACK = os.environ.get("A7Z_HOST_FALLBACK", "192.168.0.10")
     A7Z_PORT = int(os.environ.get("A7Z_PORT", "22"))
     A7Z_USER = os.environ.get("A7Z_USER", "radxa")
-    A7Z_PASSWORD = os.environ.get("A7Z_PASSWORD", "radxa")
+    A7Z_PASSWORD = os.environ.get("A7Z_PASSWORD", "CHANGE_ME_SSH_PASSWORD")
 
     # 远程路径
     REMOTE_BASE = "/opt/radxa_data/teslausb"

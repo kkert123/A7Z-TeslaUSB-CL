@@ -36,9 +36,9 @@ clean:
 # 部署到 A7Z
 deploy:
 	@echo "部署到 A7Z..."
-	scp $(TARGET) radxa@100.116.18.42:/tmp/
-	ssh radxa@100.116.18.42 "chmod +x /tmp/$(TARGET)"
+	scp $(TARGET) radxa@100.64.0.10:/tmp/
+	ssh radxa@100.64.0.10 "chmod +x /tmp/$(TARGET)"
 
 # 在 A7Z 上运行
 test:
-	ssh radxa@100.116.18.42 "/tmp/$(TARGET)"
+	ssh radxa@100.64.0.10 "/tmp/$(TARGET)"

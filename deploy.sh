@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # --- 配置 ---
-A7Z_HOST="${A7Z_HOST:-100.116.18.42}"
+A7Z_HOST="${A7Z_HOST:-100.64.0.10}"
 A7Z_USER="${A7Z_USER:-radxa}"
 REMOTE_BASE="/opt/radxa_data/teslausb"
 LOCAL_BASE="$(cd "$(dirname "$0")" && pwd)"

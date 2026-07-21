@@ -204,7 +204,7 @@ import json as _json
 
 SENTRY_CONFIG_PATH = "/opt/radxa_data/teslausb/config/sentry.json"
 LOCATION_DEFAULTS = {
-    "teslamate_url": "http://100.111.252.121:7777",
+    "teslamate_url": "http://100.64.0.11:7777",
     "teslamate_password": "",
     "home_location": "家",
     "home_wifi_ssids": [],

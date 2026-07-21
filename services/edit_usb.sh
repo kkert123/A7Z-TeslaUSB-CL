@@ -187,7 +187,7 @@ fi
 
 if ! pdbedit -L | grep -q teslausb; then
     log "  创建 Samba 用户 teslausb..."
-    (echo "tesla"; echo "tesla") | smbpasswd -a -s teslausb 2>/dev/null || warn "  Samba 用户创建失败，请手动执行: smbpasswd -a teslausb"
+    SMB_PASS="${SMB_PASSWORD:-CHANGE_ME_SMB_PASSWORD}"; (echo "$SMB_PASS"; echo "$SMB_PASS") | smbpasswd -a -s teslausb 2>/dev/null || warn "  Samba 用户创建失败，请手动执行: smbpasswd -a teslausb"
 fi
 
 # 6. 启动 Samba（仅 SMB2+，禁用 NetBIOS）

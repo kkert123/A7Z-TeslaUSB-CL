@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """部署 usb_gadget_init.sh 到 A7Z"""
+import os
 import paramiko
 import sys
 
-HOST = '100.116.18.42'
+HOST = '100.64.0.10'
 USER = 'radxa'
-PASS = 'radxa'
+PASS = os.environ.get("A7Z_PASSWORD", "CHANGE_ME_SSH_PASSWORD")
 REMOTE_PATH = '/opt/radxa_data/usb_gadget_init.sh'
 LOCAL_PATH  = r'D:\teslausb\a7z\usb_gadget_init.sh'
 

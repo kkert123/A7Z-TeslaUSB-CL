@@ -85,7 +85,7 @@ class SentryService:
         'wecom_webhook_url': '',
         
         # 位置检测
-        'teslamate_url': 'http://100.111.252.121:7777',
+        'teslamate_url': 'http://100.64.0.11:7777',
         'home_location': '家',
         'home_wifi_ssids': [],
         'hotspot_ssids': [],

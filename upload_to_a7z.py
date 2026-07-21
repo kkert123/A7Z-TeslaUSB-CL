@@ -9,9 +9,9 @@ import sys
 import paramiko
 
 # A7Z connection info
-A7Z_IP = "100.116.18.42"
+A7Z_IP = "100.64.0.10"
 USERNAME = "radxa"
-PASSWORD = "radxa"
+PASSWORD = os.environ.get("A7Z_PASSWORD", "CHANGE_ME_SSH_PASSWORD")
 PORT = 22
 
 # Local paths
@@ -215,7 +215,7 @@ def upload_via_sftp():
         print("=" * 50)
         print("")
         print("Next steps:")
-        print("  1. SSH to A7Z: ssh radxa@100.116.18.42")
+        print("  1. SSH to A7Z: ssh <user>@<your-a7z-host>")
         print("  2. Run deploy script: sudo bash /tmp/full_deploy_fixed.sh")
         print("")
         
@@ -227,7 +227,7 @@ def upload_via_sftp():
         print("Please check:")
         print("  1. Network connection to A7Z")
         print("  2. SSH service is running on A7Z")
-        print("  3. Credentials are correct (radxa/radxa)")
+        print("  3. Credentials are correct (set via A7Z_USER / A7Z_PASSWORD env)")
         return False
 
 def main():

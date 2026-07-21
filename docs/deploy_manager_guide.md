@@ -57,7 +57,7 @@ python deploy_manager.py deploy -f auto_cleanup.py,app.py -m "cleanup v2 升级"
 ============================================================
 消息: cleanup v2 升级
 文件 (2): auto_cleanup.py, app.py
-目标: radxa@100.116.18.42:/opt/radxa_data/teslausb
+目标: <your-user>@<your-a7z-host>:/opt/radxa_data/teslausb
 服务重启: teslausb-web
 ============================================================
 
@@ -122,7 +122,7 @@ python deploy_manager.py status
 文件: auto_cleanup.py, app.py, config.json
 
 远程连接:
-  ✅ radxa@100.116.18.42
+  ✅ <your-user>@<your-a7z-host>
      14:00:00 up 3 days, 2:15, 1 user, load average: 0.08, 0.12, 0.10
      teslausb-web: active
 
@@ -155,7 +155,7 @@ python deploy_manager.py verify
 ### A7Z 连不上
 
 ```
-❌ 无法连接到 A7Z (尝试了 ['100.116.18.42', '192.168.0.102']): timed out
+❌ 无法连接到 A7Z (尝试了 ['100.64.0.10', '192.168.0.10']): timed out
 ```
 
 **原因**：车休眠了，USB 断电，A7Z 关机。
@@ -199,10 +199,10 @@ python deploy_manager.py rollback
 
 ```bash
 # 修改连接信息
-export A7Z_HOST="100.116.18.42"
-export A7Z_HOST_FALLBACK="192.168.0.102"
-export A7Z_USER="radxa"
-export A7Z_PASSWORD="radxa"
+export A7Z_HOST="100.64.0.10"
+export A7Z_HOST_FALLBACK="192.168.0.10"
+export A7Z_USER="your-a7z-user"
+export A7Z_PASSWORD="your-ssh-password"
 ```
 
 ### 管理文件列表

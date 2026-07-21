@@ -11,7 +11,7 @@ const { chromium } = require('playwright');
   const problems = [];
 
   try {
-    await page.goto('http://100.116.18.42:5000/', { timeout: 15000, waitUntil: 'networkidle' });
+    await page.goto('http://localhost:5000/', { timeout: 15000, waitUntil: 'networkidle' });
     
     // Screenshot before clicking menu
     await page.screenshot({ path: 'D:/teslausb/a7z/test_before_menu.png', fullPage: false });

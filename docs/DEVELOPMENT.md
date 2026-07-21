@@ -12,7 +12,7 @@
 # 3. 部署:
 python deploy_manager.py deploy -f file1.py,file2.py -m "描述" -y
 # 4. 验证:
-curl -s http://100.116.18.42:5000/api/system/stats-stream | head -2
+curl -s http://100.64.0.10:5000/api/system/stats-stream | head -2
 
 # 回滚:
 python deploy_manager.py rollback v{N}
@@ -50,8 +50,8 @@ python deploy_manager.py rollback v{N}
 
 ## A7Z 连接信息
 
-- Tailscale: `100.116.18.42`
-- SSH: `radxa@100.116.18.42`，密码 `radxa`，sudo 需手动输入
+- Tailscale: `100.64.0.10`
+- SSH: `<your-user>@<your-a7z-host>`，密码通过环境变量 A7Z_PASSWORD / SUDO_PASSWORD 设置，sudo 需手动输入
 - TeslaCam: `/mnt/teslacam/TeslaCam/{SentryClips,SavedClips,RecentClips}`
 - 缩略图: `/opt/radxa_data/teslausb/static/thumbnails/`
 - 日志: `/var/log/teslausb-*.log`

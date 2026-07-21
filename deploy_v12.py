@@ -5,10 +5,10 @@ import sys
 import os
 
 # A7Z connection
-HOST = '100.116.18.42'
+HOST = '100.64.0.10'
 PORT = 22
 USER = 'radxa'
-PASS = 'radxa'
+PASS = os.environ.get("A7Z_PASSWORD", "CHANGE_ME_SSH_PASSWORD")
 
 # Files to deploy: (local_path, remote_path)
 FILES = [
@@ -51,7 +51,7 @@ def main():
     ssh.close()
     print("\nDeploy complete!")
     print("\nVerify:")
-    print("  1. http://100.116.18.42:5000/media - music files visible?")
+    print("  1. http://100.64.0.10:5000/media - music files visible?")
     print("  2. Web UI mode switch works?")
     print("  3. Present mode: /mnt/music mounted read-only?")
 

@@ -261,7 +261,7 @@ def _get_location_status():
             with open(config_path, 'r', encoding='utf-8') as f:
                 cfg = _json.load(f)
             init_location_detector({
-                'teslamate_url': cfg.get('teslamate_url', 'http://100.111.252.121:7777'),
+                'teslamate_url': cfg.get('teslamate_url', 'http://100.64.0.11:7777'),
                 'home_location': cfg.get('home_location', '家'),
                 'home_wifi_ssids': cfg.get('home_wifi_ssids', []),
                 'hotspot_ssids': cfg.get('hotspot_ssids', []),
@@ -587,7 +587,7 @@ def _log_broadcaster():
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
     )
     try:
-        proc.stdin.write('radxa\n')
+        proc.stdin.write(os.environ.get("SUDO_PASSWORD", "CHANGE_ME_SUDO_PASSWORD") + "\n")
         proc.stdin.flush()
     except:
         pass

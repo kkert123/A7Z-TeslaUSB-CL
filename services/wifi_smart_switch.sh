@@ -74,7 +74,7 @@ get_current_wifi() {
 check_wifi_connection() {
     local temp_file=$(mktemp)
     local pids=""
-    for target in "12.127.12.8" "12.127.12.245" "baidu.com"; do
+    for target in "8.8.8.8" "1.1.1.1" "baidu.com"; do
         (ping -c 2 -W 3 "$target" > /dev/null 2>&1 && echo "success" >> "$temp_file") &
         pids="$pids $!"
     done

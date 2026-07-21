@@ -65,7 +65,7 @@ class EncryptionError(ConfigError):
 @dataclass
 class LocationConfig:
     """位置检测配置"""
-    teslamate_url: str = "http://100.111.252.121:7777/"
+    teslamate_url: str = "http://100.64.0.11:7777/"
     home_location: str = "家"
     home_wifi_ssids: list[str] = field(default_factory=list)
     hotspot_ssids: list[str] = field(default_factory=list)
