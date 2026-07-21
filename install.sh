@@ -36,12 +36,62 @@ else
   echo "    weixin_config.json 已存在，跳过"
 fi
 
+echo "==> 配置视频/媒体存储路径"
+echo "    下列路径是各类型文件的存储位置（默认指向 M.2 挂载点）。"
+echo "    若你的磁盘挂载点不同，请输入实际绝对路径；直接回车沿用默认。"
+ask_mount() {
+  # $1=显示标签  $2=默认值  -> 输出用户输入（去尾部斜杠）
+  local _label="$1" _def="$2" _val
+  printf '%s [%s]: ' "$_label" "$_def" >&2
+  read -r _val
+  _val="${_val:-$_def}"
+  printf '%s' "${_val%/}"
+}
+CAM=$(ask_mount "TeslaCam 视频存储路径 (cam)" "/mnt/teslacam")
+MUSIC=$(ask_mount "music 存储路径" "/mnt/music")
+BOOMBOX=$(ask_mount "boombox 存储路径" "/mnt/boombox")
+LIGHTSHOW=$(ask_mount "lightshow 存储路径" "/mnt/lightshow")
+
+mkdir -p config
+cat > config/paths.json <<EOF
+{
+  "cam": "$CAM",
+  "music": "$MUSIC",
+  "boombox": "$BOOMBOX",
+  "lightshow": "$LIGHTSHOW"
+}
+EOF
+echo "    已写入 config/paths.json（该文件已被 .gitignore 忽略，不会提交）"
+
 echo "==> 可选：安装 Node/Playwright 用于缩略图预览生成"
 if command -v npm >/dev/null 2>&1; then
   npm install
   npx playwright install chromium || echo "    警告：Playwright 浏览器下载失败，预览功能将不可用（不影响主流程）"
 else
   echo "    未检测到 npm，跳过 Playwright（预览生成为可选功能）"
+fi
+
+echo "==> 可选：安装 Tailscale（远程访问 / 内网穿透工具）"
+if command -v tailscale >/dev/null 2>&1; then
+  echo "    Tailscale 已安装，跳过"
+else
+  read -r -p "    是否安装 Tailscale? [y/N]: " _ts
+  if [[ "$_ts" =~ ^[Yy]$ ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      echo "    正在通过官方脚本安装 Tailscale..."
+      curl -fsSL https://tailscale.com/install.sh | sh || echo "    Tailscale 安装失败，请参考 https://tailscale.com/download 手动安装"
+      if command -v tailscale >/dev/null 2>&1; then
+        echo "    安装完成。请在本机（需 root）执行以下命令完成登录："
+        echo "      sudo tailscale up"
+        echo "    或带 authkey 无交互登录："
+        echo "      sudo tailscale up --authkey <YOUR_AUTHKEY>"
+      fi
+    else
+      echo "    未检测到 curl，无法自动安装。请参考 https://tailscale.com/download 手动安装。"
+    fi
+  else
+    echo "    跳过 Tailscale 安装"
+  fi
 fi
 
 echo ""

@@ -47,7 +47,8 @@ chmod +x install.sh
 ```
 
 脚本会：安装 Python 依赖、从模板生成 `config/sentry.json` 与 `weixin_config.json`、
-（可选）安装 Playwright。
+询问各类型文件的**存储路径**（TeslaCam 视频 / music / boombox / lightshow，默认指向 M.2 挂载点）、
+（可选）安装 Playwright、（可选）安装 Tailscale。
 
 ## 配置
 
@@ -63,6 +64,20 @@ chmod +x install.sh
 
 获取 webhook key：企业微信 → 群聊 → 添加群机器人 → 复制 webhook 地址中的 `key=xxx`。
 部分接入方式还需填写 `secret`（见示例文件中的 `YOUR_*_SECRET` 占位）。
+
+### 存储路径配置（config/paths.json）
+
+安装脚本会交互询问 4 类文件的存储挂载点，并写入 `config/paths.json`（已被 `.gitignore` 忽略，**不进版本库**）：
+
+| 键 | 含义 | 默认值 |
+|----|------|--------|
+| `cam` | TeslaCam 视频（哨兵 / 最近 / 保存片段） | `/mnt/teslacam` |
+| `music` | 音乐文件 | `/mnt/music` |
+| `boombox` | boombox 音频 | `/mnt/boombox` |
+| `lightshow` | lightshow 灯光秀 | `/mnt/lightshow` |
+
+`config.py` 会读取该文件覆盖默认挂载点；若文件不存在则沿用默认值。手动修改后重启应用即可生效。
+若你的 M.2 分区挂载点不同，直接改这里即可，无需改动代码。
 
 ## 运行
 

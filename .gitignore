@@ -21,6 +21,7 @@ Thumbs.db
 # ===== Secrets & runtime config (NEVER commit real config) =====
 config.json
 config/sentry.json
+config/paths.json
 weixin_config.json
 *.secret.*
 
