@@ -1,11 +1,18 @@
 #!/bin/bash
-# usb_gadget_init.sh - A7Z USB Gadget v7
+# usb_gadget_init.sh - A7Z USB Gadget v8 (Present 模式只读挂载所有分区)
 GADGET_NAME="tesla_usb"
 GADGET_DIR="/sys/kernel/config/usb_gadget/$GADGET_NAME"
 CONFIG_NAME="c.1"
 
 LUN_DEVICES=("/dev/nvme0n1p2" "/dev/nvme0n1p3" "/dev/nvme0n1p4" "/dev/nvme0n1p5")
 LUN_LABELS=("TESLACAM" "MUSIC" "LIGHTSHOW" "BOOMBOX")
+# 分区 -> 挂载点映射
+MOUNT_POINTS=(
+    "/mnt/teslacam"
+    "/mnt/music"
+    "/mnt/lightshow"
+    "/mnt/boombox"
+)
 
 green()  { echo -e "\e[32m$*\e[0m"; }
 yellow() { echo -e "\e[33m$*\e[0m"; }
@@ -37,8 +44,28 @@ cleanup() {
     rmdir "$GADGET_DIR" 2>/dev/null || true
 }
 
+# 只读挂载所有分区（Present 模式：Tesla 通过 USB 写入，A7Z 本地只读读取）
+remount_all_ro() {
+    green "  重新只读挂载分区（本地访问）..."
+    for i in "${!LUN_DEVICES[@]}"; do
+        dev="${LUN_DEVICES[$i]}"
+        mp="${MOUNT_POINTS[$i]}"
+        [ -z "$mp" ] && continue
+        mkdir -p "$mp"
+        # 先尝试 umount（可能之前已挂载）
+        umount "$dev" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+        sleep 0.5
+        # 只读挂载；失败说明 Tesla 正在写入，跳过
+        if mount -o ro,noatime "$dev" "$mp" 2>/dev/null; then
+            green "    $dev -> $mp (ro)"
+        else
+            yellow "    $mp 跳过 (设备忙，Tesla 可能正在写入)"
+        fi
+    done
+}
+
 start_gadget() {
-    green "=== USB Gadget v7 (nofua + fsck) ==="
+    green "=== USB Gadget v8 (Present 模式，全分区只读挂载) ==="
 
     echo "  步骤 1/9: ConfigFS..."
     mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
@@ -105,6 +132,9 @@ start_gadget() {
     sleep 2
     [ "$(cat "$GADGET_DIR/UDC" 2>/dev/null)" = "$UDC" ] || die "UDC 验证失败"
 
+    # === 关键修复：重新只读挂载所有分区 ===
+    remount_all_ro
+
     green ""
     green "  USB Gadget 已激活! UDC=$UDC (nofua)"
     green "  连接特斯拉车机或 PC 即可识别"
@@ -113,33 +143,44 @@ start_gadget() {
         echo "    LUN $i: ${LUN_DEVICES[$i]} -> ${LUN_LABELS[$i]}"
     done
     yellow ""
-    yellow "  提示: 分区已被 USB 独占，只读挂载可恢复: mount -o ro /dev/nvme0n1p2 /mnt/teslacam"
+    yellow "  提示: 所有分区已只读挂载到 /mnt/*，Web 界面可正常访问"
     yellow "  恢复: sudo bash $0 stop"
 }
 
 stop_gadget() {
     echo "停止 USB Gadget..."
+
+    # 先卸载本地只读挂载
+    for mp in "${MOUNT_POINTS[@]}"; do
+        mountpoint -q "$mp" && umount -l "$mp" 2>/dev/null || true
+    done
+
     cleanup
     sync; sleep 2
 
-    # ⚡ 关键：先 fsck（分区此时未挂载），再 mount
-    echo "exFAT 检查（自动修复 nofua 残留）..."
-    for dev in /dev/nvme0n1p2 /dev/nvme0n1p3 /dev/nvme0n1p4 /dev/nvme0n1p5; do
+    # fsck 非 TeslaCam 分区（p3/p4/p5 由 A7Z 管理，需 fsck）
+    # TeslaCam (p2) 由 Tesla 车机写入，A7Z 运行 fsck 可能修改其文件系统元数据，
+    # 导致车机 "其他" 容量显示异常。Tesla 车机会自行处理 fsck。
+    echo "exFAT 检查（跳过 TeslaCam，仅检查 A7Z 管理的分区）..."
+    for dev in /dev/nvme0n1p3 /dev/nvme0n1p4 /dev/nvme0n1p5; do
         if fsck.exfat -y "$dev" 2>/dev/null; then
             echo "  OK $dev"
         else
-            # 未格式化或其他错误
-            echo "  SKIP $dev (will format on mount)"
+            echo "  SKIP $dev"
         fi
     done
 
+    # 恢复挂载: TeslaCam 始终只读（A7Z 仅读取，不写入 TeslaCam 分区）
+    # 先挂载 TeslaCam ro，再 mount -a 挂载其余分区（已挂载的 TeslaCam 会被跳过）
+    mkdir -p /mnt/teslacam /mnt/music /mnt/lightshow /mnt/boombox
+    mount -o ro,noatime /dev/nvme0n1p2 /mnt/teslacam 2>/dev/null || true
     mount -a 2>/dev/null || true
     swapon -a 2>/dev/null || true
-    green "已停止，分区已恢复本地挂载"
+    green "已停止，TeslaCam 已只读挂载，其他分区已恢复读写"
 }
 
 show_status() {
-    echo "=== USB Gadget v7 ==="
+    echo "=== USB Gadget v8 ==="
     if [ -d "$GADGET_DIR" ]; then
         UDC=$(cat "$GADGET_DIR/UDC" 2>/dev/null || echo "未绑定")
         echo "  UDC: $UDC"
@@ -149,6 +190,17 @@ show_status() {
                 dev=$(cat "$f" 2>/dev/null || echo "?")
                 nofua=$(cat "$GADGET_DIR/functions/mass_storage.usb0/lun.$i/nofua" 2>/dev/null || echo "?")
                 echo "  LUN $i: $dev -> ${LUN_LABELS[$i]:-?} (nofua=$nofua)"
+            fi
+        done
+        # 显示本地只读挂载状态
+        echo "  本地挂载状态:"
+        for i in "${!MOUNT_POINTS[@]}"; do
+            mp="${MOUNT_POINTS[$i]}"
+            if mountpoint -q "$mp" 2>/dev/null; then
+                ro=$(findmnt -n -o OPTIONS "$mp" 2>/dev/null | grep -o 'ro' | head -1)
+                echo "    $mp: 已挂载 ${ro:+($ro)}"
+            else
+                echo "    $mp: 未挂载"
             fi
         done
         green "  运行中"

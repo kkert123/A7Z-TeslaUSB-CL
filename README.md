@@ -23,7 +23,7 @@ app.py                   Flask 主入口
 config.py / config_manager.py   配置加载
 routes/                  Flask 蓝图（页面与 API）
 templates/ static/       前端页面与资源
-services/                 systemd 服务单元
+services/                 设备基础脚本 + systemd 服务单元（部署到 Radxa 的 /opt/radxa_data）
 utils/                   通用工具
 *_service.py             各功能模块（sentry / cloud / weixin / wifi ...）
 config/                  配置目录（*.example.json 为模板，*.json 为本地真实配置）
@@ -70,6 +70,29 @@ chmod +x install.sh
 source venv/bin/activate
 python app.py
 ```
+
+## 设备基础脚本（services/）
+
+这些 shell 脚本运行在 Radxa 设备上的 `/opt/radxa_data/`，由对应的 systemd 单元调用。
+它们与 Flask Web 服务配合，完成 U 盘模拟、WiFi 切换、磁盘巡检、同步等“底层”工作：
+
+| 脚本 | 作用 |
+|------|------|
+| `edit_usb.sh` | 编辑 / 重建 USB Gadget 存储布局 |
+| `present_usb.sh` | 将哨兵 clips 整理为车机可读取的 U 盘内容 |
+| `usb_gadget_init.sh` | 初始化 USB Gadget 模式（设备模拟成 U 盘） |
+| `wifi_smart_switch.sh` | WiFi/热点智能切换（离家/到家识别） |
+| `io_tuning.sh` | 磁盘 I/O 性能调优 |
+| `fsck_check.sh` | 文件系统巡检（配合 `teslausb-fsck.service`） |
+| `tesla_sync.sh` | 哨兵 clips 与远端/NAS 的同步 |
+
+`services/` 内同时包含对应的 `*.service` / `*.timer` 单元文件，可直接 `cp` 到设备的
+`/etc/systemd/system/` 并 `systemctl enable --now <单元>`。
+
+> **部署提示**：脚本从仓库拉到设备后需保持 LF 换行并赋予可执行权限，否则 systemd 会报
+> `status=203/EXEC`。本仓库已通过 `.gitattributes` 强制 `*.sh` / `*.service` 使用 LF；
+> 部署到设备后执行 `chmod +x /opt/radxa_data/*.sh` 即可。
+> 设备连接与分发方式请参考你本地的连接文档（**不要**将其中的设备 IP / 密码提交到公开仓库）。
 
 ## 安全与发布须知
 

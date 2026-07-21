@@ -28,25 +28,6 @@ for part in nvme0n1p2 nvme0n1p3 nvme0n1p4 nvme0n1p5; do
 done
 log "  分区卸载完成"
 
-# 2.5. 分区 fsck 检查（交给 Tesla 前必做）
-log "步骤 2.5/5: exFAT 文件系统检查..."
-FSK_ERROR=0
-for part in nvme0n1p2 nvme0n1p3 nvme0n1p4 nvme0n1p5; do
-    log "  fsck /dev/$part..."
-    if ! fsck.exfat -p /dev/$part 2>&1 | tee -a /var/log/teslausb.log; then
-        warn "  fsck /dev/$part 发现问题，尝试 -y 自动修复..."
-        if ! fsck.exfat -y /dev/$part 2>&1 | tee -a /var/log/teslausb.log; then
-            warn "  fsck /dev/$part 修复失败！"
-            FSK_ERROR=1
-        fi
-    fi
-done
-if [ "$FSK_ERROR" -eq 1 ]; then
-    warn "部分分区 fsck 修复失败，发布到 syslog"
-    logger -t teslausb "WARNING: exFAT fsck errors detected on boot"
-fi
-log "  文件系统检查完成"
-
 # 3. 只读挂载 TeslaCam 分区（保护数据）
 log "步骤 3/4: 只读挂载 TeslaCam 分区..."
 mkdir -p /mnt/teslacam
@@ -72,17 +53,6 @@ if [ -x /opt/radxa_data/usb_gadget_init.sh ]; then
     bash /opt/radxa_data/usb_gadget_init.sh start
 else
     die "  usb_gadget_init.sh 不存在或不可执行"
-fi
-
-# 5. 重新只读挂载 TeslaCam（gadget 启动时会卸载，需要重新挂载以便 Web 读取视频）
-log "步骤 5/5: 重新只读挂载 TeslaCam（供 Web 读取视频）..."
-sleep 2
-mkdir -p /mnt/teslacam
-mount -o ro /dev/nvme0n1p2 /mnt/teslacam 2>/dev/null ||     warn "  TeslaCam 只读挂载失败，Web 视频页面将无数据"
-if mountpoint -q /mnt/teslacam 2>/dev/null; then
-    log "  ✅ TeslaCam 只读挂载成功，Web 视频可访问"
-else
-    warn "  ⚠️  TeslaCam 只读挂载失败！视频页面将无法显示录像"
 fi
 
 log "✅ Present Mode 激活成功！Tesla 可以识别 USB 设备"
