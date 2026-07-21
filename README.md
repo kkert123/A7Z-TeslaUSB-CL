@@ -34,8 +34,10 @@ docs/                    使用文档
 ## 环境要求
 
 - Python 3.8+
+- **ffmpeg**（必需）：缩略图 / 视频裁剪 / gif 生成依赖，安装脚本会检测并可选自动安装
 - （可选）Node.js + npm：用于 Playwright 缩略图预览生成
 - （可选）rclone：用于 NAS / 云存储上传
+- （可选）systemd：用于把 `services/` 下的单元部署为常驻服务（安装脚本可自动完成）
 
 ## 快速开始
 
@@ -48,7 +50,9 @@ chmod +x install.sh
 
 脚本会：安装 Python 依赖、从模板生成 `config/sentry.json` 与 `weixin_config.json`、
 询问各类型文件的**存储路径**（TeslaCam 视频 / music / boombox / lightshow，默认指向 M.2 挂载点）、
-（可选）安装 Playwright、（可选）安装 Tailscale。
+检查系统依赖（**ffmpeg** / **rclone**，缺失可自动安装）、
+（可选）安装 Playwright、（可选）安装 Tailscale、
+（可选）**部署并启用 systemd 服务**、最后跑一次导入冒烟测试。
 
 ## 配置
 
@@ -64,6 +68,12 @@ chmod +x install.sh
 
 获取 webhook key：企业微信 → 群聊 → 添加群机器人 → 复制 webhook 地址中的 `key=xxx`。
 部分接入方式还需填写 `secret`（见示例文件中的 `YOUR_*_SECRET` 占位）。
+
+> **运行时真正读取的配置文件**：本仓库当前版本中，Web 应用（`app.py`）实际只读取
+> `config/sentry.json` 与 `weixin_config.json` 两个文件（`config.py` / `config_manager.py` 中
+> 定义的 `config.json` / `/data/teslausb-web.json` 在本导出里**并未被 app 启动加载**，属于
+> 休眠配置体系）。因此首次运行**只需**按上面填好这两个文件即可，无需额外准备 `config.json`。
+> 若你后续接入了使用 `ConfigManager` 的模块，再按其要求补全对应配置。
 
 ### 存储路径配置（config/paths.json）
 
@@ -101,8 +111,11 @@ python app.py
 | `fsck_check.sh` | 文件系统巡检（配合 `teslausb-fsck.service`） |
 | `tesla_sync.sh` | 哨兵 clips 与远端/NAS 的同步 |
 
-`services/` 内同时包含对应的 `*.service` / `*.timer` 单元文件，可直接 `cp` 到设备的
-`/etc/systemd/system/` 并 `systemctl enable --now <单元>`。
+`services/` 内同时包含对应的 `*.service` / `*.timer` 单元文件。两种方式部署：
+- **自动（推荐）**：运行 `./install.sh` 时选择"部署并启用 systemd 服务"，脚本会把单元复制到
+  `/etc/systemd/system/`、把里面的 `/usr/bin/python3` 替换为仓库内的 `venv/bin/python`、
+  把硬编码的 `/opt/radxa_data/teslausb` 替换为实际部署目录，然后 `daemon-reload` 并启用核心服务与定时器。
+- **手动**：`cp services/*.service services/*.timer /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now teslausb-web`
 
 > **部署提示**：脚本从仓库拉到设备后需保持 LF 换行并赋予可执行权限，否则 systemd 会报
 > `status=203/EXEC`。本仓库已通过 `.gitattributes` 强制 `*.sh` / `*.service` 使用 LF；
