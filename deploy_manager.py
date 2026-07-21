@@ -153,8 +153,8 @@ class Config:
         "fsck_check.py",
         # staging service (2026-06-29)
         "staging_service.py",
-        # USB gadget script (2026-07-08)
-        "usb_gadget_init.sh",
+        # USB gadget script (2026-07-08) — 位于 services/ 目录
+        "services/usb_gadget_init.sh",
         # auto present service (2026-07-08 v92)
         "auto_present_service.py",
         # camera routes + GIF service (2026-07-11 台风场景分析)
