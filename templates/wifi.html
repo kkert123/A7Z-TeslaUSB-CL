@@ -1,0 +1,496 @@
+{% extends "base.html" %}
+{% block title %} — WiFi 管理{% endblock %}
+
+{% macro render_conn(conn) %}
+<div class="conn-card {% if conn.active %}connected{% endif %}" id="conn-{{ conn.name }}">
+  <!-- 顶部：名称 + 状态徽章 -->
+  <div class="conn-header">
+    <div class="conn-name">
+      {{ conn.name or conn.ssid }}
+      {% if conn.active %}<span class="badge badge-success">当前</span>{% endif %}
+    </div>
+    <div class="conn-meta">
+      {% if conn.ssid and conn.ssid != conn.name %}
+      <span class="meta-item"><span class="meta-label">SSID</span><span class="meta-val">{{ conn.ssid }}</span></span>
+      {% endif %}
+      <span class="meta-item"><span class="meta-label">优先级</span><span class="meta-val">{{ conn.priority }}</span></span>
+      <span class="meta-item">
+        <span class="meta-label">自动连接</span>
+        <span class="badge {% if conn.autoconnect %}badge-success{% else %}badge-warning{% endif %}">{{ '开' if conn.autoconnect else '关' }}</span>
+      </span>
+    </div>
+  </div>
+  <!-- 底部：操作按钮 -->
+  <div class="conn-actions">
+    <button class="btn btn-primary btn-sm" onclick="switchTo('{{ conn.ssid }}')">切换</button>
+    <button class="btn btn-ghost btn-sm" onclick="editPriority('{{ conn.name }}', {{ conn.priority }})">优先级</button>
+    <button class="btn btn-ghost btn-sm" onclick="editName('{{ conn.name }}')">重命名</button>
+    <button class="btn btn-ghost btn-sm" onclick="toggleAuto('{{ conn.name }}', {{ 'true' if conn.autoconnect else 'false' }})">{{ '关自动' if conn.autoconnect else '开自动' }}</button>
+    <button class="btn btn-sm" style="background:var(--danger-soft);color:var(--danger);border:1px solid var(--danger-soft)" onclick="delConn('{{ conn.name }}')">删除</button>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+<div class="page-header"><h2>📶 WiFi 管理</h2></div>
+
+{% if wifi_status %}
+<div class="alert alert-{% if wifi_status.success %}success{% elif wifi_status.action == 'reverted' %}warning{% else %}danger{% endif %}" id="wifi-alert">
+  <div>{{ wifi_status.message }}{% if wifi_status.timestamp %} <span style="opacity:0.7;font-size:var(--text-xs)">{{ wifi_status.timestamp }}</span>{% endif %}</div>
+  <button class="alert-close" onclick="dismissAlert()">✕</button>
+</div>
+{% endif %}
+
+<!-- 当前连接 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">当前连接</h3>
+  {% if current.connected %}
+  <div style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s3)">
+    <span class="status status-ok">已连接</span>
+    <strong style="font-size:var(--text-lg)">{{ current.ssid }}</strong>
+    {% if current.signal is not none %}
+    <span class="badge {% if current.signal|int >= 60 %}badge-success{% elif current.signal|int >= 30 %}badge-accent{% else %}badge-danger{% endif %}" style="font-size:10px">{{ current.signal }}%</span>
+    {% endif %}
+  </div>
+  <!-- 连接详情 - 直接展示，无需点击 -->
+  <div class="detail-grid" id="conn-details">
+    <div class="detail-item"><span class="label">MAC</span><span class="value" id="d-mac">加载中...</span></div>
+    <div class="detail-item"><span class="label">IP</span><span class="value" id="d-ip">加载中...</span></div>
+    <div class="detail-item"><span class="label">网关</span><span class="value" id="d-gw">加载中...</span></div>
+    <div class="detail-item"><span class="label">DNS</span><span class="value" id="d-dns">加载中...</span></div>
+    <div class="detail-item"><span class="label">信道</span><span class="value" id="d-ch">加载中...</span></div>
+    <div class="detail-item"><span class="label">频率</span><span class="value" id="d-freq">—</span></div>
+    <div class="detail-item"><span class="label">速率</span><span class="value" id="d-rate">—</span></div>
+  </div>
+  {% else %}
+  <span class="status status-warn">未连接 WiFi</span>
+  {% endif %}
+</div>
+
+<!-- 网络测速 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🚀 网络测速</h3>
+  <div style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s3)">
+    <select id="speedtest-server" style="font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base);max-width:220px" onchange="onServerChange()">
+      <option value="cloudflare">☁ Cloudflare (外网)</option>
+      <option value="__lan__">🏠 局域网 (网关)</option>
+      <option value="__custom__">🖊 自定义地址…</option>
+    </select>
+    <input id="speedtest-custom-url" type="text" placeholder="https://your-server.com/speedtest"
+      style="display:none;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base);flex:1;min-width:200px;max-width:400px">
+    <span id="speedtest-mode-toggle" style="display:inline-flex;border-radius:6px;overflow:hidden;border:1px solid var(--border-color)">
+      <button id="mode-dl" class="btn btn-primary btn-sm" style="border-radius:0;margin:0" onclick="setSpeedMode('dl')">⬇ 下载</button>
+      <button id="mode-ul" class="btn btn-ghost btn-sm" style="border-radius:0;margin:0" onclick="setSpeedMode('ul')">⬆ 上传</button>
+    </span>
+    <button class="btn btn-primary btn-sm" id="speedtestBtn" onclick="startSpeedTest()">▶ 开始测速</button>
+    <span id="speedtest-status" style="font-size:var(--text-sm);color:var(--text-muted)"></span>
+  </div>
+  <!-- 逐阶段进度 -->
+  <div id="speedtest-stages" style="display:none;margin-bottom:var(--s3)">
+    <div style="display:flex;gap:var(--s2);flex-wrap:wrap" id="speedtest-stage-list"></div>
+  </div>
+  <!-- 结果展示 -->
+  <div id="speedtest-result" style="display:none">
+    <div style="display:flex;align-items:center;gap:var(--s4);flex-wrap:wrap">
+      <!-- 速度仪表 -->
+      <div style="position:relative;width:100px;height:100px;flex-shrink:0">
+        <svg viewBox="0 0 100 100" style="transform:rotate(-90deg)">
+          <circle cx="50" cy="50" r="42" fill="none" stroke="var(--border-color, #333)" stroke-width="8"/>
+          <circle id="speed-gauge" cx="50" cy="50" r="42" fill="none" stroke="var(--accent)" stroke-width="8"
+            stroke-dasharray="0 264" stroke-linecap="round" style="transition:stroke-dasharray 1s ease"/>
+        </svg>
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+          <span id="speed-value" style="font-size:var(--text-xl);font-weight:700;line-height:1">—</span>
+          <span style="font-size:10px;color:var(--text-muted)">Mbps</span>
+        </div>
+      </div>
+      <!-- 详细指标 -->
+      <div class="detail-grid" style="flex:1;min-width:200px">
+        <div class="detail-item"><span class="label">下载速度</span><span class="value" id="r-speed">— Mbps</span></div>
+        <div class="detail-item"><span class="label">上传速度</span><span class="value" id="r-upload">— Mbps</span></div>
+        <div class="detail-item"><span class="label">延迟</span><span class="value" id="r-latency">— ms</span></div>
+        <div class="detail-item"><span class="label">测试数据量</span><span class="value" id="r-bytes">—</span></div>
+        <div class="detail-item"><span class="label">耗时</span><span class="value" id="r-time">—</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- AP 热点 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">📡 AP 热点</h3>
+  <div style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s3)">
+    <span id="ap-status-text">加载中...</span>
+    <span class="badge" id="ap-mode-badge">自动</span>
+    <button class="btn btn-ghost btn-sm" onclick="cycleApMode()">切换模式</button>
+  </div>
+  <div class="detail-grid" style="margin-bottom:var(--s3)">
+    <div class="detail-item"><span class="label">AP SSID</span><span class="value" id="ap-ssid">加载中...</span></div>
+    <div class="detail-item"><span class="label">状态</span><span class="value" id="ap-active-text">加载中...</span></div>
+  </div>
+  <div class="btn-group">
+    <button class="btn btn-primary btn-sm" onclick="apAction('start')">▶ 开启</button>
+    <button class="btn btn-danger btn-sm" onclick="apAction('stop')">⏹ 关闭</button>
+    <button class="btn btn-ghost btn-sm" onclick="editApConfig()">⚙️ 配置</button>
+  </div>
+</div>
+
+<!-- 位置检测配置 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">📍 位置检测配置</h3>
+  <p style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s3)">配置 TeslaMate 和 WiFi 用于判断车辆在家中或外出，影响哨兵事件上传策略。</p>
+  <div class="detail-grid" style="margin-bottom:var(--s3)">
+    <div class="detail-item"><span class="label">TeslaMate URL</span><span class="value"><input id="loc-teslamate-url" type="text" placeholder="http://100.111.252.121:7777" style="width:100%;max-width:320px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+    <div class="detail-item"><span class="label">TeslaMate 密码</span><span class="value"><input id="loc-teslamate-pass" type="password" placeholder="(留空不修改)" style="width:100%;max-width:320px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+    <div class="detail-item"><span class="label">家关键词</span><span class="value"><input id="loc-home-location" type="text" placeholder="家,乐清,象阳" style="width:100%;max-width:320px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+    <div class="detail-item"><span class="label">家庭 WiFi</span><span class="value"><input id="loc-home-wifi" type="text" placeholder="MyHomeWiFi,MyHomeWiFi_5G（逗号分隔）" style="width:100%;max-width:320px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+    <div class="detail-item"><span class="label">车载热点</span><span class="value"><input id="loc-hotspot" type="text" placeholder="Tesla_ModelY_XXXX（逗号分隔）" style="width:100%;max-width:320px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+  </div>
+  <div class="btn-group">
+    <button class="btn btn-primary btn-sm" id="loc-save-btn" onclick="saveLocationConfig()">💾 保存配置</button>
+    <span id="loc-save-status" style="font-size:var(--text-sm);color:var(--text-muted);margin-left:var(--s2)"></span>
+  </div>
+</div>
+
+<!-- 已保存网络 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">
+    已保存网络
+    <span style="font-size:var(--text-xs);color:var(--text-muted);font-weight:400">（按优先级排序）</span>
+  </h3>
+  <div id="conn-list">
+    {% for conn in connections %}
+    {{ render_conn(conn) }}
+    {% endfor %}
+  </div>
+  {% if not connections %}
+  <p style="color:var(--text-muted);font-size:var(--text-sm)">暂无已保存的网络</p>
+  {% endif %}
+</div>
+
+<!-- 扫描 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">扫描</h3>
+  <button class="btn btn-primary btn-sm" id="scanBtn" onclick="scanWifi()">🔍 扫描</button>
+  <div id="scan-results" style="margin-top:var(--s3)"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* ── WiFi 详情 ── */
+function loadDetails(){
+  fetch('/api/wifi/details').then(r=>r.json()).then(d=>{
+    const info=d.data||d; // 兼容 {data:{}} 和直接返回
+    const s=v=>v||'—';
+    document.getElementById('d-mac').textContent=s(info.mac);
+    document.getElementById('d-ip').textContent=s(info.ip);
+    document.getElementById('d-gw').textContent=s(info.gateway);
+    document.getElementById('d-dns').textContent=Array.isArray(info.dns)&&info.dns.length?info.dns.join(', '):s(info.dns);
+    document.getElementById('d-ch').textContent=s(info.channel);
+    document.getElementById('d-freq').textContent=info.frequency?info.frequency+' MHz':'—';
+    // 频段指示
+    const freqEl=document.getElementById('d-freq');
+    if(info.frequency&&parseInt(info.frequency)>=5000){freqEl.innerHTML=freqEl.textContent+' <span class=\"badge badge-success\" style=\"font-size:9px;padding:1px 5px\">5G</span>';}
+    else if(info.frequency){freqEl.innerHTML=freqEl.textContent+' <span class=\"badge badge-accent\" style=\"font-size:9px;padding:1px 5px\">2.4G</span>';}
+    document.getElementById('d-rate').textContent=s(info.rate);
+  }).catch(()=>{});
+}
+
+/* ── AP 管理 ── */
+let currentApMode='auto';
+function loadApStatus(){
+  fetch('/api/ap/status').then(r=>r.json()).then(d=>{
+    const active=d.active||d.ap_active||false;
+    document.getElementById('ap-active-text').textContent=active?'已开启':'已关闭';
+    document.getElementById('ap-status-text').textContent=active?'AP 开启':'AP 关闭';
+    document.getElementById('ap-status-text').className='status '+(active?'status-ok':'status-muted');
+  }).catch(()=>{});
+  // 获取 AP 配置
+  fetch('/api/ap/config').then(r=>r.json()).then(d=>{
+    document.getElementById('ap-ssid').textContent=d.ssid||'—';
+  }).catch(()=>{});
+  // 获取 AP 模式
+  fetch('/api/ap/mode?t='+Date.now()).catch(()=>{}); // 读取模式（如果有 GET 接口）
+}
+function apAction(a){
+  fetch('/api/ap/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message||d.error||'操作失败');}).catch(()=>alert('请求失败'));
+}
+const AP_MODES=['auto','force-on','force-off'];
+const AP_MODE_LABELS={'auto':'自动','force-on':'强制开启','force-off':'强制关闭'};
+const AP_MODE_CLASSES={'auto':'badge-accent','force-on':'badge-success','force-off':'badge-danger'};
+function cycleApMode(){
+  const idx=(AP_MODES.indexOf(currentApMode)+1)%AP_MODES.length;
+  const newMode=AP_MODES[idx];
+  if(!confirm('AP 模式切换为: '+AP_MODE_LABELS[newMode]+'？'))return;
+  fetch('/api/ap/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:newMode})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){currentApMode=newMode;updateApBadge();alert(d.message);}
+    else alert(d.message||'切换失败');
+  }).catch(()=>alert('请求失败'));
+}
+function updateApBadge(){
+  const badge=document.getElementById('ap-mode-badge');
+  badge.textContent=AP_MODE_LABELS[currentApMode]||currentApMode;
+  badge.className='badge '+(AP_MODE_CLASSES[currentApMode]||'');
+}
+function editApConfig(){
+  const curSsid=document.getElementById('ap-ssid').textContent;
+  const newSsid=prompt('AP SSID:', curSsid==='—'?'TeslaUSB-Setup':curSsid);
+  if(newSsid===null)return;
+  const newPass=prompt('AP 密码（8-63字符，留空不修改）:');
+  if(newPass===null)return;
+  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:newSsid,passphrase:newPass})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message||'保存失败');}).catch(()=>alert('请求失败'));
+}
+
+/* ── WiFi 连接管理 ── */
+function switchTo(id){
+  if(!confirm('确定切换到 '+id+'？\n切换后当前连接可能中断几秒。'))return;
+  fetch('/api/wifi/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:id})})
+  .then(r=>r.json()).then(d=>{location.reload();}).catch(()=>alert('请求失败'));
+}
+function delConn(id){
+  if(!confirm('确定删除连接 "'+id+'"？\n此操作不可恢复。'))return;
+  fetch('/api/wifi/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({con_name:id})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+function editPriority(name, curPriority){
+  const val=prompt(name+' 的优先级 (0-800，数字越大越优先):', curPriority);
+  if(val===null)return;
+  const num=parseInt(val,10);
+  if(isNaN(num)||num<0||num>800){alert('请输入 0-800 的整数');return;}
+  fetch('/api/wifi/priority',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({con_name:name,priority:num})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+function editName(name){
+  const newName=prompt('新连接名:', name);
+  if(newName===null||!newName.trim())return;
+  fetch('/api/wifi/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old_name:name,new_name:newName.trim()})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+function toggleAuto(name, currentState){
+  const newVal=!currentState;
+  const label=newVal?'开启':'关闭';
+  if(!confirm(label+' "'+name+'" 的自动连接？'))return;
+  fetch('/api/wifi/autoconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({con_name:name,autoconnect:newVal})})
+  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message);}).catch(()=>alert('请求失败'));
+}
+
+/* ── WiFi 扫描 ── */
+function scanWifi(){
+  const b=document.getElementById('scanBtn');
+  b.disabled=true;b.textContent='扫描中...';
+  fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{
+    b.disabled=false;b.textContent='🔍 扫描';
+    const el=document.getElementById('scan-results');
+    if(d.networks&&d.networks.length){
+      el.innerHTML=d.networks.map(n=>{
+        const locked=n.secured?'🔒':'🔓';
+        const sigBadge=n.signal>=60?'badge-success':n.signal>=30?'badge-accent':'badge-danger';
+        return '<div class="wifi-item"><div style="flex:1;min-width:0"><div class="wifi-ssid">'+locked+' '+n.ssid+' <span class="badge '+sigBadge+'" style="font-size:10px">'+n.signal+'%</span></div></div><button class="btn btn-ghost btn-sm" onclick="connectNew(\''+n.ssid.replace(/'/g,"\\'")+'\')">连接</button></div>';
+      }).join('');
+    }else{
+      el.innerHTML='<p style="color:var(--text-muted);font-size:var(--text-sm)">未发现可用网络</p>';
+    }
+  }).catch(()=>{b.disabled=false;b.textContent='🔍 扫描';});
+}
+function connectNew(ssid){
+  const p=prompt('输入 '+ssid+' 的密码（开放网络留空）:');
+  if(p===null)return;
+  fetch('/api/wifi/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password:p})})
+  .then(r=>r.json()).then(d=>{location.reload();}).catch(()=>alert('请求失败'));
+}
+
+/* ── 关闭 WiFi 状态提示 ── */
+function dismissAlert(){
+  const el=document.getElementById('wifi-alert');
+  if(el)el.remove();
+  fetch('/api/wifi/status/dismiss',{method:'POST'}).catch(()=>{});
+}
+
+/* ── 网络测速 ── */
+let speedTestRunning=false;
+let speedMode='dl';  // 'dl' 下载 | 'ul' 上传
+
+function setSpeedMode(mode){
+  speedMode=mode;
+  document.getElementById('mode-dl').className='btn '+(mode==='dl'?'btn-primary':'btn-ghost')+' btn-sm';
+  document.getElementById('mode-ul').className='btn '+(mode==='ul'?'btn-primary':'btn-ghost')+' btn-sm';
+  // 上传模式时隐藏服务器选择（固定用httpbin.org）
+  document.getElementById('speedtest-server').style.display=mode==='dl'?'inline-block':'none';
+  document.getElementById('speedtest-custom-url').style.display='none';
+  document.getElementById('speedtest-result').style.display='none';
+}
+
+function onServerChange(){
+  const sel=document.getElementById('speedtest-server');
+  const custom=document.getElementById('speedtest-custom-url');
+  custom.style.display=sel.value==='__custom__'?'inline-block':'none';
+}
+
+function startSpeedTest(){
+  if(speedTestRunning)return;
+  const btn=document.getElementById('speedtestBtn');
+  const status=document.getElementById('speedtest-status');
+  const stagesEl=document.getElementById('speedtest-stages');
+  const stageList=document.getElementById('speedtest-stage-list');
+  const resultEl=document.getElementById('speedtest-result');
+  const sel=document.getElementById('speedtest-server');
+  const customUrl=document.getElementById('speedtest-custom-url');
+
+  // 下载模式检查
+  if(speedMode==='dl' && sel.value==='__custom__' && !customUrl.value.trim()){
+    status.textContent='⚠️ 请输入自定义测速服务器地址';
+    return;
+  }
+
+  speedTestRunning=true;
+  btn.disabled=true;
+  btn.textContent='⏳ 测速中...';
+  status.textContent=speedMode==='dl'?'正在连接测速服务器...':'正在上传测试数据...';
+  stagesEl.style.display='block';
+  stageList.innerHTML='';
+  resultEl.style.display='none';
+
+  let url, body;
+  if(speedMode==='dl'){
+    url='/api/wifi/speedtest';
+    body={server:sel.value};
+    if(sel.value==='__custom__')body.custom_url=customUrl.value.trim();
+  }else{
+    url='/api/wifi/speedtest/upload';
+    body={};
+  }
+
+  fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(r=>r.json()).then(d=>{
+    speedTestRunning=false;
+    btn.disabled=false;
+    btn.textContent='▶ 开始测速';
+
+    // 更新阶段进度
+    if(d.stages){
+      stageList.innerHTML='';
+      d.stages.forEach((s,i)=>{
+        const span=document.createElement('span');
+        const cls=s.success?'badge-success':s.error?'badge-danger':'badge-accent';
+        const icon=s.success?'✅':s.error?'❌':'⏳';
+        span.className='badge '+cls;
+        span.style.cssText='font-size:10px;padding:4px 8px';
+        span.textContent=icon+' '+s.label+' '+(s.success?s.speed_mbps+'Mbps':(s.error||'...'));
+        stageList.appendChild(span);
+      });
+    }
+
+    if(!d.success){
+      status.textContent='❌ '+(d.error||'测速失败');
+      return;
+    }
+
+    status.textContent='✅ 测速完成';
+    resultEl.style.display='block';
+
+    if(speedMode==='dl'){
+      document.getElementById('r-speed').textContent=(d.download_mbps||0)+' Mbps';
+      document.getElementById('r-latency').textContent=(d.latency_ms||0)+' ms';
+      document.getElementById('r-bytes').textContent=formatBytes(d.total_bytes||0);
+      document.getElementById('r-time').textContent=(d.total_time_s||0)+' 秒';
+      document.getElementById('speed-value').textContent=d.download_mbps||0;
+      document.getElementById('r-upload').textContent='— Mbps';
+      updateGauge(d.download_mbps||0);
+    }else{
+      document.getElementById('r-speed').textContent='— Mbps';
+      document.getElementById('r-upload').textContent=(d.upload_mbps||0)+' Mbps';
+      document.getElementById('r-latency').textContent='— ms';
+      document.getElementById('r-bytes').textContent=formatBytes(d.total_bytes||0);
+      document.getElementById('r-time').textContent=(d.total_time_s||0)+' 秒';
+      document.getElementById('speed-value').textContent=d.upload_mbps||0;
+      updateGauge(d.upload_mbps||0);
+    }
+  }).catch(e=>{
+    speedTestRunning=false;
+    btn.disabled=false;
+    btn.textContent='▶ 开始测速';
+    status.textContent='❌ 请求失败: '+e;
+  });
+}
+
+function updateGauge(mbps){
+  const gauge=document.getElementById('speed-gauge');
+  const maxMbps=100;
+  const pct=Math.min(mbps/maxMbps,1);
+  const circ=2*Math.PI*42;
+  gauge.setAttribute('stroke-dasharray',(circ*pct)+' '+circ);
+  const color=mbps>=50?'var(--success)':mbps>=20?'var(--accent)':mbps>=5?'var(--warning)':'var(--danger)';
+  gauge.setAttribute('stroke',color);
+}
+
+function formatBytes(b){
+  if(b===0)return '0 B';
+  const units=['B','KB','MB','GB'];
+  const i=Math.floor(Math.log(b)/Math.log(1024));
+  return parseFloat((b/Math.pow(1024,i)).toFixed(1))+' '+units[Math.min(i,3)];
+}
+
+/* ── 位置检测配置 ── */
+function loadLocationConfig(){
+  fetch('/api/wifi/location-config').then(r=>r.json()).then(d=>{
+    if(d.success && d.config){
+      document.getElementById('loc-teslamate-url').value=d.config.teslamate_url||'';
+      document.getElementById('loc-teslamate-pass').placeholder='(已保存，留空不修改)';
+      document.getElementById('loc-home-location').value=d.config.home_location||'';
+      document.getElementById('loc-home-wifi').value=(d.config.home_wifi_ssids||[]).join(', ');
+      document.getElementById('loc-hotspot').value=(d.config.hotspot_ssids||[]).join(', ');
+    }
+  }).catch(()=>{});
+}
+
+function saveLocationConfig(){
+  const btn=document.getElementById('loc-save-btn');
+  const status=document.getElementById('loc-save-status');
+  btn.disabled=true;
+  btn.textContent='⏳ 保存中...';
+  status.textContent='';
+
+  const passEl=document.getElementById('loc-teslamate-pass');
+  const data={
+    teslamate_url: document.getElementById('loc-teslamate-url').value.trim(),
+    home_location: document.getElementById('loc-home-location').value.trim(),
+    home_wifi_ssids: document.getElementById('loc-home-wifi').value.trim(),
+    hotspot_ssids: document.getElementById('loc-hotspot').value.trim(),
+  };
+  // 密码仅在用户输入新值时才发送
+  if(passEl.value.trim()){
+    data.teslamate_password=passEl.value.trim();
+  }
+
+  fetch('/api/wifi/location-config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(data)
+  }).then(r=>r.json()).then(d=>{
+    btn.disabled=false;
+    btn.textContent='💾 保存配置';
+    if(d.success){
+      status.textContent='✅ 已保存';
+      passEl.value='';
+      passEl.placeholder='(已保存，留空不修改)';
+      setTimeout(()=>{status.textContent=''},3000);
+    }else{
+      status.textContent='❌ '+(d.message||'保存失败');
+    }
+  }).catch(e=>{
+    btn.disabled=false;
+    btn.textContent='💾 保存配置';
+    status.textContent='❌ 请求失败: '+e;
+  });
+}
+
+/* ── 页面加载 ── */
+loadDetails();
+loadApStatus();
+loadLocationConfig();
+</script>
+{% endblock %}

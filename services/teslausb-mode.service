@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaUSB Mode Controller - Auto Present Mode
+After=network.target samba-ad-dc.service smbd.service nmbd.service
+Wants=samba-ad-dc.service smbd.service nmbd.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/radxa_data/present_usb.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=TeslaUSB CL Sentry Notification Retry Timer
+Requires=teslausb-notify-retry.service
+
+[Timer]
+OnUnitActiveSec=120s
+OnBootSec=60s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

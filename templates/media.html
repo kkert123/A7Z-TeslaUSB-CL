@@ -1,0 +1,414 @@
+{% extends "base.html" %}
+{% block title %} · 媒体管理{% endblock %}
+{% block content %}
+<div class="page-header"><h2>多媒体管理</h2></div>
+
+<!-- ① Present 模式横幅（默认隐藏，JS 控制） -->
+<div id="staging-banner" style="display:none;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.3);border-radius:var(--r-md);padding:var(--s2) var(--s3);margin-bottom:var(--s4);font-size:var(--text-sm);color:var(--warning)"></div>
+
+<div class="tab-bar" style="margin-bottom:var(--s4)">
+  {% set tabs = [
+    ('music','🎵 音乐'),
+    ('boombox','📢 Boombox'),
+    ('lightshow','✨ 灯展'),
+    ('wraps','🎨 贴膜'),
+    ('plates','🚗 车牌'),
+    ('lockchime','🔔 锁车音')
+  ] %}
+  {% for tid,label in tabs %}
+  <button class="tab-btn{% if loop.first %} active{% endif %}" data-tab="{{ tid }}" onclick="switchTab('{{ tid }}')">{{ label }}<span class="tab-badge" id="badge-{{ tid }}"></span></button>
+  {% endfor %}
+</div>
+
+<!-- 音频播放器 -->
+<div id="audio-player" class="card" style="display:none;margin-bottom:var(--s4);padding:var(--s3)">
+  <div style="display:flex;align-items:center;gap:var(--s3)">
+    <button id="play-btn" onclick="togglePlay()" style="width:44px;height:44px;border-radius:50%;border:none;background:var(--pri);color:#fff;font-size:18px;cursor:pointer">▶</button>
+    <div style="flex:1;min-width:0">
+      <div id="now-playing" style="font-weight:500;font-size:var(--text-sm);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+      <div style="display:flex;align-items:center;gap:var(--s2)">
+        <span id="audio-current" style="font-size:var(--text-xs);color:var(--text-muted);min-width:36px">0:00</span>
+        <input type="range" id="audio-seek" value="0" max="100" style="flex:1;height:4px;cursor:pointer" oninput="seekAudio(this.value)">
+        <span id="audio-duration" style="font-size:var(--text-xs);color:var(--text-muted);min-width:36px">0:00</span>
+      </div>
+    </div>
+    <button onclick="stopAudio()" style="border:none;background:transparent;color:var(--text-muted);cursor:pointer;padding:8px;font-size:16px">✕</button>
+  </div>
+</div>
+
+<!-- ═══════════ 音乐 Tab ═══════════ -->
+<div class="tab-panel active" id="panel-music">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <p style="font-size:var(--text-xs);color:var(--text-muted)">上传到 USB 音乐分区 (MP3/FLAC/WAV/AAC/M4A/OGG)</p>
+      <button class="btn btn-sm" onclick="document.getElementById('music-upload').click()">⬆ 上传</button>
+      <input type="file" id="music-upload" multiple accept=".mp3,.flac,.wav,.aac,.m4a,.ogg,.wma" style="display:none" onchange="uploadFiles('music',this.files)">
+    </div>
+  </div>
+  <div class="card"><div id="music-list"><div style="color:var(--text-muted);text-align:center;padding:var(--s5)">加载中...</div></div></div>
+</div>
+
+<!-- ═══════════ Boombox Tab ═══════════ -->
+<div class="tab-panel" id="panel-boombox">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <p style="font-size:var(--text-xs);color:var(--text-muted)">Boombox 锁车音效 (MP3/WAV · ≤1MB · 最多5个)</p>
+      <button class="btn btn-sm" onclick="document.getElementById('boombox-upload').click()">⬆ 上传</button>
+      <input type="file" id="boombox-upload" accept=".mp3,.wav" style="display:none" onchange="uploadFiles('boombox',this.files)">
+    </div>
+  </div>
+  <div class="card"><div id="boombox-list"><div style="color:var(--text-muted);text-align:center;padding:var(--s5)">加载中...</div></div></div>
+</div>
+
+<!-- ═══════════ 灯展 Tab ═══════════ -->
+<div class="tab-panel" id="panel-lightshow">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <p style="font-size:var(--text-xs);color:var(--text-muted)">Tesla 灯光秀 (.fseq + .mp3/.wav 配对)</p>
+      <button class="btn btn-sm" onclick="document.getElementById('lightshow-upload').click()">⬆ 上传</button>
+      <input type="file" id="lightshow-upload" accept=".fseq,.mp3,.wav,.zip" multiple style="display:none" onchange="uploadFiles('lightshow',this.files)">
+    </div>
+  </div>
+  <div class="card"><div id="lightshow-list"><div style="color:var(--text-muted);text-align:center;padding:var(--s5)">加载中...</div></div></div>
+</div>
+
+<!-- ═══════════ 贴膜 Tab ═══════════ -->
+<div class="tab-panel" id="panel-wraps">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <p style="font-size:var(--text-xs);color:var(--text-muted)">Tesla 车辆贴膜 (PNG · 512~1024px · ≤1MB)</p>
+      <button class="btn btn-sm" onclick="document.getElementById('wraps-upload').click()">⬆ 上传</button>
+      <input type="file" id="wraps-upload" accept=".png" multiple style="display:none" onchange="uploadFiles('wraps',this.files)">
+    </div>
+  </div>
+  <div class="card"><div id="wraps-list"><div style="color:var(--text-muted);text-align:center;padding:var(--s5)">加载中...</div></div></div>
+</div>
+
+<!-- ═══════════ 车牌 Tab ═══════════ -->
+<div class="tab-panel" id="panel-plates">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <p style="font-size:var(--text-xs);color:var(--text-muted)">Tesla 车牌背景 (PNG · 420×200/420×100 · ≤512KB · 最多10个)</p>
+      <button class="btn btn-sm" onclick="document.getElementById('plates-upload').click()">⬆ 上传</button>
+      <input type="file" id="plates-upload" accept=".png" multiple style="display:none" onchange="uploadFiles('plates',this.files)">
+    </div>
+  </div>
+  <div class="card"><div id="plates-list"><div style="color:var(--text-muted);text-align:center;padding:var(--s5)">加载中...</div></div></div>
+</div>
+
+<!-- ═══════════ 锁车音 Tab ═══════════ -->
+<div class="tab-panel" id="panel-lockchime">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <p style="font-size:var(--text-xs);color:var(--text-muted)">Tesla 锁车提示音 (WAV · 单声道 · 44.1/48kHz · 16bit)</p>
+      <button class="btn btn-sm" onclick="document.getElementById('chime-upload').click()">⬆ 上传</button>
+      <input type="file" id="chime-upload" accept=".wav" style="display:none" onchange="uploadChime(this.files)">
+    </div>
+  </div>
+  <div class="card"><div id="lockchime-list"><div style="color:var(--text-muted);text-align:center;padding:var(--s5)">加载中...</div></div></div>
+</div>
+
+<div id="toast" style="position:fixed;top:70px;right:16px;z-index:999;display:none;padding:8px 14px;border-radius:6px;font-size:var(--text-sm)"></div>
+
+<!-- 上传进度条 -->
+<div id="upload-progress" style="display:none;margin-bottom:var(--s4)">
+  <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);margin-bottom:4px">
+    <span id="upload-progress-text">上传中...</span>
+    <span id="upload-progress-pct">0%</span>
+  </div>
+  <div style="height:6px;background:var(--bg-secondary);border-radius:3px;overflow:hidden">
+    <div id="upload-progress-bar" style="height:100%;background:linear-gradient(90deg,var(--pri),#60a5fa);border-radius:3px;width:0%;transition:width .3s"></div>
+  </div>
+</div>
+
+<audio id="audio-el" preload="auto"></audio>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.tab-bar{display:flex;gap:2px;background:var(--bg-secondary);border-radius:var(--r-md);padding:3px;flex-wrap:wrap}
+.tab-btn{flex:1;min-width:80px;padding:var(--s2) var(--s3);border:none;background:transparent;color:var(--text-muted);font-size:var(--text-sm);font-weight:500;border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px;transition:all .2s}
+.tab-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+.tab-btn.active{color:var(--pri);background:var(--pri-alpha)}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.media-item{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:var(--s3)}
+.media-item:last-child{border-bottom:none}
+.media-item-name{font-size:var(--text-sm);font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.media-item-meta{font-size:var(--text-xs);color:var(--text-muted);white-space:nowrap}
+.media-item-actions{display:flex;gap:4px;flex-shrink:0}
+.media-btn{background:none;border:none;color:var(--text-muted);cursor:pointer;padding:6px 10px;border-radius:var(--r-sm);font-size:var(--text-xs);transition:all .15s}
+.media-btn:hover{color:var(--pri);background:var(--pri-alpha)}
+.media-btn.del:hover{color:var(--danger);background:rgba(239,68,68,.1)}
+.grid-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:var(--s3)}
+.grid-card{text-align:center;padding:var(--s2);border:1px solid var(--border);border-radius:var(--r-md);position:relative;transition:all .2s}
+.grid-card:hover{border-color:var(--pri)}
+.grid-card img{width:100%;aspect-ratio:16/9;object-fit:contain;border-radius:var(--r-sm);background:var(--bg-primary)}
+.grid-card .name{font-size:var(--text-xs);font-weight:500;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grid-card .meta{font-size:10px;color:var(--text-muted)}
+.grid-card .del{position:absolute;top:4px;right:4px;background:var(--bg-secondary);border:none;color:var(--text-muted);width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:12px;opacity:0;transition:all .15s}
+.grid-card:hover .del{opacity:1}
+.grid-card .del:hover{color:var(--danger)}
+.active-badge{display:inline-block;padding:1px 6px;font-size:10px;border-radius:10px;background:var(--success);color:#fff;margin-left:6px}
+.tab-badge{display:none;background:var(--warning);color:#000;font-size:10px;padding:1px 5px;border-radius:8px;min-width:16px;text-align:center;margin-left:4px}
+.staging-badge{display:inline-block;padding:1px 6px;font-size:10px;border-radius:10px;background:rgba(251,191,36,.2);color:var(--warning);margin-left:6px}
+.staging-delete{background:rgba(239,68,68,.15)!important;color:var(--danger)!important}
+</style>
+
+<script>
+var pendingDelete=null,currentPlaying=null,audio=document.getElementById('audio-el');
+function fmtBytes(b){if(!b)return'0 B';var k=1024,s=['B','KB','MB','GB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(1))+' '+s[i];}
+function fmtTime(ts){if(!ts)return'—';var d=new Date(ts*1000);return d.toLocaleDateString('zh-CN')+' '+d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});}
+function toast(msg,cls){cls=cls||'success';var t=document.getElementById('toast');t.textContent=msg;t.style.display='block';t.style.background=cls==='error'?'#7f1d1d':'#065f46';t.style.color=cls==='error'?'#fca5a5':'#a7f3d0';setTimeout(function(){t.style.display='none'},3000);}
+
+function switchTab(tab){
+  document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab);});
+  document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.toggle('active',p.id==='panel-'+tab);});
+  if(tab!=='music'&&tab!=='boombox')stopAudio();
+  if(tab==='music')loadMusic();
+  else if(tab==='boombox')loadBoombox();
+  else if(tab==='lightshow')loadLightshow();
+  else if(tab==='wraps')loadWraps();
+  else if(tab==='plates')loadPlates();
+  else if(tab==='lockchime')loadChimes();
+}
+
+// ── 音频播放器 ──
+function playAudio(url,name){
+  if(currentPlaying===name&&!audio.paused){audio.pause();updatePlayBtns();return;}
+  if(currentPlaying===name){audio.play();updatePlayBtns();return;}
+  currentPlaying=name;
+  audio.src=url;audio.play();
+  document.getElementById('audio-player').style.display='block';
+  document.getElementById('now-playing').textContent=name;
+  updatePlayBtns();
+}
+function togglePlay(){if(audio.paused)audio.play();else audio.pause();updatePlayBtns();}
+function stopAudio(){audio.pause();audio.currentTime=0;currentPlaying=null;document.getElementById('audio-player').style.display='none';updatePlayBtns();}
+function updatePlayBtns(){
+  document.getElementById('play-btn').textContent=audio.paused?'▶':'⏸';
+  // 更新所有行内播放按钮
+  document.querySelectorAll('.media-btn.play-btn').forEach(function(b){
+    var name=b.getAttribute('data-name');
+    var isPlaying=name===currentPlaying&&!audio.paused;
+    b.textContent=isPlaying?'⏸':'▶';
+    b.style.color=isPlaying?'var(--success)':'';
+  });
+}
+function seekAudio(v){if(audio.duration)audio.currentTime=audio.duration*v/100;}
+audio.ontimeupdate=function(){
+  document.getElementById('audio-current').textContent=fmtDur(audio.currentTime);
+  document.getElementById('audio-duration').textContent=fmtDur(audio.duration);
+  if(audio.duration)document.getElementById('audio-seek').value=audio.currentTime/audio.duration*100;
+};
+audio.onloadedmetadata=function(){document.getElementById('audio-duration').textContent=fmtDur(audio.duration);};
+audio.onended=function(){currentPlaying=null;updatePlayBtns();};
+function fmtDur(s){if(!s||isNaN(s))return'0:00';var m=Math.floor(s/60),sec=Math.floor(s%60);return m+':'+(sec<10?'0':'')+sec;}
+
+// ── 文件上传 (XHR + 进度条) ──
+function uploadFiles(type,files){
+  if(!files.length)return;
+  var fd=new FormData();
+  for(var i=0;i<files.length;i++)fd.append('files',files[i]);
+  var xhr=new XMLHttpRequest();
+  var prog=document.getElementById('upload-progress');
+  var bar=document.getElementById('upload-progress-bar');
+  var pct=document.getElementById('upload-progress-pct');
+  var txt=document.getElementById('upload-progress-text');
+  prog.style.display='block';bar.style.width='0%';pct.textContent='0%';txt.textContent='上传中...';
+  xhr.upload.onprogress=function(e){
+    if(e.lengthComputable){
+      var p=Math.round(e.loaded/e.total*100);
+      bar.style.width=p+'%';pct.textContent=p+'%';
+      txt.textContent='上传中... '+fmtBytes(e.loaded)+' / '+fmtBytes(e.total);
+    }
+  };
+  xhr.onload=function(){
+    prog.style.display='none';
+    try{
+      var d=JSON.parse(xhr.responseText);
+      toast(d.message||'上传完成',d.success?'success':'error');
+      if(type==='music')loadMusic();
+      else if(type==='boombox')loadBoombox();
+      else if(type==='lightshow')loadLightshow();
+      else if(type==='wraps')loadWraps();
+      else if(type==='plates')loadPlates();
+    }catch(e){toast('响应解析失败','error');}
+  };
+  xhr.onerror=function(){prog.style.display='none';toast('网络错误','error');};
+  xhr.open('POST','/api/media/'+type+'/upload');xhr.send(fd);
+  var inp=document.getElementById(type+'-upload');if(inp)inp.value='';
+}
+
+// ── 文件删除 ──
+function delFile(type,filename){
+  if(!confirm('删除 '+filename+'？'))return;
+  if((type==='music'||type==='boombox')&&currentPlaying===filename)stopAudio();
+  var fd=new FormData();fd.append('filename',filename);
+  fetch('/api/media/'+type+'/delete',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){
+    toast(d.message||'已删除',d.success?'success':'error');
+    if(type==='music')loadMusic();
+    else if(type==='boombox')loadBoombox();
+    else if(type==='lightshow')loadLightshow();
+    else if(type==='wraps')loadWraps();
+    else if(type==='plates')loadPlates();
+    else if(type==='lockchime')loadChimes();
+  }).catch(function(e){toast('网络错误','error')});
+}
+
+// ── 音乐 ──
+function loadMusic(){
+  fetch('/api/media/music/list').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[],el=document.getElementById('music-list');
+    if(!files.length){el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s5)">📭 暂无音乐</div>';return;}
+    el.innerHTML=files.map(function(f){
+      var ext=(f.name||f.filename||'').split('.').pop().toUpperCase();
+      return '<div class="media-item"><div class="media-item-name">'+he(f.name||f.filename)+'</div><div class="media-item-meta">'+fmtBytes(f.size)+' · '+ext+'</div><div class="media-item-actions"><button class="media-btn play-btn" data-name="'+heJs(f.name||f.filename)+'" onclick="playAudio(\'/api/media/music/play/'+encodeURIComponent(f.name||f.filename)+'\',\''+heJs(f.name||f.filename)+'\')">▶</button><button class="media-btn del" onclick="delFile(\'music\',\''+heJs(f.name||f.filename)+'\')">✕</button></div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+// ── Boombox ──
+function loadBoombox(){
+  fetch('/api/media/boombox/list').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[],el=document.getElementById('boombox-list');
+    if(!files.length){el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s5)">📭 暂无 Boombox 音效</div>';return;}
+    el.className='';el.innerHTML=files.map(function(f){
+      var ext=(f.name||f.filename||'').split('.').pop().toUpperCase();
+      return '<div class="media-item"><div class="media-item-name">'+he(f.name||f.filename)+'</div><div class="media-item-meta">'+fmtBytes(f.size)+' · '+ext+'</div><div class="media-item-actions"><button class="media-btn play-btn" data-name="'+heJs(f.name||f.filename)+'" onclick="playAudio(\'/api/media/boombox/play/'+encodeURIComponent(f.name||f.filename)+'\',\''+heJs(f.name||f.filename)+'\')">▶</button><button class="media-btn del" onclick="delFile(\'boombox\',\''+heJs(f.name||f.filename)+'\')">✕</button></div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+// ── 灯展 ──
+function loadLightshow(){
+  fetch('/api/media/lightshow/list').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[],el=document.getElementById('lightshow-list');
+    if(!files.length){el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s5)">📭 暂无灯光秀</div>';return;}
+    el.innerHTML=files.map(function(f){
+      return '<div class="media-item"><div class="media-item-name">'+he(f.name||f.filename)+'</div><div class="media-item-meta">'+fmtBytes(f.size)+' · '+he(f.type||'')+'</div><div class="media-item-actions"><button class="media-btn del" onclick="delFile(\'lightshow\',\''+heJs(f.name||f.filename)+'\')">✕</button></div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+// ── 贴膜 ──
+function loadWraps(){
+  fetch('/api/media/wraps/list').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[],el=document.getElementById('wraps-list');
+    if(!files.length){el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s5)">📭 暂无贴膜</div>';return;}
+    el.className='grid-list';el.innerHTML=files.map(function(f){
+      return '<div class="grid-card"><button class="del" onclick="delFile(\'wraps\',\''+heJs(f.name||f.filename)+'\')">✕</button><img src="/api/media/wraps/preview/'+encodeURIComponent(f.name||f.filename)+'" alt="" loading="lazy"><div class="name">'+he(f.name||f.filename)+'</div><div class="meta">'+(f.width?f.width+'×'+f.height+' · ':'')+fmtBytes(f.size)+'</div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+// ── 车牌 ──
+function loadPlates(){
+  fetch('/api/media/plates/list').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[],el=document.getElementById('plates-list');
+    if(!files.length){el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s5)">📭 暂无车牌</div>';return;}
+    el.className='grid-list';el.innerHTML=files.map(function(f){
+      return '<div class="grid-card"><button class="del" onclick="delFile(\'plates\',\''+heJs(f.filename||f.name)+'\')">✕</button><img src="/api/license-plates/preview/'+encodeURIComponent(f.filename||f.name)+'" alt="" loading="lazy"><div class="name">'+he(f.filename||f.name)+'</div><div class="meta">'+(f.width?f.width+'×'+f.height+' · ':'')+fmtBytes(f.size)+'</div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+// ── 锁车音 ──
+function loadChimes(){
+  fetch('/api/lockchime/list').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[],el=document.getElementById('lockchime-list');
+    if(!files.length){el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s5)">📭 暂无锁车音</div>';return;}
+    el.innerHTML=files.map(function(f){
+      var activeBadge=f.active?'<span class="active-badge">● 已激活</span>':'';
+      return '<div class="media-item"><div class="media-item-name">'+he(f.filename)+activeBadge+'</div><div class="media-item-meta">'+he(f.size)+' · '+he(f.modified)+'</div><div class="media-item-actions"><button class="media-btn play-btn" data-name="'+heJs(f.filename)+'" onclick="playAudio(\'/api/lockchime/preview/'+encodeURIComponent(f.filename)+'\',\''+heJs(f.filename)+'\')">▶</button>'+(!f.active?'<button class="media-btn" onclick="activateChime(\''+heJs(f.filename)+'\')" style="color:var(--success)">激活</button>':'')+'<button class="media-btn del" onclick="delChime(\''+heJs(f.filename)+'\')">✕</button></div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+function activateChime(filename){
+  fetch('/api/lockchime/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:filename})}).then(function(r){return r.json()}).then(function(d){toast(d.message||'已激活',d.success?'success':'error');loadChimes();}).catch(function(){toast('网络错误','error')});
+}
+function delChime(filename){
+  if(!confirm('删除 '+filename+'？'))return;
+  if(currentPlaying===filename)stopAudio();
+  fetch('/api/lockchime/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:filename})}).then(function(r){return r.json()}).then(function(d){toast(d.message,d.success?'success':'error');loadChimes();}).catch(function(){toast('网络错误','error')});
+}
+function uploadChime(files){
+  if(!files.length)return;
+  var fd=new FormData();fd.append('file',files[0]);
+  fetch('/api/lockchime/upload',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){toast(d.message||'上传完成',d.success?'success':'error');loadChimes();}).catch(function(){toast('网络错误','error')});
+  document.getElementById('chime-upload').value='';
+}
+
+// HTML 转义
+function he(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+function heJs(s){return (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');}
+
+// ── ③ Staging 待同步状态（10s 轮询） ──
+var _staging={};
+function loadStagingStatus(){
+  fetch('/api/media/staging/status').then(function(r){return r.json()}).then(function(d){
+    _staging=d;
+    updateStagingUI();
+  }).catch(function(){});
+}
+function updateStagingUI(){
+  var d=_staging;
+  // ① 横幅
+  var banner=document.getElementById('staging-banner');
+  if(d.is_present&&d.total_pending>0){
+    banner.style.display='block';
+    banner.innerHTML='⚠️ Present 模式 — <b>'+d.total_pending+'</b> 个操作待同步（'+d.pending_size_fmt+'），切换到 Edit 模式自动同步';
+  }else{
+    banner.style.display='none';
+  }
+  // ② Tab 角标
+  var parts=['music','boombox','lightshow','wraps','plates','lockchime'];
+  parts.forEach(function(p){
+    var bd=d.breakdown&&d.breakdown[p]?d.breakdown[p]:{upload:0,delete:0};
+    var total=bd.upload+bd.delete;
+    var el=document.getElementById('badge-'+p);
+    if(total>0){el.textContent=total;el.style.display='inline-block';}
+    else{el.style.display='none';}
+  });
+  // ③ 刷新当前 tab 列表（使文件 badge 生效）
+  // 通过 stash 数据重新渲染 — 简单方案：重新 load 当前 tab
+  var activeTab=document.querySelector('.tab-btn.active');
+  if(activeTab)switchTab(activeTab.dataset.tab);
+}
+// 每个 load 函数渲染完成后检查 staging 数据添加 badge
+function markStagingBadge(partition,files,elId){
+  if(!_staging.is_present)return;
+  var uploads=(_staging.uploads||[]).filter(function(u){return u.partition===partition;});
+  var deletes=(_staging.deletes||[]).filter(function(d){return d.partition===partition;});
+  var uNames=uploads.map(function(u){return u.filename;});
+  var dNames=deletes.map(function(d){return d.filename;});
+  var el=document.getElementById(elId);
+  if(!el)return;
+  var items=el.querySelectorAll('.media-item,.grid-card');
+  items.forEach(function(item){
+    var nameEl=item.querySelector('.media-item-name,.name');
+    if(!nameEl)return;
+    var txt=nameEl.textContent.trim();
+    if(dNames.includes(txt)){
+      var badge=document.createElement('span');badge.className='staging-badge staging-delete';badge.textContent='🗑 待删除';
+      if(!nameEl.querySelector('.staging-badge'))nameEl.appendChild(badge);
+    }else if(uNames.includes(txt)){
+      var badge=document.createElement('span');badge.className='staging-badge';badge.textContent='⏳ 待同步';
+      if(!nameEl.querySelector('.staging-badge'))nameEl.appendChild(badge);
+    }
+  });
+}
+
+// ── 覆盖加载函数添加 badge 标记 ──
+var _origLoadMusic=loadMusic;
+loadMusic=function(){_origLoadMusic();setTimeout(function(){markStagingBadge('music',[],'music-list');},200);};
+var _origLoadBoombox=loadBoombox;
+loadBoombox=function(){_origLoadBoombox();setTimeout(function(){markStagingBadge('boombox',[],'boombox-list');},200);};
+var _origLoadLightshow=loadLightshow;
+loadLightshow=function(){_origLoadLightshow();setTimeout(function(){markStagingBadge('lightshow',[],'lightshow-list');},200);};
+var _origLoadWraps=loadWraps;
+loadWraps=function(){_origLoadWraps();setTimeout(function(){markStagingBadge('wraps',[],'wraps-list');},200);};
+var _origLoadPlates=loadPlates;
+loadPlates=function(){_origLoadPlates();setTimeout(function(){markStagingBadge('plates',[],'plates-list');},200);};
+
+// Init
+loadStagingStatus();
+loadMusic();
+setInterval(loadStagingStatus,10000);
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+[Unit]
+Description=TeslaUSB I/O Scheduler Tuning
+Documentation=https://github.com/mphacker/TeslaUSB
+After=local-fs.target
+Before=teslausb-mode.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/radxa_data/io_tuning.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

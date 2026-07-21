@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %} — 哨兵事件{% endblock %}
+{% block content %}
+<div class="page-header"><h2>🛡️ 哨兵事件</h2></div>
+
+{% if error %}
+<div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+{% if not event %}
+<div class="card" style="max-width:480px;margin:var(--s8) auto;">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s4);">输入确认码</h3>
+  <form action="/sentry" method="get">
+    <div style="display:flex;gap:var(--s3);">
+      <input type="text" name="code" class="code-input" placeholder="123456" maxlength="6" pattern="[0-9]{6}" required value="{{ code or '' }}" autocomplete="off">
+      <button type="submit" class="btn btn-primary btn-lg">查看</button>
+    </div>
+  </form>
+  <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:var(--s4);">确认码已发送至企业微信，请在有效期内输入。</p>
+</div>
+{% endif %}
+
+{% if event %}
+<div class="card" style="margin-bottom:var(--s4);">
+  {% if preview_url %}
+  <img src="{{ preview_url }}" alt="事件预览" class="thumb" style="aspect-ratio:auto;max-height:400px;object-fit:contain;margin:0 auto var(--s4);border-radius:var(--r-lg);" id="preview-img">
+  {% else %}
+  <div class="empty" style="padding:var(--s8) var(--s4);"><div class="empty-icon">📷</div><div class="empty-text">预览图生成中...</div></div>
+  {% endif %}
+</div>
+
+<div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:var(--s4);">
+  <div class="stat-card"><div class="stat-label">检测时间</div><div class="stat-value" style="font-size:var(--text-base)">{{ detect_time or '未知' }}</div></div>
+  <div class="stat-card"><div class="stat-label">位置</div><div class="stat-value {% if event.location_status == 'home' %}status-ok{% endif %}" style="font-size:var(--text-base)">{{ '在家' if event.location_status == 'home' else '外出' }}</div></div>
+  <div class="stat-card"><div class="stat-label">文件数</div><div class="stat-value" style="font-size:var(--text-base)">{{ event.file_count or 0 }} 个</div></div>
+  <div class="stat-card"><div class="stat-label">状态</div><div class="stat-value" style="font-size:var(--text-base)">
+    {% if event.status == 'pending_confirm' %}<span class="status status-warn">待确认</span>
+    {% elif event.status == 'confirmed' %}<span class="status status-ok">已确认</span>
+    {% elif event.status == 'uploading' %}<span class="badge badge-info">上传中</span>
+    {% elif event.status == 'completed' %}<span class="status status-ok">已完成</span>
+    {% elif event.status == 'expired' %}<span class="status status-err">已过期</span>
+    {% else %}{{ event.status }}{% endif %}
+  </div></div>
+</div>
+
+{% if event.status == 'pending_confirm' %}
+<div class="card" style="text-align:center;">
+  {% if deadline %}
+  <div class="stat-label" style="margin-bottom:var(--s2)">确认倒计时</div>
+  <div class="countdown-value" id="countdown" data-deadline="{{ deadline }}">计算中...</div>
+  {% endif %}
+  <button id="confirm-btn" class="btn btn-success btn-lg btn-block" style="margin-top:var(--s4)" onclick="confirmUpload()">✅ 确认上传</button>
+</div>
+{% elif event.status == 'confirmed' %}
+<div class="alert alert-success" style="justify-content:center;font-weight:600;">✅ 上传已确认，正在处理中...</div>
+{% elif event.status == 'uploading' %}
+<div class="alert alert-info" style="justify-content:center;">⬆️ 上传进度: {{ "%.1f"|format(event.upload_progress or 0) }}%</div>
+{% elif event.status == 'completed' %}
+<div class="alert alert-success" style="justify-content:center;font-weight:600;">🎉 上传完成，文件已保存到 NAS</div>
+{% elif event.status == 'expired' %}
+<div class="alert alert-danger" style="justify-content:center;">⏰ 确认已超时</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){const el=document.getElementById('countdown');if(!el)return;const end=new Date(el.dataset.deadline);
+function tick(){const diff=end-new Date();if(diff<=0){el.textContent='已超时';el.classList.add('urgent');const b=document.getElementById('confirm-btn');if(b)b.disabled=true;return;}
+const h=Math.floor(diff/3600000),m=Math.floor((diff%3600000)/60000),s=Math.floor((diff%60000)/1000);
+el.textContent=String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');if(diff<300000)el.classList.add('urgent');}
+tick();setInterval(tick,1000);})();
+
+async function confirmUpload(){const btn=document.getElementById('confirm-btn');if(!btn)return;const code='{{ code }}';if(!code)return;
+btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 处理中...';
+try{const r=await fetch('/api/sentry/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+const d=await r.json();if(d.success)location.reload();else{alert(d.error||'确认失败');btn.disabled=false;btn.textContent='确认上传';}}
+catch(e){alert('请求失败: '+e.message);btn.disabled=false;btn.textContent='确认上传';}}
+
+const img=document.getElementById('preview-img');if(img)img.onerror=function(){setTimeout(()=>{img.src=img.src+'?t='+Date.now();},5000);};
+</script>
+{% endblock %}

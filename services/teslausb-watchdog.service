@@ -1,0 +1,22 @@
+[Unit]
+Description=TeslaUSB Hardware Watchdog Daemon
+After=network.target teslausb-web.service teslausb-sentry.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/radxa_data/teslausb
+ExecStart=/usr/bin/python3 -u /opt/radxa_data/teslausb/hardware_watchdog.py --daemon --interval 5
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 说明：
+# --interval 5 : 健康检查间隔5秒（远小于看门狗16秒超时）
+# Restart=always : 看门狗是关键服务，无论退出码如何都重启
+# RestartSec=5 : 崩溃后等待5秒再重启
+
+[Install]
+WantedBy=multi-user.target

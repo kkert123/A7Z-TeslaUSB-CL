@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎬 {{ event.name }} — Player</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;overflow:hidden}
+.player{position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;background:#000;display:flex;flex-direction:column;z-index:1000}
+/* Top overlay */
+.top-overlay{position:absolute;top:0;left:0;right:0;z-index:20;background:linear-gradient(to bottom,rgba(0,0,0,.7) 0%,rgba(0,0,0,0) 100%);padding:12px 60px 35px 15px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
+.top-overlay a,.top-overlay .hud-area{pointer-events:auto}
+.event-loc{font-size:1em;font-weight:500}
+.event-ts{font-size:.8em;color:rgba(255,255,255,.75)}
+.event-r{text-align:right;font-size:.8em;color:rgba(255,255,255,.75)}
+.close-btn{position:absolute;top:12px;right:15px;z-index:21;padding:6px 14px;background:rgba(0,0,0,.55);color:#fff;text-decoration:none;border-radius:16px;font-size:.85em;backdrop-filter:blur(8px)}
+.close-btn:hover{background:rgba(0,0,0,.75)}
+/* HUD Overlay */
+.tesla-hud{position:absolute;top:12px;left:50%;transform:translateX(-50%) translateZ(3px);z-index:25;pointer-events:none;display:none}
+.tesla-hud.show{display:block}
+.hud-card{padding:6px 10px 8px;border-radius:18px;backdrop-filter:blur(14px);background:rgba(10,10,12,.38);border:1px solid rgba(255,255,255,.14);box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.hud-grid{display:grid;grid-template-columns:auto 1fr 32px 3ch 32px 1fr auto;grid-template-rows:auto auto;grid-template-areas:"gear . left speed right . wheel" "brake . ap ap ap . throt";column-gap:8px;row-gap:8px;align-items:center}
+.hud-speed{grid-area:speed;display:flex;flex-direction:column;align-items:center;line-height:1;transform:translateY(16px)}
+.hud-speed-v{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;color:rgba(255,255,255,.95)}
+.hud-speed-l{font-size:12px;opacity:.8;margin-top:4px}
+.hud-blink{width:32px;height:24px;display:grid;place-items:center;border-radius:10px;opacity:.4;border:1px solid rgba(255,255,255,.15);font-size:14px;transform:translateY(16px)}
+.hud-blink.l{grid-area:left}.hud-blink.r{grid-area:right}
+.hud-blink.on{opacity:1;background:rgba(120,255,120,.18);border-color:rgba(120,255,120,.45);animation:blink .55s steps(2,end) infinite}
+@keyframes blink{0%,49%{filter:brightness(1.3)}50%,100%{filter:brightness(0.7)}}
+.hud-gear{grid-area:gear;font-size:12px;font-weight:800;padding:6px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.95)}
+.hud-wheel{grid-area:wheel;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(255,255,255,.18)}
+.hud-wheel svg{width:26px;height:26px;transform:rotate(var(--angle,0deg));transition:transform .05s linear}
+.hud-pedal{width:32px;height:32px;border-radius:50%;position:relative;border:2px solid rgba(255,255,255,.25);overflow:hidden;justify-self:center;display:flex;align-items:center;justify-content:center}
+.hud-pedal.br{grid-area:brake;--pc:rgba(255,90,90,.75)}.hud-pedal.th{grid-area:throt;--pc:rgba(120,255,120,.7)}
+.hud-pedal::before{content:"";position:absolute;inset:4px;border-radius:50%;background:rgba(0,0,0,.4)}
+.hud-pedal .fill{position:absolute;inset:4px;overflow:hidden;border-radius:50%}
+.hud-pedal .fill i{position:absolute;bottom:0;left:0;right:0;height:var(--p,0%);background:var(--pc)}
+.hud-pedal svg{position:relative;z-index:2;stroke:rgba(136,136,136,.9);fill:none;width:24px;height:24px}
+.hud-ap{grid-area:ap;text-align:center;font-size:11px;font-weight:600;letter-spacing:.3px;color:rgba(52,199,89,1);opacity:0;max-height:0;line-height:1;align-self:center;transform:translateY(8px);transition:opacity .25s,max-height .25s}
+.hud-ap.show{opacity:1;max-height:16px}
+/* Video Area */
+.video-area{flex:1;position:relative;background:#000;min-height:0;overflow:hidden}
+.video-area .single{width:100%;height:100%;object-fit:contain}
+.video-area .grid{display:none;width:100%;height:100%;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px;background:#222}
+.video-area.grid-mode .single{display:none}
+.video-area.grid-mode .grid{display:grid}
+.grid-cell{position:relative;background:#000;overflow:hidden;cursor:pointer}
+.grid-cell video{width:100%;height:100%;object-fit:cover}
+.grid-cell .cell-label{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.65);color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;pointer-events:none;z-index:2}
+.grid-cell .cell-hover{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .2s;z-index:1;pointer-events:none}
+.grid-cell:hover .cell-hover{opacity:1}
+.cell-hover-btn{font-size:36px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.8)}
+/* Grid control bar */
+.grid-ctrl-bar{display:none;position:absolute;bottom:12px;left:50%;transform:translateX(-50%);z-index:10;background:rgba(0,0,0,.7);border-radius:12px;padding:8px 16px;gap:12px;align-items:center;backdrop-filter:blur(8px)}
+.grid-mode .grid-ctrl-bar{display:flex}
+.grid-ctrl-btn{background:rgba(255,255,255,.15);border:none;color:#fff;width:36px;height:36px;border-radius:8px;cursor:pointer;font-size:18px;display:grid;place-items:center}
+.grid-ctrl-btn:hover{background:rgba(255,255,255,.25)}
+/* Controls */
+.controls{position:relative;z-index:15;background:rgba(0,0,0,.95);padding:10px 15px;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;flex-shrink:0;border-top:1px solid rgba(255,255,255,.1);overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.controls::-webkit-scrollbar{display:none}
+.ctrl-divider{width:1px;height:28px;background:rgba(255,255,255,.15);margin:0 4px;flex-shrink:0}
+.clip-nav{display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(255,255,255,.06);border-radius:8px;flex-shrink:0}
+.clip-nav-btn{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;width:32px;height:32px;border-radius:6px;cursor:pointer;display:grid;place-items:center;font-size:15px;transition:all .2s}
+.clip-nav-btn:hover:not(:disabled){background:rgba(255,255,255,.22);transform:scale(1.05)}
+.clip-nav-btn:disabled{opacity:.3;cursor:default}
+.clip-nav-info{color:rgba(255,255,255,.9);font-size:12px;font-weight:500;min-width:110px;text-align:center;user-select:none;line-height:1.3}
+.clip-nav-info .clip-ts{display:block;font-size:10px;color:rgba(255,255,255,.55)}
+.sei-switch{display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;padding:0 8px}
+.sei-switch .lbl{font-size:10px;color:rgba(255,255,255,.6);text-align:center;line-height:1.2}
+.sei-switch .sw{position:relative;display:inline-block;width:44px;height:22px}
+.sei-switch .sw input{opacity:0;width:0;height:0}
+.sei-switch .sw .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(120,120,120,.8);transition:.3s;border-radius:22px}
+.sei-switch .sw .slider::after{content:'';position:absolute;height:16px;width:16px;left:3px;top:3px;background:#fff;transition:.3s;border-radius:50%}
+.sei-switch .sw input:checked+.slider{background:#34c759}
+.sei-switch .sw input:checked+.slider::after{transform:translateX(22px)}
+.sei-switch .status{font-size:9px;color:rgba(255,255,255,.7);font-weight:500}
+.sei-loading{font-size:10px;color:rgba(255,255,255,.5);display:none}
+.grid-btn{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.25);color:#fff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;flex-shrink:0;transition:all .2s}
+.grid-btn:hover{background:rgba(255,255,255,.2)}
+.grid-btn.on{background:rgba(52,199,89,.3);border-color:rgba(52,199,89,.7)}
+.cam-btn{width:80px;height:56px;border-radius:8px;overflow:hidden;border:2px solid rgba(255,255,255,.25);cursor:pointer;background:rgba(20,20,20,.8);display:flex;flex-direction:column;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0;position:relative;min-width:56px}
+.cam-btn:hover:not(.na):not(.enc){border-color:rgba(255,255,255,.5);transform:translateY(-2px)}
+.cam-btn.sel{border-color:#fff;box-shadow:0 2px 10px rgba(255,255,255,.3);background:rgba(40,40,40,.9)}
+.cam-btn.na{opacity:.4;cursor:default;border-color:rgba(255,255,255,.08)}
+.cam-btn.enc{opacity:.5;cursor:default;border-color:rgba(255,100,100,.4);background:rgba(60,20,20,.7)}
+.cam-btn .ic{font-size:1.3em;color:rgba(255,255,255,.85)}
+.cam-btn .lb{font-size:10px;font-weight:600;color:#fff;background:rgba(0,0,0,.55);position:absolute;bottom:0;left:0;right:0;text-align:center;padding:2px 4px}
+.act-btn{width:80px;height:56px;border-radius:8px;border:2px solid;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0;position:relative}
+.act-btn:hover{transform:translateY(-2px)}
+.act-btn .ic{font-size:1.3em}
+.act-btn .lb{font-size:10px;font-weight:600;position:absolute;bottom:0;left:0;right:0;text-align:center;padding:2px 4px;background:rgba(0,0,0,.55)}
+.act-dl{border-color:rgba(52,199,89,.6);background:rgba(20,80,40,.8)}
+.act-dl:hover{border-color:rgba(52,199,89,1);background:rgba(25,90,45,.9)}
+.act-dl .ic{color:rgba(52,199,89,1)}
+.cam-select{appearance:none;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:8px;padding:0 8px;height:40px;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0;max-width:118px}
+.cam-select option{color:#000}
+.trim-panel{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:50;background:rgba(20,20,24,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:14px 16px;display:none;flex-direction:column;gap:10px;width:min(440px,94vw);box-shadow:0 12px 40px rgba(0,0,0,.5)}
+.act-group{display:flex;align-items:center;gap:8px;flex-shrink:0;position:sticky;right:0;background:rgba(0,0,0,.95);padding-left:8px;z-index:16}
+.trim-panel.show{display:flex}
+.trim-panel h4{font-size:14px;font-weight:700;display:flex;justify-content:space-between;align-items:center;margin:0}
+.trim-panel .x{cursor:pointer;opacity:.7;font-size:16px;line-height:1}
+.trim-panel .x:hover{opacity:1}
+.trim-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.trim-row label{font-size:12px;opacity:.85}
+.trim-row input{width:82px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:6px;padding:6px 8px;font-size:13px}
+.trim-row .hint{font-size:11px;opacity:.6}
+.trim-actions{display:flex;gap:8px;justify-content:flex-end}
+@media(max-width:768px){
+  .cam-btn,.act-btn{width:52px;height:40px;min-width:44px}
+  .cam-btn .ic,.act-btn .ic{font-size:1.1em}
+  .cam-btn .lb,.act-btn .lb{font-size:8px}
+  .clip-nav-info{min-width:80px;font-size:11px}
+  .clip-nav-btn{width:26px;height:26px;font-size:13px}
+  .controls{padding:6px 6px;gap:4px;min-height:48px}
+  .hud-speed-v{font-size:22px}
+  .cam-btn.na{opacity:.5}
+  .ctrl-divider{margin:0 1px}
+  .top-overlay{padding:8px 50px 25px 10px}
+  .close-btn{top:8px;right:8px;padding:4px 10px;font-size:.75em}
+}
+@media(max-width:480px){
+  /* 小屏：缩小并保证可滚动可见 */
+  .cam-btn,.act-btn{width:42px;height:34px;min-width:40px;padding:1px}
+  .cam-btn .ic,.act-btn .ic{font-size:0.95em}
+  .cam-btn .lb,.act-btn .lb{font-size:7px;padding:1px 2px}
+  .controls{padding:5px 4px;gap:3px;min-height:46px}
+  .btn-sm{padding:3px 6px;font-size:10px}
+  .clip-nav{padding:3px 6px;gap:3px}
+}
+</style>
+</head>
+<body>
+<div class="player">
+<a href="/videos/event/{{ folder }}/{{ event.name }}" class="close-btn">✕ 关闭</a>
+
+<div class="video-area" id="videoArea">
+  <video id="mainVideo" class="single" controls playsinline></video>
+  <div class="grid" id="videoGrid">
+    {% for angle,label in [('front','前视'),('back','后视'),('left_repeater','左后视'),('right_repeater','右后视')] %}
+    <div class="grid-cell" onclick="focusGridCell({{ loop.index }})">
+      <video id="gv{{ loop.index }}" playsinline muted preload="none"></video>
+      <div class="cell-hover"><span class="cell-hover-btn" id="hoverBtn{{ loop.index }}">▶</span></div>
+      <div class="cell-label">{{ label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <!-- Grid controls -->
+  <div class="grid-ctrl-bar" id="gridCtrlBar">
+    <button class="grid-ctrl-btn" id="gridPlayAll" onclick="gridPlayAll()" title="全部播放">▶</button>
+    <button class="grid-ctrl-btn" id="gridPauseAll" onclick="gridPauseAll()" title="全部暂停">⏸</button>
+  </div>
+</div>
+
+<div class="top-overlay">
+  <div>
+    {% if event.city %}<div class="event-loc">{{ event.city }}</div>{% endif %}
+    <div class="event-ts">{{ event.datetime }}</div>
+  </div>
+  <div class="tesla-hud" id="teslaHud">
+    <div class="hud-card"><div class="hud-grid">
+      <div class="hud-gear" id="hudGear">P</div>
+      <div class="hud-pedal br" id="brakePedal"><span class="fill"><i></i></span><svg viewBox="0 0 24 24"><path d="M6 7L18 7L20 16Q12 19 4 16Z" stroke-width="2" stroke-linejoin="round"/></svg></div>
+      <span class="hud-blink l" id="blinkerLeft">◀</span>
+      <div class="hud-speed"><div class="hud-speed-v" id="hudSpeed">0</div><div class="hud-speed-l">km/h</div></div>
+      <span class="hud-blink r" id="blinkerRight">▶</span>
+      <div class="hud-wheel" id="hudWheel" style="--angle:0deg"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="white" stroke-width="1.4"/><path d="M6.8 9.8 H17.2" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M12 9.8 V16.8" stroke="white" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.8" stroke="white" stroke-width="1.4"/></svg></div>
+      <div class="hud-pedal th" id="throtPedal"><span class="fill"><i></i></span><svg viewBox="0 0 24 24"><path d="M9 4L15 4L16 18Q12 20 8 18Z" stroke-width="2" stroke-linejoin="round"/></svg></div>
+      <div class="hud-ap" id="apIndicator">⫸ Autopilot</div>
+    </div></div>
+  </div>
+  {% if event.reason or event.size_mb %}
+  <div class="event-r">{% if event.reason %}<div>{{ event.reason.replace('_',' ').title() }}</div>{% endif %}{% if event.size_mb %}<div>{{ event.size_mb }} MB</div>{% endif %}</div>
+  {% endif %}
+</div>
+
+<div class="controls">
+  {% if event.clips and event.clips|length > 1 %}
+  <div class="clip-nav">
+    <button class="clip-nav-btn" id="prevClipBtn" onclick="navClip(-1)">◀</button>
+    <div class="clip-nav-info"><span id="clipIdx">Clip 1/{{ event.clips|length }}</span><span class="clip-ts" id="clipTs"></span></div>
+    <button class="clip-nav-btn" id="nextClipBtn" onclick="navClip(1)">▶</button>
+  </div>
+  <div class="ctrl-divider"></div>
+  {% endif %}
+  <div class="sei-switch">
+    <div class="lbl">HUD</div>
+    <label class="sw"><input type="checkbox" id="seiToggle" onchange="toggleSEI()"><span class="slider"></span></label>
+    <div class="status" id="seiStatus">OFF</div>
+  </div>
+  <span class="sei-loading" id="seiLoading"></span>
+  <div class="ctrl-divider"></div>
+  <button class="grid-btn" id="gridToggle" onclick="toggleGrid()">📐 四宫格</button>
+  <div class="ctrl-divider"></div>
+  {% set cams = {'front':'⬆','back':'⬇','left_repeater':'⬅','right_repeater':'➡'} %}
+  {% for angle,ic in cams.items() %}
+  {% if event.camera_videos[angle] %}
+    {% if event.encrypted_videos.get(angle) %}
+  <div class="cam-btn enc" title="加密"><span class="ic">{{ ic }}</span><span class="lb">{{ video_service.CAMERA_LABELS[angle] }}</span></div>
+    {% else %}
+  <div class="cam-btn{% if loop.first %} sel{% endif %}" data-angle="{{ angle }}" onclick="switchCam('{{ angle }}',this)"><span class="ic">{{ ic }}</span><span class="lb">{{ video_service.CAMERA_LABELS[angle] }}</span></div>
+    {% endif %}
+  {% else %}
+  <div class="cam-btn na"><span class="ic">{{ ic }}</span><span class="lb">{{ video_service.CAMERA_LABELS[angle] }}</span></div>
+  {% endif %}
+  {% endfor %}
+  <div class="ctrl-divider"></div>
+  <div class="act-group">
+    <button class="act-btn act-dl" onclick="downloadEvent()"><span class="ic">📦</span><span class="lb">下载全部</span></button>
+    <div class="ctrl-divider"></div>
+    <select class="cam-select" id="dlCam" title="选择要下载的镜头"></select>
+    <button class="act-btn act-dl" onclick="downloadClip()"><span class="ic">⬇</span><span class="lb">下载此镜头</span></button>
+    <div class="ctrl-divider"></div>
+    <button class="grid-btn" onclick="openTrim()">✂️ 裁剪</button>
+  </div>
+</div>
+</div>
+
+<!-- 裁剪面板 -->
+<div class="trim-panel" id="trimPanel">
+  <h4>✂️ 裁剪片段 <span class="x" onclick="closeTrim()">✕</span></h4>
+  <div class="trim-row">
+    <label>镜头</label>
+    <select class="cam-select" id="trimCam" style="height:34px"></select>
+  </div>
+  <div class="trim-row">
+    <label>开始(秒)</label>
+    <input type="number" id="trimStart" min="0" step="0.1" value="0">
+    <label>结束(秒)</label>
+    <input type="number" id="trimEnd" min="0" step="0.1" value="0">
+  </div>
+  <div class="trim-row"><span class="hint" id="trimDur">视频时长：未知</span></div>
+  <div class="trim-actions">
+    <button class="grid-btn" onclick="closeTrim()">取消</button>
+    <button class="grid-btn" id="trimGo" style="border-color:rgba(52,199,89,.7);color:rgba(52,199,89,1)" onclick="doTrim()">✂️ 裁剪并下载</button>
+  </div>
+</div>
+
+<script src="/static/js/protobuf.min.js"></script>
+<script src="/static/js/dashcam-mp4.js"></script>
+<script>
+const F = "{{ folder }}", EID = "{{ event.name }}", FS = "{{ folder_structure }}";
+const CAM = {{ event.camera_videos|tojson }}, ENC = {{ event.encrypted_videos|tojson }};
+const CLIPS = {{ event.clips|tojson if event.clips else '[]' }};
+let ci = 0, ca = "{{ (event.camera_videos.keys()|list|first) if event.camera_videos else 'front' }}";
+let ct = 0, seiOn = false, seiData = null, seiAbort = null;
+const vid = document.getElementById('mainVideo');
+const gvs = [1,2,3,4].map(i => document.getElementById('gv'+i));
+const ANGLES = ['front','back','left_repeater','right_repeater'];
+let gridOn = false, gridAllPlaying = false;
+
+function surl(fn){return fn?'/videos/stream/'+F+'/'+(FS==='flat'?'':EID+'/')+fn:null;}
+// Server API (fast ~3KB JSON) + fallback download URL
+function seiUrl(fn){return fn?'/videos/sei/'+F+'/'+(FS==='flat'?'':EID+'/')+fn:null;}
+function seiApiUrl(angle){return '/api/sei/'+F+'/'+EID+'/'+angle;}
+function cf(a){return CLIPS.length>0?(CLIPS[ci].camera_videos[a]||null):(CAM[a]||null);}
+
+// ── Camera switch ──
+function switchCam(a,el){
+  const fn=cf(a);if(!fn)return;ca=a;ct=vid.currentTime;
+  document.querySelectorAll('.cam-btn.sel').forEach(b=>b.classList.remove('sel'));
+  if(el)el.classList.add('sel');
+  vid.src=surl(fn);
+  vid.onloadedmetadata=()=>{vid.currentTime=ct;vid.play().catch(()=>{});};
+  vid.play();
+  if(seiOn)loadSEI(a);
+}
+
+// ── Grid ──
+function toggleGrid(){
+  gridOn=!gridOn;
+  const a=document.getElementById('videoArea'),b=document.getElementById('gridToggle');
+  if(gridOn){
+    a.classList.add('grid-mode');b.classList.add('on');b.textContent='\u{1F4FA} 单画面';
+    ANGLES.forEach((ang,i)=>{
+      const fn=cf(ang),gv=gvs[i];
+      if(fn) setTimeout(()=>{if(!gridOn)return;gv.src=surl(fn);gv.load()},i*250);
+    });
+    vid.pause();
+  }else{
+    a.classList.remove('grid-mode');b.classList.remove('on');b.textContent='\u{1F4D0} 四宫格';
+    gridAllPlaying=false;
+    gvs.forEach(v=>{v.pause();v.removeAttribute('src');v.load();});
+    document.getElementById('gridPlayAll').textContent='▶';
+    switchCam(ca,document.querySelector('.cam-btn.sel'));
+  }
+}
+
+function gridPlayAll(){
+  gridAllPlaying=true;document.getElementById('gridPlayAll').textContent='▶';
+  gvs.forEach((v,i)=>{const fn=cf(ANGLES[i]);if(fn&&v.src){v.play().catch(()=>{});v.muted=true;}});
+}
+
+function gridPauseAll(){
+  gridAllPlaying=false;document.getElementById('gridPlayAll').textContent='▶';
+  gvs.forEach(v=>{if(v.src)v.pause();});
+}
+
+function focusGridCell(idx){
+  if(!gridOn)return;const a=ANGLES[idx-1];if(!cf(a))return;ca=a;
+  toggleGrid();
+  document.querySelectorAll('.cam-btn.sel').forEach(b=>b.classList.remove('sel'));
+  const cb=document.querySelector('.cam-btn[data-angle="'+a+'"]');
+  if(cb){cb.classList.add('sel');switchCam(a,cb);}
+}
+
+// ── Clips ──
+function navClip(d){
+  if(!CLIPS.length)return;const ni=ci+d;if(ni<0||ni>=CLIPS.length)return;ci=ni;
+  updClipUI();buildCamSelect(document.getElementById('dlCam'));if(gridOn){toggleGrid();toggleGrid();}
+  const fn=cf(ca);if(fn){vid.src=surl(fn);vid.play();if(seiOn)loadSEI(ca);}
+}
+
+function updClipUI(){
+  document.getElementById('clipIdx').textContent='Clip '+(ci+1)+'/'+CLIPS.length;
+  document.getElementById('clipTs').textContent=CLIPS[ci].datetime||'';
+  document.getElementById('prevClipBtn').disabled=ci===0;
+  document.getElementById('nextClipBtn').disabled=ci===CLIPS.length-1;
+  const cl=CLIPS[ci];
+  document.querySelectorAll('.cam-btn[data-angle]').forEach(b=>{
+    const a=b.dataset.angle,fn=cl.camera_videos[a];
+    if(fn){b.classList.remove('na');if(cl.encrypted_videos&&cl.encrypted_videos[a])b.classList.add('enc');else b.classList.remove('enc');b.onclick=function(){switchCam(a,b);};}
+    else{b.classList.add('na');b.onclick=null;}
+  });
+}
+
+// ── SEI / HUD (server-side extraction — no 25MB download needed) ──
+function toggleSEI(){
+  seiOn=document.getElementById('seiToggle').checked;
+  document.getElementById('seiStatus').textContent=seiOn?'ON':'OFF';
+  document.getElementById('teslaHud').classList.toggle('show',seiOn);
+  if(!seiOn){if(seiAbort){seiAbort.abort();seiAbort=null;}seiData=null;return;}
+  loadSEI(ca);
+}
+
+async function loadSEI(angle){
+  if(seiAbort)seiAbort.abort();seiAbort=new AbortController();
+  const ld=document.getElementById('seiLoading');ld.style.display='inline';
+  try{
+    // Fast path: server SEI API (~100ms JSON, works for SavedClips/manual saves)
+    ld.textContent='⏳ API...';
+    const r1=await fetch(seiApiUrl(angle),{signal:seiAbort.signal});
+    if(r1.ok){try{const j=await r1.json();
+      if(j.success&&j.frames&&j.frames.length){seiData=j.frames;ld.style.display='none';bindHUD();return;}
+    }catch(e){}}
+    // Fallback: client parseFrames (25MB download + JS parsing)
+    if(seiAbort.signal.aborted)return;
+    ld.textContent='⏳ 下载...';
+    const fn=cf(angle);if(!fn){ld.textContent='⚠ 无文件';setTimeout(()=>ld.style.display='none',2000);return;}
+    const r2=await fetch(seiUrl(fn),{signal:seiAbort.signal});
+    if(!r2.ok)throw new Error('HTTP '+r2.status);
+    ld.textContent='⏳ 解析...';
+    const buf=await r2.arrayBuffer();
+    const mp4=new DashcamMP4(buf);
+    const pr=await DashcamHelpers.initProtobuf('/static/js/dashcam.proto');
+    const sm=pr.SeiMetadata;
+    const frames=mp4.parseFrames(sm);
+    seiData=frames.filter(f=>f.sei).map(f=>{
+      try{const obj=sm.toObject(f.sei,{enums:String,longs:String});obj.timestamp_ms=f.time*1000;return obj;}
+      catch(e){return null;}
+    }).filter(Boolean);
+    if(!seiData||!seiData.length){ld.textContent='⚠ 无SEI';setTimeout(()=>ld.style.display='none',2000);return;}
+    ld.style.display='none';bindHUD();
+  }catch(e){if(e.name!=='AbortError'){ld.textContent='⚠ 失败';setTimeout(()=>ld.style.display='none',2000);}}
+}
+
+function bindHUD(){
+  // Server API returns 0..1000 scale; client parseFrames returns actual ms
+  // Detect: if max timestamp < 2000, it's 0-1000 scale and needs video.duration scaling
+  const maxTs = seiData[seiData.length-1].timestamp_ms;
+  const useScale = maxTs < 2000;  // 0-1000 range = proportional scale
+  const scale = useScale ? (vid.duration || 60) / 1000.0 : 0.001;  // scale → seconds
+  vid.ontimeupdate=function(){
+    if(!seiOn||!seiData||!seiData.length)return;
+    let best=null;
+    for(const s of seiData){
+      if(s.timestamp_ms * scale <= vid.currentTime)best=s;else break;
+    }
+    if(best)updHUD(best);
+  };
+}
+
+function updHUD(d){
+  // sei_service returns: speed_kmh (already km/h), gear_state (text), etc.
+  const spd=d.speed_kmh!==undefined?d.speed_kmh:
+           d.vehicleSpeedMps!==undefined?d.vehicleSpeedMps*3.6:0;
+  document.getElementById('hudSpeed').textContent=Math.round(spd);
+  // Gear: sei_service returns 'P'/'D'/'R'/'N', or GEAR_PARK etc from old parser
+  const g=d.gear_state||d.gearState||'P';
+  const gm={GEAR_PARK:'P',GEAR_DRIVE:'D',GEAR_REVERSE:'R',GEAR_NEUTRAL:'N'};
+  document.getElementById('hudGear').textContent=gm[g]||g;
+  // Turn signals
+  document.getElementById('blinkerLeft').classList.toggle('on',
+    !!(d.blinker_on_left||d.blinkerOnLeft));
+  document.getElementById('blinkerRight').classList.toggle('on',
+    !!(d.blinker_on_right||d.blinkerOnRight));
+  // Steering
+  const wa=d.steering_wheel_angle!==undefined?d.steering_wheel_angle:
+           d.steeringWheelAngle||0;
+  document.getElementById('hudWheel').style.setProperty('--angle',(wa*1.5)+'deg');
+  // Brake
+  document.getElementById('brakePedal').style.setProperty('--p',
+    (d.brake_applied||d.brakeApplied)?'100%':'0%');
+  // Throttle
+  const ap=d.accelerator_pedal_position!==undefined?d.accelerator_pedal_position:
+            d.acceleratorPedalPosition||0;
+  // accelerator_pedal_position is already 0-100% (Tesla proto float), use directly
+  document.getElementById('throtPedal').style.setProperty('--p',Math.min(ap,100)+'%');
+  // AP
+  const el=document.getElementById('apIndicator');
+  const apM={SELF_DRIVING:'⫸ FSD',AUTOSTEER:'⫸ Autosteer',TACC:'⫸ TACC'};
+  const as=d.autopilot_state||d.autopilotState||'NONE';
+  el.classList.toggle('show',!!apM[as]);
+  if(apM[as])el.textContent=apM[as];
+}
+
+// ── Download / Trim ──
+const CAM_LABELS={'front':'前视','back':'后视','left':'左视','right':'右视','left_repeater':'左后视','right_repeater':'右后视'};
+
+// 仅列出存在且未加密的镜头
+function buildCamSelect(sel){
+  sel.innerHTML='';
+  ANGLES.forEach(a=>{
+    const fn=cf(a);if(!fn)return;
+    const enc=(ENC[a]||(CLIPS[ci]&&CLIPS[ci].encrypted_videos&&CLIPS[ci].encrypted_videos[a]));
+    if(enc)return;
+    const o=document.createElement('option');o.value=a;o.textContent=CAM_LABELS[a]||a;sel.appendChild(o);
+  });
+  if(!sel.value)sel.value=ca;
+}
+
+function downloadEvent(){const a=document.createElement('a');a.href='/videos/download_event/'+F+'/'+EID;a.download=EID+'.zip';a.click();}
+
+// 下载当前选中的单个镜头
+function downloadClip(){
+  const sel=document.getElementById('dlCam');
+  const cam=sel.value||ca;
+  const a=document.createElement('a');
+  a.href='/videos/download_clip/'+F+'/'+EID+'?camera='+encodeURIComponent(cam);
+  a.download=cam+'.mp4';a.click();
+}
+
+function openTrim(){
+  buildCamSelect(document.getElementById('trimCam'));
+  const cam=document.getElementById('trimCam');
+  if(ca&&[...cam.options].some(o=>o.value===ca))cam.value=ca;
+  document.getElementById('trimStart').value=(vid.currentTime||0).toFixed(1);
+  if(vid.duration&&isFinite(vid.duration))document.getElementById('trimEnd').value=vid.duration.toFixed(1);
+  document.getElementById('trimDur').textContent='视频时长：'+(vid.duration&&isFinite(vid.duration)?vid.duration.toFixed(1)+' 秒':'未知');
+  document.getElementById('trimPanel').classList.add('show');
+}
+
+function closeTrim(){document.getElementById('trimPanel').classList.remove('show');}
+
+async function doTrim(){
+  const cam=document.getElementById('trimCam').value;
+  let s=parseFloat(document.getElementById('trimStart').value);
+  let e=parseFloat(document.getElementById('trimEnd').value);
+  const dur=(vid.duration&&isFinite(vid.duration))?vid.duration:0;
+  if(!isFinite(s)||s<0)s=0;
+  // 结束时间无效（≤开始 或 未填）时回退到视频总时长，避免服务端区间校验失败
+  if(!isFinite(e)||e<=s)e = dur>0 ? dur : (s+5);
+  if(dur>0 && e>dur)e=dur;
+  const btn=document.getElementById('trimGo');
+  btn.disabled=true;const old=btn.textContent;btn.textContent='⏳ 裁剪中...';
+  try{
+    const r=await fetch('/videos/trim/'+F+'/'+EID,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({camera:cam,start:s,end:e})
+    });
+    if(!r.ok){
+      let msg='裁剪失败（HTTP '+r.status+'）';
+      try{const j=await r.json();if(j&&j.error)msg=j.error;}catch(e){}
+      alert(msg);return;
+    }
+    const blob=await r.blob();
+    const disp=r.headers.get('Content-Disposition')||'';
+    let fname=EID+'__clip.mp4';
+    const m=disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/);
+    if(m)fname=decodeURIComponent(m[1].replace(/\+/g,' '));
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fname;a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),8000);
+    closeTrim();
+  }catch(e){alert('裁剪出错：'+e.message);}
+  finally{btn.disabled=false;btn.textContent=old;}
+}
+
+// ── Init ──
+(function(){
+  buildCamSelect(document.getElementById('dlCam'));
+  if(CLIPS.length>1)updClipUI();
+  // URL ?camera= 参数优先
+  const p=new URLSearchParams(window.location.search);
+  const camParam=p.get('camera');
+  if(camParam && CAM[camParam]){ca=camParam;}
+  // 无参数时选第一可用摄像头
+  if(!CAM[ca]){for(const a of ANGLES){const fn=cf(a);if(fn){ca=a;break;}}}
+  const fn=cf(ca);if(fn)vid.src=surl(fn);
+  // 高亮当前摄像头的按钮
+  const activeBtn=document.querySelector('.cam-btn[data-angle=\"'+ca+'\"]');
+  if(activeBtn)activeBtn.classList.add('sel');
+  // Keyboard
+  document.addEventListener('keydown',e=>{
+    switch(e.key){
+      case ' ':e.preventDefault();vid.paused?vid.play():vid.pause();break;
+      case 'ArrowLeft':e.preventDefault();vid.currentTime=Math.max(0,vid.currentTime-5);break;
+      case 'ArrowRight':e.preventDefault();vid.currentTime+=5;break;
+      case 'f':e.preventDefault();if(vid.requestFullscreen)vid.requestFullscreen();break;
+      case 'g':toggleGrid();break;
+      case 'h':document.getElementById('seiToggle').click();break;
+      case 'Escape':window.location.href='/videos/event/'+F+'/'+EID;break;
+    }
+  });
+})();
+</script>
+</body>
+</html>

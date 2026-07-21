@@ -1,0 +1,52 @@
+sequenceDiagram
+    participant App as app.py (启动)
+    participant SS as SentryService
+    participant SW as SentryWatchdog
+    participant LD as LocationDetector
+    participant US as UploadScheduler
+    participant WN as WeixinNotifier
+    
+    Note over App: 启动 Flask 应用
+    App->>US: UploadScheduler(config_manager, queue_db, sentry_path)
+    App->>US: start() 启动调度线程
+    App->>SS: SentryService(config_path)
+    App->>SS: start()
+    
+    Note over SS: _init_components()
+    SS->>LD: init_location_detector(config)
+    SS->>WN: WeixinNotifier(webhook_key, bot_name)
+    SS->>SW: init_watchdog(config, location_detector, wifi_switcher, upload_scheduler)
+    Note over SW: upload_scheduler 参数已传入 (修复 P0-M1)
+    
+    SW->>SW: start() 启动监控线程
+    SW->>SW: set_modules(location_detector, wifi_switcher, upload_scheduler)
+    
+    loop 每 10 秒
+        SW->>SW: scan_sentry_clips()
+        Note over SW: 发现新事件文件夹
+        
+        SW->>LD: check_location()
+        Note over LD: 修复 P0-B3: detect_location → check_location
+        LD-->>SW: LocationInfo(state=HOME/AWAY)
+        
+        alt 在家模式
+            SW->>SW: _process_home_event()
+            Note over SW: 延迟 30 分钟后加入队列
+            SW->>US: upload_sentry_event(event_path, event_id)
+            Note over US: 修复 P0-B4: 新增方法
+            US->>US: create_task(event_path, at_home=True)
+            US->>US: _execute_upload(task)
+            Note over US: rsync → NAS
+            US-->>SW: success=True
+        else 外出模式
+            SW->>SW: _process_away_event()
+            SW->>WN: send_sentry_detected(event_id, location, ...)
+            Note over WN: 微信推送 + 确认码
+            Note over SW: 等待用户确认
+        end
+    end
+    
+    Note over App: 监控 API 查询
+    App->>US: get_pending_tasks()
+    Note over US: 修复 P1-P1: 返回真实队列数据
+    US-->>App: [UploadTask, ...]

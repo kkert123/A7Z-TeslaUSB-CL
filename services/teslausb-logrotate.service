@@ -1,0 +1,10 @@
+[Unit]
+Description=TeslaUSB Log Rotation
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/radxa_data/teslausb/utils/log_rotator.py
+User=root
+StandardOutput=journal
+StandardError=journal

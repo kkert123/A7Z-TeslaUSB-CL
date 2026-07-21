@@ -1,0 +1,9 @@
+[Unit]
+Description=TeslaUSB Daily Log Rotation Timer
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

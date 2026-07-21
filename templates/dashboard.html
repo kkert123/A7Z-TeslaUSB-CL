@@ -1,0 +1,711 @@
+{% extends "base.html" %}
+{% block title %} — 仪表盘{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>仪表盘</h2>
+  <span class="badge" id="lastUpdate">{{ now }}</span>
+</div>
+
+<!-- ═══ TeslaCam 文件系统损坏警告 ═══ -->
+{% if teslacam_health and not teslacam_health.healthy %}
+<div class="alert-danger" id="teslacam-health-warning" style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;padding:10px 14px;font-size:0.82rem;border-radius:8px">
+{% else %}
+<div class="alert-danger" id="teslacam-health-warning" style="display:none;align-items:flex-start;gap:10px;margin-bottom:12px;padding:10px 14px;font-size:0.82rem;border-radius:8px">
+{% endif %}
+  <span style="font-size:1.2rem;flex-shrink:0">⚠️</span>
+  <div style="flex:1">
+    <strong>TeslaCam 文件系统损坏 — 目录无法访问</strong>
+    <div style="margin-top:2px" id="teslacam-health-detail">
+    {% if teslacam_health and teslacam_health.corrupted_dirs %}
+    损坏目录：
+      {% for d in teslacam_health.corrupted_dirs %}<code style="background:var(--danger-soft);padding:1px 5px;border-radius:3px">{{ d }}</code>{% if not loop.last %}、{% endif %}{% endfor %}
+    {% elif teslacam_health and teslacam_health.missing_dirs %}
+    缺失目录：
+      {% for d in teslacam_health.missing_dirs %}<code style="background:var(--warning-soft);padding:1px 5px;border-radius:3px">{{ d }}</code>{% if not loop.last %}、{% endif %}{% endfor %}
+    {% endif %}
+    </div>
+    <div style="margin-top:6px;font-size:0.75rem;opacity:0.85">
+      修复方法：SSH 执行 <code style="background:rgba(0,0,0,0.1);padding:1px 4px;border-radius:3px">sudo fsck.exfat /dev/nvme0n1p2</code>（需先停止 USB Gadget 并卸载分区）
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     Tier 1: Hero Strip — 4 列核心状态
+     ═══════════════════════════════════════════ -->
+<div class="dash-hero-strip">
+
+  <!-- 1. USB Gadget —— 提至首位 -->
+  <div class="hero-card gadget" id="gadget-card">
+    <div class="hero-label">
+      <span id="gadget-indicator" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--text-muted);margin-right:4px;vertical-align:middle"></span>
+      USB Gadget
+    </div>
+    <div class="hero-value" id="gadget-status-text" style="font-size:var(--text-xl);font-weight:700;letter-spacing:0.01em">
+      检测中...
+    </div>
+    <div class="hero-detail">
+      <span style="color:var(--text-muted)">模式</span>
+      <span id="gadget-mode-text" style="color:var(--text);font-weight:500;margin-left:4px">—</span>
+      <span id="gadget-check-time" style="color:var(--text-muted);margin-left:8px;font-size:0.7em"></span>
+    </div>
+    <div style="font-size:0.65rem;color:var(--danger);margin-top:2px;display:none" id="gadget-error"></div>
+  </div>
+
+  <!-- 2. TeslaUSB 服务 -->
+  <div class="hero-card service">
+    <div class="hero-label">TeslaUSB 服务</div>
+    <div class="hero-value" style="font-size:var(--text-lg)">
+      <span class="status-dot {% if service.active %}green{% else %}red{% endif %}"></span>
+      <span id="svc-hero-status">{{ '运行中' if service.active else '已停止' }}</span>
+    </div>
+    <div class="hero-detail">
+      <div class="hero-detail-row">
+        <span>服务 <span id="svc-uptime-hero">{{ service.uptime }}</span></span>
+        <span class="hero-sep">|</span>
+        <span>系统 <span id="sys-uptime-hero">{{ sys_stats.system_uptime }}</span></span>
+      </div>
+      <div id="preview-hero" style="margin-top:4px;font-size:0.78rem">
+        {% if preview_status.state == 'generating' %}
+        后台预览 生成中 ({{ preview_status.progress_pct }}%)
+        {% elif preview_status.state == 'idle' %}
+        后台预览 空闲
+        {% elif preview_status.state == 'done' %}
+        后台预览 已完成
+        {% else %}
+        后台预览 已停止
+        {% endif %}
+      </div>
+      <div id="thumb-health" style="margin-top:2px;font-size:0.68rem;color:var(--text-muted)">缩略图 —</div>
+    </div>
+  </div>
+
+  <!-- 3. 哨兵事件 -->
+  <div class="hero-card sentry">
+    <div class="hero-label">哨兵事件</div>
+    <div class="hero-value" id="sentry-count" data-prev="">{{ sentry_events if sentry_events else '—' }}</div>
+    <div class="hero-detail">
+      <span id="sentry-detail">{% if sentry_events %}共 {{ sentry_events }} 个事件{% else %}加载中...{% endif %}</span>
+      <a href="/sentry" style="font-size:var(--text-xs);color:var(--accent);margin-left:6px">查看 →</a>
+    </div>
+    <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);font-size:0.72rem" id="location-status">
+      {% set ls = location_status or {} %}
+      {% set state = ls.get('state','unknown') %}
+      <span style="color:var(--text-muted)">📍 位置:</span>
+      <span style="font-weight:600;{% if state=='home' %}color:var(--success){% elif state=='away' %}color:var(--warning){% else %}color:var(--text-muted){% endif %}" id="location-state">
+        {% if state=='home' %}🏠 在家{% elif state=='away' %}🚗 外出{% else %}❓ 未知{% endif %}
+      </span>
+      <span style="color:var(--text-muted);font-size:0.65rem;margin-left:4px" id="location-source">{% if ls.get('source') %}({{ ls.source }}){% endif %}</span>
+      {% if ls.get('raw_location') and ls.get('raw_location') != 'unknown' %}
+      <div style="font-size:0.65rem;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="location-raw">{{ ls.raw_location }}</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 4. 网络 —— 提升至 Hero -->
+  <div class="hero-card network">
+    <div class="hero-label">📡 网络</div>
+    <div class="hero-value" style="font-size:var(--text-lg)">
+      <span class="status-dot {% if wifi.connected %}green{% else %}yellow{% endif %}"></span>
+      <span id="wifi-ssid">{{ wifi.ssid if wifi.connected else '未连接' }}</span>
+      {% if wifi.signal is not none %}<span style="font-size:0.7rem;color:var(--text-muted);font-weight:400" id="wifi-signal">{{ wifi.signal }}%</span>{% endif %}
+    </div>
+    <div class="hero-detail">
+      <span style="color:var(--text-secondary)">TS <span style="font-weight:600" id="ip-tailscale">{{ ip_info.tailscale or '—' }}</span></span>
+      <span class="hero-sep">|</span>
+      <span style="color:var(--text-secondary)">LAN <span style="font-weight:600" id="ip-local">{{ ip_info.local or '—' }}</span></span>
+      <br>实时 ↓ <span id="net-rx">—</span> ↑ <span id="net-tx">—</span>
+      <span style="font-size:0.65rem;color:var(--text-muted);margin-left:6px">本月 ↓<span id="monthly-rx">—</span> ↑<span id="monthly-tx">—</span></span>
+    </div>
+  </div>
+
+</div>
+
+
+<!-- ═══════════════════════════════════════════
+     Tier 2: Spotlight Row — 2 列宽卡
+     ═══════════════════════════════════════════ -->
+<div class="dash-spotlight-row">
+
+  <!-- 左: 车外监控 -->
+  <div class="spotlight-card">
+    <div class="spotlight-label">🌀 车外监控 · RecentClips 最新</div>
+    <div class="dash-camera-vertical">
+      <div class="dash-camera-thumb" id="camera-thumb">
+        <img id="camera-thumb-img" src="" alt="最新缩略图" style="width:100%;height:100%;object-fit:cover;display:none">
+        <div id="camera-thumb-empty" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:2.5rem">📷</div>
+      </div>
+      <div class="dash-camera-info-horizontal">
+        <div class="dash-camera-time-block">
+          <h4 id="camera-time">—</h4>
+          <div class="meta" id="camera-count">0 张缩略图</div>
+        </div>
+        <div class="dash-btn-row">
+          <a href="/recent-clips" class="btn btn-sm" style="font-size:0.72rem">📷 时间线</a>
+          <a href="/recent-clips#gif" class="btn btn-sm btn-outline" style="font-size:0.72rem">🎞️ GIF</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右: 系统资源 -->
+  <div class="spotlight-card">
+    <div class="spotlight-label">⚙️ 系统资源</div>
+    <div class="dash-resource-row">
+      <!-- CPU -->
+      <div class="dash-resource-item">
+        <div class="label"><span>CPU</span><span id="cpu-pct-val">{{ sys_stats.cpu_percent }}%</span></div>
+        <div class="meter"><div class="fill {% if sys_stats.cpu_percent > 80 %}warn{% endif %}" id="cpu-bar" style="width:{{ sys_stats.cpu_percent }}%"></div></div>
+        <div class="sub">负载 <span id="load-vals">{{ sys_stats.load_1min }} / {{ sys_stats.load_5min }} / {{ sys_stats.load_15min }}</span></div>
+      </div>
+      <!-- 内存 -->
+      <div class="dash-resource-item">
+        <div class="label"><span>内存</span><span><span id="mem-usage">{{ sys_stats.mem_used_mb }}</span>/<span id="mem-total">{{ sys_stats.mem_total_mb }}</span> MB</span></div>
+        <div class="meter"><div class="fill {% if sys_stats.mem_percent > 85 %}warn{% endif %}" id="mem-bar" style="width:{{ sys_stats.mem_percent }}%"></div></div>
+        <div class="sub" id="mem-pct">{{ sys_stats.mem_percent }}%{% if sys_stats.swap_total_mb > 0 %} · SWAP {{ sys_stats.swap_used_mb }}/{{ sys_stats.swap_total_mb }} MB{% endif %}<span id="swap-info" style="display:none"></span></div>
+      </div>
+      <!-- NVMe -->
+      <div class="dash-resource-item">
+        {% set nvme = sys_stats.nvme_total_disk if sys_stats.nvme_total_disk else {'total':0,'used':0,'free':0,'percent':0} %}
+        <div class="label"><span>NVMe</span><span><span id="nvme-disk-used">{{ fmt_bytes(nvme.used) }}</span>/<span id="nvme-disk-total">{{ fmt_bytes(nvme.total) }}</span></span></div>
+        <div class="meter"><div class="fill {% if nvme.percent > 75 %}warn{% endif %}" id="nvme-disk-bar" style="width:{{ nvme.percent }}%"></div></div>
+        <div class="sub">I/O ↓ <span id="disk-io-read">—</span> ↑ <span id="disk-io-write">—</span></div>
+      </div>
+    </div>
+    <!-- GPU/NPU 状态行 -->
+    {% set gn = sys_stats.gpu_npu or {} %}
+    {% set g = (gn.gpu if gn.gpu is not none and gn.gpu is mapping else {'pct':0,'status':'—'}) %}
+    <div style="margin-top:var(--s3);padding-top:var(--s3);border-top:1px solid var(--border);display:flex;gap:16px;font-size:0.68rem;color:var(--text-muted)">
+      <span>GPU <span id="gpu-pct-text" style="font-weight:600;color:var(--text)">{{ g.pct }}%</span>
+        <span id="gpu-status-text" style="font-size:0.65rem">{% if g.status == 'suspended' %}休眠{% elif g.status == 'active' %}活跃{% else %}{{ g.status }}{% endif %}</span></span>
+      <span>NPU <span id="npu-status" style="font-weight:600;color:var(--text)">{% if gn.npu %}{{ gn.npu }}{% else %}—{% endif %}</span></span>
+      <span><span id="nvme-disk-pct">{{ nvme.percent }}%</span> 已用</span>
+    </div>
+
+    <!-- 磁盘分区整合条 -->
+    <div class="dash-disk-integrated" id="disk-integrated">
+      {% for name, info in disk.items() %}
+      <div class="disk-mini-row" data-disk="{{ name }}">
+        <span class="dm-name">{{ name }}</span>
+        <div class="dm-bar-wrap"><div class="dm-bar {% if info.percent > 90 %}danger{% elif info.percent > 75 %}warn{% endif %}" style="width:{{ info.percent if info.mounted else 0 }}%"></div></div>
+        <span class="dm-pct">{% if info.mounted %}{{ info.percent }}%{% else %}—{% endif %}</span>
+        <span class="dm-size">{% if info.mounted %}{{ fmt_bytes(info.used) }}{% elif info.total > 0 %}{{ fmt_bytes(info.total) }}{% else %}—{% endif %}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+</div>
+
+
+<!-- ═══════════════════════════════════════════
+     Tier 3: Detail Grid — 4 列详情卡片
+     ═══════════════════════════════════════════ -->
+<div class="dash-detail-grid">
+
+  <!-- 温度监控 -->
+  <div class="detail-card">
+    <div class="detail-label">🌡 温度监控</div>
+    <div class="temp-rings">
+      <!-- CPU -->
+      <div class="temp-cell">
+        <div class="temp-label">CPU</div>
+        <svg width="56" height="56" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="28" fill="none" stroke="var(--border)" stroke-width="5"/>
+          <circle id="temp-ring-cpu" cx="40" cy="40" r="28" fill="none" stroke="#D85A30" stroke-width="5"
+            stroke-dasharray="175.9" stroke-dashoffset="{{ (175.9 * (1 - (sys_stats.cpu_temp or 0)/100))|round(2) }}"
+            stroke-linecap="round" transform="rotate(-90 40 40)"/>
+          <text x="40" y="37" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor" id="temp-val-cpu">{% if sys_stats.cpu_temp is not none %}{{ sys_stats.cpu_temp }}{% else %}—{% endif %}</text>
+          <text x="40" y="51" text-anchor="middle" font-size="9" fill="var(--text-muted)">°C</text>
+        </svg>
+        <div class="temp-range" id="temp-range-cpu">
+          {% if sys_stats.cpu_temp_min is not none %}{{ sys_stats.cpu_temp_min }}~{{ sys_stats.cpu_temp_max }}°{% endif %}
+        </div>
+      </div>
+      <!-- GPU -->
+      <div class="temp-cell">
+        <div class="temp-label">GPU</div>
+        <svg width="56" height="56" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="28" fill="none" stroke="var(--border)" stroke-width="5"/>
+          <circle id="temp-ring-gpu" cx="40" cy="40" r="28" fill="none" stroke="#EF9F27" stroke-width="5"
+            stroke-dasharray="175.9" stroke-dashoffset="{{ (175.9 * (1 - ((sys_stats.gpu_temp_fields and sys_stats.gpu_temp_fields.current or 0))/100))|round(2) }}"
+            stroke-linecap="round" transform="rotate(-90 40 40)"/>
+          <text x="40" y="37" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor" id="temp-val-gpu">{% if sys_stats.gpu_temp_fields and sys_stats.gpu_temp_fields.current is not none %}{{ sys_stats.gpu_temp_fields.current }}{% else %}—{% endif %}</text>
+          <text x="40" y="51" text-anchor="middle" font-size="9" fill="var(--text-muted)">°C</text>
+        </svg>
+        <div class="temp-range" id="temp-range-gpu">
+          {% if sys_stats.gpu_temp_fields and sys_stats.gpu_temp_fields.min is not none %}{{ sys_stats.gpu_temp_fields.min }}~{{ sys_stats.gpu_temp_fields.max }}°{% endif %}
+        </div>
+      </div>
+      <!-- M.2 -->
+      <div class="temp-cell">
+        <div class="temp-label">M.2</div>
+        <svg width="56" height="56" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="28" fill="none" stroke="var(--border)" stroke-width="5"/>
+          <circle id="temp-ring-nvme" cx="40" cy="40" r="28" fill="none" stroke="#1D9E75" stroke-width="5"
+            stroke-dasharray="175.9" stroke-dashoffset="{{ (175.9 * (1 - ((sys_stats.nvme_temp_fields is not none and sys_stats.nvme_temp_fields.current or 0))/100))|round(2) }}"
+            stroke-linecap="round" transform="rotate(-90 40 40)"/>
+          <text x="40" y="37" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor" id="temp-val-nvme">{% if sys_stats.nvme_temp_fields is not none and sys_stats.nvme_temp_fields.current is not none %}{{ sys_stats.nvme_temp_fields.current }}{% else %}—{% endif %}</text>
+          <text x="40" y="51" text-anchor="middle" font-size="9" fill="var(--text-muted)">°C</text>
+        </svg>
+        <div class="temp-range" id="temp-range-nvme">
+          {% if sys_stats.nvme_temp_fields is not none and sys_stats.nvme_temp_fields.min is not none %}{{ sys_stats.nvme_temp_fields.min }}~{{ sys_stats.nvme_temp_fields.max }}°{% endif %}
+        </div>
+      </div>
+      <!-- 风扇 -->
+      {% set fan = sys_stats.fan_status or {} %}
+      <div class="temp-cell">
+        <div class="temp-label">风扇</div>
+        <svg width="56" height="56" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="28" fill="none" stroke="var(--border)" stroke-width="5"/>
+          <circle id="temp-ring-fan" cx="40" cy="40" r="28" fill="none" stroke="#5E9EFF" stroke-width="5"
+            stroke-dasharray="175.9" stroke-dashoffset="{{ (175.9 * (1 - (fan.pwm_pct or 0)/100))|round(2) }}"
+            stroke-linecap="round" transform="rotate(-90 40 40)"/>
+          <text x="40" y="37" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor" id="temp-val-fan">{% if fan.pwm_pct is not none %}{{ fan.pwm_pct|int }}{% else %}—{% endif %}</text>
+          <text x="40" y="51" text-anchor="middle" font-size="9" fill="var(--text-muted)">%</text>
+        </svg>
+        <div class="temp-range" id="temp-range-fan">
+          {% if fan.pwm is not none %}PWM {{ fan.pwm }}/255{% else %}—{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- 存储与归档（合并 NVMe 健康 + 云归档 & 推送） -->
+  <div class="detail-card">
+    <div class="detail-label">🏥 存储与归档</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s3) var(--s4)">
+      <!-- 左: NVMe 健康 -->
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:6px;font-weight:600">NVMe 寿命</div>
+        <div class="dash-health-grid" style="grid-template-columns:1fr 1fr;gap:3px 8px">
+          <span class="label">健康度</span><span class="value {% if sys_stats.nvme_health is defined and sys_stats.nvme_health is not none and sys_stats.nvme_health.available and sys_stats.nvme_health.health_pct is not none and sys_stats.nvme_health.health_pct >= 80 %}good{% endif %}" id="nvme-used">{% if sys_stats.nvme_health is defined and sys_stats.nvme_health is not none and sys_stats.nvme_health.available %}{{ sys_stats.nvme_health.health_pct }}%{% else %}—{% endif %}</span>
+          <span class="label">备用块</span><span class="value" id="nvme-spare">{{ sys_stats.nvme_health.available_spare if sys_stats.nvme_health is defined and sys_stats.nvme_health is not none and sys_stats.nvme_health.available else '—' }}%</span>
+          <span class="label">通电</span><span class="value" id="nvme-hours">{{ sys_stats.power_on_hours_fmt if sys_stats.power_on_hours_fmt else '—' }}</span>
+          <span class="label">写入</span><span class="value" id="nvme-written">{{ sys_stats.nvme_written_fmt if sys_stats.nvme_health is defined and sys_stats.nvme_health is not none and sys_stats.nvme_health.available else '—' }}</span>
+        </div>
+      </div>
+      <!-- 右: 云归档与推送 -->
+      <div style="border-left:1px solid var(--border);padding-left:var(--s4)">
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:6px;font-weight:600">云归档</div>
+        <div class="dash-cloud-items">
+          <div class="dash-cloud-status">
+            <span class="dash-cloud-dot"></span>
+            <span>归档队列 <strong><span id="cloud-queue">{{ active_count if active_count is defined else 0 }}</span></strong></span>
+          </div>
+          <div class="dash-cloud-status">
+            <span class="dash-cloud-dot"></span>
+            <span>推送健康 <strong id="push-health">正常</strong></span>
+          </div>
+          <div style="font-size:0.68rem;color:var(--text-muted)" id="cloud-detail">等待中</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fmtBytes(b){if(!b)return'0 B';const k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(2))+' '+s[i];}
+
+function flashValue(el, newVal, fmtFn) {
+  if (!el) return;
+  const prev = el.dataset.prev || '';
+  const next = typeof fmtFn === 'function' ? fmtFn(newVal) : String(newVal !== undefined && newVal !== null ? newVal : '');
+  if (prev && prev !== next && next !== '') {
+    el.classList.remove('flash-update');
+    void el.offsetWidth;
+    el.classList.add('flash-update');
+  }
+  el.dataset.prev = next;
+  return next;
+}
+
+function rateBytes(bps) {
+  if (!bps || bps < 0) return '0 B/s';
+  const u = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  let v = bps, i = 0;
+  while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+  return v.toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+}
+
+let lastRx = 0, lastTx = 0, lastNetTime = 0;
+
+let statsRetries = 0;
+function startStatsStream() {
+  const es = new EventSource('/api/system/stats-stream');
+  es.onmessage = function(e) {
+    statsRetries = 0;
+    try {
+      const d = JSON.parse(e.data);
+      updateDashboard(d);
+    } catch(ex) {}
+  };
+  es.onerror = function() {
+    es.close();
+    statsRetries++;
+    const delay = Math.min(statsRetries * 3000, 30000);
+    setTimeout(startStatsStream, delay);
+  };
+}
+
+function updateDashboard(d) {
+  const s = d.service, w = d.wifi, ip = d.ip, y = d.sys;
+
+  // ── Hero 服务状态 ──
+  const sh = document.getElementById('svc-hero-status');
+  if (sh && s) {
+    sh.textContent = s.active ? '运行中' : '已停止';
+    sh.previousElementSibling && (sh.previousElementSibling.className = 'status-dot ' + (s.active ? 'green' : 'red'));
+  }
+  const suh = document.getElementById('svc-uptime-hero');
+  if (suh && s && s.uptime) suh.textContent = s.uptime;
+  const syh = document.getElementById('sys-uptime-hero');
+  if (syh && y && y.system_uptime) syh.textContent = y.system_uptime;
+
+  // 后台预览
+  const ph = document.getElementById('preview-hero');
+  if (ph && d.preview_status) {
+    const ps = d.preview_status;
+    let txt = '';
+    if (ps.state === 'generating') txt = '后台预览 ⚡ 生成中 (' + ps.progress_pct + '%)';
+    else if (ps.state === 'idle') txt = '后台预览 ✅ 空闲';
+    else if (ps.state === 'done') txt = '后台预览 🎉 已完成';
+    else txt = '后台预览 ⏸ 已停止';
+    ph.textContent = txt;
+  }
+
+  // 缩略图健康
+  const th = document.getElementById('thumb-health');
+  if (th && d.thumbnail_health) {
+    const h = d.thumbnail_health;
+    var bt = h.by_type || {};
+    let parts = ['缩略图 ' + h.total + ' 张'];
+    // 按类型拆分数量，便于定位来源
+    var typeParts = [];
+    if (bt.SentryClips) typeParts.push('哨兵' + bt.SentryClips);
+    if (bt.SavedClips) typeParts.push('保存' + bt.SavedClips);
+    if (bt.RecentClips) typeParts.push('最近' + bt.RecentClips);
+    if (typeParts.length) parts.push(typeParts.join('/'));
+    parts.push(fmtBytes(h.total_size_mb * 1024 * 1024));
+    if (h.damaged > 0) parts.push(h.damaged + ' 损坏');
+    th.textContent = parts.join(' · ');
+    th.style.color = h.damaged > 0 ? 'var(--danger)' : 'var(--text-muted)';
+  }
+
+  // ── Hero 哨兵 ──
+  const sc = document.getElementById('sentry-count'), sd = document.getElementById('sentry-detail');
+  if (sc && d.sentry_events !== undefined) {
+    flashValue(sc, d.sentry_events, v => String(v));
+    if (sd) sd.textContent = d.sentry_events > 0 ? '共 ' + d.sentry_events + ' 个事件' : '暂无哨兵事件';
+  }
+
+  // ── 位置状态 ──
+  if (d.location_status) {
+    const ls = d.location_status;
+    const stateEl = document.getElementById('location-state');
+    const srcEl = document.getElementById('location-source');
+    const rawEl = document.getElementById('location-raw');
+    if (stateEl) {
+      const stateMap = {home: '🏠 在家', away: '🚗 外出', unknown: '❓ 未知'};
+      stateEl.textContent = stateMap[ls.state] || '❓ 未知';
+      stateEl.style.color = ls.state === 'home' ? 'var(--success)' :
+                           ls.state === 'away' ? 'var(--warning)' : 'var(--text-muted)';
+    }
+    if (srcEl) srcEl.textContent = ls.source && ls.source !== 'unknown' ? '(' + ls.source + ')' : '';
+    if (rawEl && ls.raw_location && ls.raw_location !== 'unknown') {
+      rawEl.textContent = ls.raw_location;
+      rawEl.style.display = '';
+    } else if (rawEl) {
+      rawEl.style.display = 'none';
+    }
+  }
+
+  // ── 网络 ──
+  const ws = document.getElementById('wifi-ssid');
+  if (ws && w) ws.textContent = w.ssid || '未连接';
+  const wsg = document.getElementById('wifi-signal');
+  if (wsg && w && w.signal != null) wsg.textContent = w.signal + '%';
+  const wl = document.getElementById('ip-local'), wt = document.getElementById('ip-tailscale');
+  if (wl && ip) wl.textContent = ip.local || '—';
+  if (wt && ip) wt.textContent = ip.tailscale || '—';
+
+  // 网络吞吐
+  if (y && y.net_rx !== undefined && y.net_tx !== undefined) {
+    const now = Date.now();
+    if (lastNetTime > 0 && lastRx >= 0 && lastTx >= 0) {
+      const dt = (now - lastNetTime) / 1000;
+      if (dt > 0) {
+        const rx = document.getElementById('net-rx'), tx = document.getElementById('net-tx');
+        if (rx) rx.textContent = rateBytes((y.net_rx - lastRx) / dt);
+        if (tx) tx.textContent = rateBytes((y.net_tx - lastTx) / dt);
+      }
+    }
+    lastRx = y.net_rx; lastTx = y.net_tx; lastNetTime = now;
+  }
+  // 月度流量
+  if (d.monthly_traffic) {
+    const mr = document.getElementById('monthly-rx'), mt = document.getElementById('monthly-tx');
+    if (mr) mr.textContent = fmtBytes(d.monthly_traffic.rx_bytes || 0);
+    if (mt) mt.textContent = fmtBytes(d.monthly_traffic.tx_bytes || 0);
+  }
+
+  // ── CPU 进度条 ──
+  if (y && y.cpu_percent != null) {
+    const cb = document.getElementById('cpu-bar'), cp = document.getElementById('cpu-pct-val');
+    if (cb) { cb.style.width = y.cpu_percent + '%'; cb.className = 'fill' + (y.cpu_percent > 80 ? ' warn' : ''); }
+    if (cp) cp.textContent = y.cpu_percent + '%';
+    const lv = document.getElementById('load-vals'); if (lv) lv.textContent = (y.load_1min||0).toFixed(1) + ' / ' + (y.load_5min||0).toFixed(1) + ' / ' + (y.load_15min||0).toFixed(1);
+  }
+
+  // ── GPU / NPU ──
+  if (d.gpu_npu || (y && y.gpu_npu)) {
+    const gn = d.gpu_npu || (y && y.gpu_npu) || {};
+    if (gn.gpu !== undefined && gn.gpu !== null) {
+      const gsTxt = document.getElementById('gpu-status-text');
+      const gsPct = document.getElementById('gpu-pct-text');
+      if (typeof gn.gpu === 'object') {
+        const pct = gn.gpu.pct || 0;
+        if (gsPct) gsPct.textContent = pct + '%';
+        if (gsTxt) {
+          const st = gn.gpu.status || '';
+          gsTxt.textContent = st === 'suspended' ? '休眠' : st === 'active' ? '活跃' : st;
+        }
+      }
+    }
+    const ns = document.getElementById('npu-status');
+    if (ns && gn.npu) ns.textContent = gn.npu;
+  }
+
+  // ── 内存 ──
+  if (y) {
+    const me = document.getElementById('mem-usage'), mb = document.getElementById('mem-bar'), mp = document.getElementById('mem-pct');
+    if (me) me.textContent = y.mem_used_mb;
+    const mt = document.getElementById('mem-total'); if (mt) mt.textContent = y.mem_total_mb;
+    if (mb) { mb.style.width = y.mem_percent + '%'; mb.className = 'fill' + (y.mem_percent > 85 ? ' warn' : ''); }
+    if (mp) {
+      let txt = y.mem_percent + '%';
+      if (y.swap_total_mb > 0) txt += ' · SWAP ' + y.swap_used_mb + '/' + y.swap_total_mb + ' MB';
+      mp.textContent = txt;
+    }
+  }
+
+  // ── NVMe 磁盘概览 ──
+  if (d.nvme_total_disk && d.nvme_total_disk.total > 0) {
+    const nd = d.nvme_total_disk;
+    const ndu = document.getElementById('nvme-disk-used'), ndt = document.getElementById('nvme-disk-total');
+    const ndb = document.getElementById('nvme-disk-bar'), ndp = document.getElementById('nvme-disk-pct');
+    if (ndu) ndu.textContent = fmtBytes(nd.used);
+    if (ndt) ndt.textContent = fmtBytes(nd.total);
+    if (ndb) { ndb.style.width = nd.percent + '%'; ndb.className = 'fill' + (nd.percent > 75 ? ' warn' : ''); }
+    if (ndp) ndp.textContent = nd.percent + '%';
+  }
+
+  // ── 磁盘 I/O ──
+  if (y && y.disk_io) {
+    const dr = document.getElementById('disk-io-read'), dw = document.getElementById('disk-io-write');
+    if (dr) dr.textContent = rateBytes(y.disk_io.rate_read || 0);
+    if (dw) dw.textContent = rateBytes(y.disk_io.rate_write || 0);
+  }
+
+  // ── 温度环形图 ──
+  function updateTempRing(id, val, maxVal) {
+    const ring = document.getElementById('temp-ring-' + id), tv = document.getElementById('temp-val-' + id);
+    const pct = Math.min(val || 0, maxVal) / maxVal;
+    if (ring) ring.setAttribute('stroke-dashoffset', (175.9 * (1 - pct)).toFixed(2));
+    if (tv) tv.textContent = val != null ? val : '—';
+  }
+  if (y) {
+    updateTempRing('cpu', y.cpu_temp, 100);
+    const trc = document.getElementById('temp-range-cpu');
+    if (trc && y.cpu_temp_fields && y.cpu_temp_fields.min != null) trc.textContent = y.cpu_temp_fields.min + '~' + y.cpu_temp_fields.max + '°';
+
+    if (y.gpu_temp_fields && y.gpu_temp_fields.current != null) {
+      updateTempRing('gpu', y.gpu_temp_fields.current, 100);
+      const trg = document.getElementById('temp-range-gpu');
+      if (trg && y.gpu_temp_fields.min != null) trg.textContent = y.gpu_temp_fields.min + '~' + y.gpu_temp_fields.max + '°';
+    }
+    if (y.nvme_temp_fields && y.nvme_temp_fields.current != null) {
+      updateTempRing('nvme', y.nvme_temp_fields.current, 100);
+      const trn = document.getElementById('temp-range-nvme');
+      if (trn && y.nvme_temp_fields.min != null) trn.textContent = y.nvme_temp_fields.min + '~' + y.nvme_temp_fields.max + '°';
+    }
+    // 风扇
+    if (y.fan_status && y.fan_status.pwm_pct != null) {
+      updateTempRing('fan', y.fan_status.pwm_pct, 100);
+      const trf = document.getElementById('temp-range-fan');
+      if (trf) trf.textContent = 'PWM ' + (y.fan_status.pwm || '—') + '/255';
+    }
+  }
+
+  // ── NVMe 健康 ──
+  if (y && y.nvme_health && y.nvme_health.available) {
+    const h = y.nvme_health;
+    const setT = function(id, v) { const e = document.getElementById(id); if (e && v != null) e.textContent = v; };
+    setT('nvme-used', h.health_pct + '%');
+    setT('nvme-spare', h.available_spare + '%');
+    if (h.health_pct < 20) { const ue = document.getElementById('nvme-used'); if (ue) { ue.style.color = 'var(--warning)'; ue.className = 'value'; } }
+    setT('nvme-written', y.nvme_written_fmt || '—');
+  }
+  if (d.power_on_hours_fmt) {
+    const nhe = document.getElementById('nvme-hours');
+    if (nhe) nhe.textContent = d.power_on_hours_fmt;
+  }
+
+  // ── 磁盘分区详情（整合到系统资源卡） ──
+  if (d.disk) {
+    Object.entries(d.disk).forEach(function(entry) {
+      const n = entry[0], i = entry[1];
+      const row = document.querySelector('.disk-mini-row[data-disk="' + n + '"]');
+      if (!row) return;
+      const bar = row.querySelector('.dm-bar'), pct = row.querySelector('.dm-pct'), size = row.querySelector('.dm-size');
+      if (i.mounted) {
+        if (bar) { bar.style.width = i.percent + '%'; bar.className = 'dm-bar' + (i.percent > 90 ? ' danger' : i.percent > 75 ? ' warn' : ''); }
+        if (pct) pct.textContent = i.percent + '%';
+        if (size) size.textContent = fmtBytes(i.used);
+      } else if (i.total > 0) {
+        if (bar) { bar.style.width = '0%'; bar.className = 'dm-bar'; }
+        if (pct) pct.textContent = '—';
+        if (size) { size.textContent = fmtBytes(i.total); size.style.color = 'var(--warning)'; }
+      } else {
+        if (bar) { bar.style.width = '0%'; bar.className = 'dm-bar'; }
+        if (pct) pct.textContent = '—';
+        if (size) { size.textContent = '—'; size.style.color = 'var(--danger)'; }
+      }
+    });
+  }
+
+  // ── 云归档 ──
+  if (d.cloud_status) {
+    const cq = document.getElementById('cloud-queue');
+    if (cq) cq.textContent = d.cloud_status.active_count || 0;
+    const cd = document.getElementById('cloud-detail');
+    if (cd) cd.textContent = d.cloud_status.detail || '等待中';
+  }
+
+  // ── TeslaCam 文件系统健康 ──
+  if (d.teslacam_health) {
+    const tw = document.getElementById('teslacam-health-warning');
+    const td = document.getElementById('teslacam-health-detail');
+    if (d.teslacam_health.healthy) {
+      if (tw) tw.style.display = 'none';
+    } else {
+      if (tw) tw.style.display = 'flex';
+      if (td) {
+        const c = d.teslacam_health.corrupted_dirs || [];
+        const m = d.teslacam_health.missing_dirs || [];
+        let txt = '';
+        if (c.length > 0) txt = '损坏目录：' + c.map(function(x){return '<code style="background:var(--danger-soft);padding:1px 5px;border-radius:3px">'+x+'</code>';}).join('、');
+        else if (m.length > 0) txt = '缺失目录：' + m.map(function(x){return '<code style="background:var(--warning-soft);padding:1px 5px;border-radius:3px">'+x+'</code>';}).join('、');
+        td.innerHTML = txt;
+      }
+    }
+  }
+
+  // ── 车外监控卡片 (方案C · 台风场景分析) ──
+  if (d.camera_latest) {
+    var ct = document.getElementById('camera-time');
+    var ci = document.getElementById('camera-thumb-img');
+    var ce = document.getElementById('camera-thumb-empty');
+    var cc = document.getElementById('camera-count');
+    if (d.camera_latest.available && d.camera_latest.latest) {
+      if (ct) ct.textContent = d.camera_latest.latest.timestamp || '—';
+      if (ci) { ci.src = d.camera_latest.latest.url; ci.style.display = 'block'; }
+      if (ce) ce.style.display = 'none';
+    } else {
+      if (ct) ct.textContent = '暂无数据';
+      if (ci) ci.style.display = 'none';
+      if (ce) ce.style.display = 'flex';
+    }
+    if (cc) cc.textContent = (d.camera_latest.count || 0) + ' 张缩略图';
+  }
+
+  // ── USB Gadget 连接状态 ──
+  if (d.gadget_status) {
+    var gs = d.gadget_status;
+    var indicator = document.getElementById('gadget-indicator');
+    var statusEl = document.getElementById('gadget-status-text');
+    var modeEl = document.getElementById('gadget-mode-text');
+    var timeEl = document.getElementById('gadget-check-time');
+    var errorEl = document.getElementById('gadget-error');
+    var card = document.getElementById('gadget-card');
+
+    // controller 路径 → USB 版本映射
+    function usbVersion(ctrl) {
+      if (!ctrl) return '—';
+      var c = ctrl.toLowerCase();
+      if (c.includes('xhci') || c.includes('dwc3') || c.includes('dwc-3')) return 'USB 3.0';
+      if (c.includes('ehci')) return 'USB 2.0';
+      if (c.includes('ohci')) return 'USB 1.1';
+      if (c.includes('dwc2')) return 'USB 2.0';
+      return ctrl;  // 未知类型原样显示
+    }
+
+    if (gs.udc_bound && gs.udc_connected) {
+      if (indicator) indicator.style.background = '#4caf50';
+      if (card) card.style.borderLeftColor = 'var(--success)';
+      if (statusEl) {
+        statusEl.textContent = '已连接车机';
+        statusEl.style.color = 'var(--success)';
+      }
+      if (modeEl) {
+        modeEl.textContent = usbVersion(gs.udc_controller);
+        modeEl.title = gs.udc_controller || '';  // hover 显示完整路径
+      }
+      if (timeEl && gs.last_check) timeEl.textContent = '· ' + gs.last_check;
+      if (errorEl) { errorEl.style.display = 'none'; errorEl.textContent = ''; }
+    } else if (gs.udc_bound && !gs.udc_connected) {
+      if (indicator) indicator.style.background = '#ff9800';
+      if (card) card.style.borderLeftColor = 'var(--warning)';
+      if (statusEl) {
+        statusEl.textContent = '已绑定，等待车机...';
+        statusEl.style.color = 'var(--warning)';
+      }
+      if (modeEl) {
+        modeEl.textContent = usbVersion(gs.udc_controller);
+        modeEl.title = gs.udc_controller || '';
+      }
+      if (timeEl && gs.last_check) timeEl.textContent = '· ' + gs.last_check;
+      if (errorEl) errorEl.style.display = 'none';
+    } else if (gs.rebind_attempted) {
+      if (indicator) indicator.style.background = '#ff9800';
+      if (card) card.style.borderLeftColor = 'var(--warning)';
+      if (statusEl) {
+        statusEl.textContent = '自动恢复中...';
+        statusEl.style.color = 'var(--warning)';
+      }
+      if (modeEl) modeEl.textContent = '—';
+      if (timeEl && gs.last_check) timeEl.textContent = '· ' + gs.last_check;
+      if (errorEl && gs.last_error) { errorEl.style.display = ''; errorEl.textContent = gs.last_error; }
+    } else if (gs.last_error) {
+      if (indicator) indicator.style.background = '#f44336';
+      if (card) card.style.borderLeftColor = 'var(--danger)';
+      if (statusEl) {
+        statusEl.textContent = '未绑定';
+        statusEl.style.color = 'var(--danger)';
+      }
+      if (modeEl) modeEl.textContent = '—';
+      if (timeEl && gs.last_check) timeEl.textContent = '· ' + gs.last_check;
+      if (errorEl) { errorEl.style.display = ''; errorEl.textContent = gs.last_error; }
+    } else {
+      if (indicator) indicator.style.background = 'var(--text-muted)';
+      if (card) card.style.borderLeftColor = 'var(--text-muted)';
+      if (statusEl) {
+        statusEl.textContent = '状态未知';
+        statusEl.style.color = 'var(--text-muted)';
+      }
+      if (modeEl) modeEl.textContent = '—';
+      if (timeEl && gs.last_check) timeEl.textContent = '· ' + gs.last_check;
+    }
+  }
+
+  // ── 时间 ──
+  const ts = document.getElementById('lastUpdate'); if (ts && d.time) ts.textContent = d.time;
+}
+
+startStatsStream();
+</script>
+{% endblock %}

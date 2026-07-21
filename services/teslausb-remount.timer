@@ -1,0 +1,11 @@
+[Unit]
+Description=TeslaUSB RO Remount Timer (2min keepalive)
+Documentation=https://github.com/mphacker/TeslaUSB
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

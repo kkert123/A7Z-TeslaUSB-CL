@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %} · Boombox{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>📢 Boombox 管理</h2>
+  <span style="font-size:var(--text-xs);color:var(--text-muted)">
+    Tesla Boombox 音效 (MP3/WAV · ≤1MB · 最多5个)
+  </span>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📤 上传新音效</h3>
+  <form method="POST" action="/boombox/upload" enctype="multipart/form-data"
+        style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <input type="file" name="file" accept=".mp3,.wav" required
+           style="flex:1;min-width:200px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+    <button type="submit" class="btn">⬆️ 上传</button>
+  </form>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">🎵 现有音效 ({{ files|length }}/5)</h3>
+  {% if files %}
+  <table style="width:100%;font-size:var(--text-sm);border-collapse:collapse">
+    <thead>
+      <tr style="border-bottom:1px solid var(--border);text-align:left;color:var(--text-muted)">
+        <th style="padding:8px">文件名</th>
+        <th style="padding:8px;width:100px">大小</th>
+        <th style="padding:8px;width:100px">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for f in files %}
+      <tr style="border-bottom:1px solid var(--border);transition:background 0.2s" 
+          onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''">
+        <td style="padding:8px">🎵 {{ f.filename }}</td>
+        <td style="padding:8px;font-size:var(--text-xs);color:var(--text-muted)">
+          {{ '%.0f'|format(f.size/1024) if f.size < 1048576 else '%.1f'|format(f.size/1048576) + 'MB' }} KB
+        </td>
+        <td style="padding:8px;display:flex;gap:6px">
+          <button class="btn btn-sm" onclick="previewAudio('{{ f.filename }}')" style="font-size:var(--text-xs)">▶ 试听</button>
+          <form method="POST" action="/boombox/delete/{{ f.filename }}"
+                onsubmit="return confirm('确认删除 {{ f.filename }}？')" style="margin:0">
+            <button type="submit" class="btn btn-sm btn-danger" style="font-size:var(--text-xs)">🗑 删除</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div style="text-align:center;padding:var(--s5);color:var(--text-muted)">
+    📭 暂无 Boombox 音效 — 上传 MP3 或 WAV 格式的自定义音效
+  </div>
+  {% endif %}
+</div>
+
+<audio id="audio-player" controls style="display:none;width:100%;margin-top:var(--s2)"></audio>
+{% endblock %}
+
+<style>
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{opacity:0.85}
+</style>
+
+<script>
+function previewAudio(filename) {
+  var a = document.getElementById('audio-player');
+  a.src = '/api/boombox/preview/' + filename;
+  a.style.display = 'block';
+  a.play();
+}
+</script>

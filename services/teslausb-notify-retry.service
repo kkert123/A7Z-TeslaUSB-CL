@@ -1,0 +1,12 @@
+[Unit]
+Description=TeslaUSB CL Sentry Notification Retry (run once)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/radxa_data/teslausb
+ExecStart=/usr/bin/python3 -u sentry_notify_queue.py --once
+StandardOutput=append:/var/log/teslausb-notify-retry.log
+StandardError=append:/var/log/teslausb-notify-retry.log

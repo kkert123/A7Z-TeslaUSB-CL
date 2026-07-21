@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %} — 视频管理{% endblock %}
+{% block content %}
+<style>
+  @media (max-width: 768px) {
+    .page-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .page-header h2 { font-size: 16px; }
+    .btn-group { flex-wrap: wrap; gap: 4px; }
+    .btn-group select { min-width: 120px; font-size: 12px; }
+    .stats-grid { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .stat-card { padding: 8px; }
+    .stat-label { font-size: 10px; }
+    .stat-value { font-size: 14px; }
+    /* Event cards */
+    div[style*="grid-template-columns"] {
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)) !important;
+      gap: 8px !important;
+    }
+    .card table { font-size: 11px; }
+    .card th, .card td { padding: 6px 8px !important; }
+  }
+  @media (max-width: 400px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    div[style*="grid-template-columns"] {
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)) !important;
+    }
+  }
+</style>
+<div class="page-header">
+  <h2>🎬 视频管理</h2>
+  <div class="btn-group">
+    <select class="form-select" id="folderSelect" onchange="loadFolder(this.value)" style="width:auto;min-width:160px;padding:6px 12px;font-size:var(--text-sm);">
+      {% for key, info in folders.items() %}
+      <option value="{{ key }}" {% if key == current_folder %}selected{% endif %}>{{ info.icon }} {{ info.desc }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn-ghost btn-sm" onclick="scanThumbnails()" title="扫描并生成缺失的缩略图" id="thumb-scan-btn">🖼️ 生成缩略图</button>
+    <button class="btn btn-warning btn-sm" onclick="resetThumbnails()" title="删除最近N分钟缩略图，强制重新生成" id="thumb-reset-btn">🔄 重置缩略图</button>
+  </div>
+</div>
+
+{% if event_detail %}
+<!-- ====== 事件详情视图 ====== -->
+<div style="margin-bottom:var(--s4);">
+  <a href="/videos?folder={{ current_folder }}" style="color:var(--primary);font-size:var(--text-sm);">&larr; 返回事件列表</a>
+</div>
+
+<h3 style="font-size:var(--text-lg);margin-bottom:var(--s4);">
+  📁 {{ event_detail.name if event_detail.name else event_detail.id }}
+  <span style="font-size:var(--text-sm);color:var(--text-muted);">
+    ({{ event_detail.videos|length }} 个文件, {{ event_detail.valid_count }} 可播放{% if event_detail.encrypted_count > 0 %}, <span style="color:var(--danger);">{{ event_detail.encrypted_count }} 已加密</span>{% endif %})
+  </span>
+</h3>
+
+{% if event_detail.videos %}
+<!-- ZIP 打包下载按钮 -->
+<div style="margin-bottom:var(--s3);">
+  <button class="btn btn-primary btn-sm" onclick="downloadEventZip('{{ current_folder }}','{{ event_detail.id }}')" id="zip-btn">
+    📦 打包下载全部可播放文件
+  </button>
+  <span id="zip-status" style="font-size:var(--text-xs);color:var(--text-muted);margin-left:var(--s2);"></span>
+</div>
+
+<div class="card" style="padding:0;overflow:hidden;">
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr style="border-bottom:1px solid var(--border);">
+        <th style="padding:var(--s3) var(--s4);text-align:left;font-size:var(--text-sm);">文件名</th>
+        <th style="padding:var(--s3) var(--s4);text-align:right;font-size:var(--text-sm);">大小</th>
+        <th style="padding:var(--s3) var(--s4);text-align:center;font-size:var(--text-sm);">状态</th>
+        <th style="padding:var(--s3) var(--s4);text-align:center;font-size:var(--text-sm);">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in event_detail.videos %}
+      <tr style="border-bottom:1px solid var(--border-subtle);{% if loop.last %}border-bottom:none;{% endif %}">
+        <td style="padding:var(--s3) var(--s4);font-size:var(--text-sm);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ v.name }}">
+          🎬 {{ v.name }}
+        </td>
+        <td style="padding:var(--s3) var(--s4);text-align:right;font-size:var(--text-sm);color:var(--text-muted);white-space:nowrap;">
+          {{ v.size_fmt }}
+        </td>
+        <td style="padding:var(--s3) var(--s4);text-align:center;">
+          {% if v.valid %}
+          <span style="color:var(--success);font-size:var(--text-xs);">✅ 可播放</span>
+          {% else %}
+          <span style="color:var(--danger);font-size:var(--text-xs);" title="Tesla 加密文件，需手动保存后才能播放/下载">🔒 已加密</span>
+          {% endif %}
+        </td>
+        <td style="padding:var(--s3) var(--s4);text-align:center;white-space:nowrap;">
+          {% set angle = detect_camera_angle(v.name) %}
+          <a href="/videos/player/{{ current_folder }}/{{ event_detail.id }}{% if angle %}?camera={{ angle }}{% endif %}" class="btn btn-primary btn-sm" target="_blank">▶ 播放</a>
+          {% if v.valid %}
+          <a href="{{ v.download_path }}" class="btn btn-ghost btn-sm">⬇ 下载</a>
+          {% else %}
+          <button class="btn btn-ghost btn-sm" disabled title="Tesla 加密文件，无法下载">⬇ 下载</button>
+          {% endif %}
+          <a href="{{ v.path }}" target="_blank" class="btn btn-ghost btn-sm" title="TDashcam Studio 多路同步回放">🎬 TDashcam</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty"><div class="empty-icon">📂</div><div class="empty-text">事件中没有视频文件</div></div>
+{% endif %}
+
+{% else %}
+<!-- ====== 事件列表视图 ====== -->
+
+<!-- 加密警告（来自播放页面） -->
+{% if encryption_warning %}
+<div class="card" style="background:var(--danger-bg, #fef2f2);border-color:var(--danger, #ef4444);margin-bottom:var(--s4);padding:var(--s3) var(--s4);">
+  <span style="color:var(--danger);">🔒 <strong>文件已被 Tesla 加密</strong> — {{ encryption_warning }} 无法播放。</span>
+  <span style="font-size:var(--text-xs);color:var(--text-muted);">需在 Tesla 车机上手动保存该事件后才能播放下载。</span>
+</div>
+{% endif %}
+
+<!-- 统计 -->
+{% if total_events is defined and total_events > 0 %}
+<div class="stats-grid" style="margin-bottom:var(--s4)">
+  <div class="stat-card"><div class="stat-label">事件数</div><div class="stat-value">{{ total_events }}</div></div>
+  <div class="stat-card"><div class="stat-label">已上传</div><div class="stat-value" style="color:var(--success)">{{ uploaded_count }}</div></div>
+  <div class="stat-card"><div class="stat-label">总大小</div><div class="stat-value" style="font-size:var(--text-base)">{{ total_size }}</div></div>
+</div>
+{% endif %}
+
+<!-- 事件卡片列表 -->
+{% if events %}
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s4);">
+  {% for event in events %}
+  <div class="card" style="padding:0;overflow:hidden;">
+    <!-- 缩略图 / 占位 -->
+    {% if event.thumbnail %}
+    <a href="/videos/event/{{ current_folder }}/{{ event.id }}" style="display:block;">
+      <img src="{{ event.thumbnail }}" alt="" style="aspect-ratio:16/9;width:100%;display:block;object-fit:cover;">
+    </a>
+    {% else %}
+    <a href="/videos/event/{{ current_folder }}/{{ event.id }}" style="display:block;">
+      <div style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;background:var(--bg-hover);">
+        <span style="font-size:32px;opacity:0.3">🎬</span>
+      </div>
+    </a>
+    {% endif %}
+
+    <!-- 信息 -->
+    <div style="padding:var(--s3) var(--s4);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--s2);">
+        <span style="font-weight:600;font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="{{ event.name }}">{{ event.name }}</span>
+        {% if event.uploaded %}
+        <span class="badge badge-success">已上传</span>
+        {% endif %}
+      </div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s2);">
+        {{ event.timestamp }} · {{ event.file_count }} 个文件 · {{ format_size(event.total_size) if event.total_size else '—' }}
+      </div>
+      {% if event.nas_path %}
+      <div style="font-size:var(--text-xs);color:var(--success);margin-bottom:var(--s2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ event.nas_path }}">NAS: {{ event.nas_path }}</div>
+      {% endif %}
+      <div class="btn-group">
+        <a href="/videos/player/{{ current_folder }}/{{ event.id }}" class="btn btn-primary btn-sm">▶ 播放</a>
+        <a href="/videos/event/{{ current_folder }}/{{ event.id }}" class="btn btn-ghost btn-sm">查看</a>
+        <a href="/tdashcam/" class="btn btn-ghost btn-sm" title="打开 TDashcam Studio 多路同步播放器">🎬 TDashcam</a>
+        <button class="btn btn-danger btn-sm" onclick="deleteEvent('{{ current_folder }}','{{ event.id }}')">删除</button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty"><div class="empty-icon">🎬</div><div class="empty-text">当前文件夹没有视频事件{% if current_folder == 'SentryClips' %}，Tesla 尚未生成哨兵录像。请确保 Tesla 哨兵模式已开启。{% endif %}</div></div>
+{% endif %}
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function loadFolder(f){window.location.href='?folder='+encodeURIComponent(f);}
+async function deleteEvent(folder,id){
+  if(!confirm('确定删除事件 '+id+'？此操作不可恢复！'))return;
+  try{const r=await fetch('/api/videos/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder,event_id:id})});
+  const d=await r.json();if(d.success){location.reload();}else{alert(d.error||'删除失败');}}
+  catch(e){alert('请求失败');}
+}
+
+async function downloadEventZip(folder, eventId) {
+  const btn = document.getElementById('zip-btn');
+  const status = document.getElementById('zip-status');
+  if (!btn || !status) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ 打包中...';
+  status.textContent = '';
+  try {
+    const r = await fetch('/api/videos/zip', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({folder, event_id: eventId}),
+    });
+    if (r.ok) {
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = r.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?(.+?)"?$/);
+      a.download = match ? match[1] : (eventId + '.zip');
+      a.click();
+      URL.revokeObjectURL(url);
+      status.textContent = '✅ 下载完成';
+    } else {
+      const data = await r.json().catch(() => ({}));
+      status.textContent = '❌ ' + (data.error || '打包失败');
+    }
+  } catch(e) {
+    status.textContent = '❌ 请求失败: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = '📦 打包下载全部可播放文件';
+}
+
+async function scanThumbnails() {
+  const btn = document.getElementById('thumb-scan-btn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ 扫描中...';
+  try {
+    const r = await fetch('/api/thumbnails/scan', {method:'POST'});
+    const d = await r.json();
+    if (d.success) {
+      alert('扫描完成: ' + d.scanned + ' 个事件, 生成 ' + d.generated + ' 个缩略图, 跳过 ' + d.skipped + ' 个(活跃写入)' + (d.errors.length ? '\n错误: ' + d.errors.join(', ') : ''));
+      location.reload();
+    } else {
+      alert('扫描失败: ' + (d.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('请求失败: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '🖼️ 生成缩略图';
+}
+
+async function resetThumbnails() {
+  const btn = document.getElementById('thumb-reset-btn');
+  const minutes = parseInt(localStorage.getItem('thumbResetMinutes') || '60');
+  if (!confirm('将删除最近 ' + minutes + ' 分钟的缩略图，强制重新生成。\n\n确定继续？')) return;
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ 重置中...';
+  try {
+    // 先删除
+    const r1 = await fetch('/api/thumbnails/reset', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ minutes })
+    });
+    const d1 = await r1.json();
+    if (d1.success) {
+      let msg = '✅ 已删除 ' + d1.deleted + ' 张缩略图';
+      if (d1.scan) msg += '\n扫描: ' + d1.scan.generated + ' 张已重新生成';
+      alert(msg);
+      location.reload();
+    } else {
+      alert('❌ 重置失败: ' + (d1.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('请求失败: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '🔄 重置缩略图';
+}
+</script>
+{% endblock %}

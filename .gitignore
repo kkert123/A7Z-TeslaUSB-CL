@@ -1,0 +1,57 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Secrets & runtime config (NEVER commit real config) =====
+config.json
+config/sentry.json
+weixin_config.json
+*.secret.*
+
+# ===== Generated artifacts =====
+static/thumbnails/
+*.jpg
+*.png
+*.gif
+
+# ===== Logs =====
+*.log
+logs/
+
+# ===== Backup & temp =====
+_backup_*/
+*.bak
+*.backup*
+*.b64
+
+# ===== Dependencies (installed via pip/npm, not committed) =====
+node_modules/
+
+# ===== Runtime data =====
+data/
+
+# ===== Test / debug scratch =====
+_*.py
+_*.sh
+_*.ps1
+test_*.py
+
+# ===== Local assistant artifacts =====
+.workbuddy/
+.gstack/

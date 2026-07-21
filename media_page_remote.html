@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeslaUSB CL · 媒体管理</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="/">
+      <svg class="nav-logo" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 17h14M5 17a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1l2-3h8l2 3h1a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2M5 17l-1 2M19 17l1 2M9 14h6M9 14a3 3 0 1 1-3-3M15 14a3 3 0 1 0 3-3"/>
+      </svg>
+      <span>TeslaUSB</span>
+    </a>
+
+    <!-- 桌面导航 -->
+    <ul class="nav-menu" id="navMenu">
+      <li><a href="/" class="nav-link " data-page="dashboard">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span>仪表盘</span>
+      </a></li>
+      <li><a href="/sentry" class="nav-link " data-page="sentry">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>哨兵</span>
+      </a></li>
+      <li><a href="/videos" class="nav-link " data-page="videos">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+        <span>视频</span>
+      </a></li>
+      <li><a href="/upload" class="nav-link " data-page="upload">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>上传</span>
+      </a></li>
+      <li><a href="/wifi" class="nav-link " data-page="wifi">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+        <span>WiFi</span>
+      </a></li>
+      <li><a href="/media" class="nav-link active" data-page="media">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>
+        <span>媒体</span>
+      </a></li>
+      <li><a href="/lockchime" class="nav-link " data-page="lockchime">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span>LockChime</span>
+      </a></li>
+      <li><a href="/logs" class="nav-link " data-page="logs">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span>日志</span>
+      </a></li>
+      <li><a href="/analytics" class="nav-link " data-page="analytics">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        <span>统计</span>
+      </a></li>
+      <li><a href="/system" class="nav-link " data-page="system">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>系统</span>
+      </a></li>
+    </ul>
+
+    <div class="nav-actions">
+      <!-- 模式切换按钮 -->
+      <button class="mode-btn" id="modeBtn" onclick="toggleMode()" aria-label="切换 Present/Edit 模式" title="切换 USB 模式：Present (连接 Tesla) / Edit (网络访问)">
+        <svg class="icon-present" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+          <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>
+          <circle cx="12" cy="14" r="2"/>
+        </svg>
+        <svg class="icon-edit" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>
+        <span id="modeText">Present</span>
+      </button>
+
+      <!-- 主题切换 -->
+      <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" aria-label="切换主题">
+        <svg class="icon-sun" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+
+      <!-- 移动端菜单按钮 -->
+      <button class="menu-btn" id="menuBtn" onclick="toggleMenu()" aria-label="菜单">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- 移动端侧边栏遮罩 -->
+<div class="overlay" id="overlay" onclick="toggleMenu()"></div>
+
+<!-- Flash 消息 -->
+
+  
+
+
+<!-- 主内容区 -->
+<main class="main">
+  
+<div class="page-header">
+  <h2>媒体管理</h2>
+</div>
+
+<!-- Tab 导航 -->
+<div class="tab-bar" style="margin-bottom:var(--s6)">
+  <button class="tab-btn active" data-tab="boombox" onclick="switchTab('boombox')">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    Boombox
+  </button>
+  <button class="tab-btn" data-tab="lightshow" onclick="switchTab('lightshow')">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+    Lightshow
+  </button>
+  <button class="tab-btn" data-tab="wraps" onclick="switchTab('wraps')">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+    Wraps
+  </button>
+  <button class="tab-btn" data-tab="music" onclick="switchTab('music')">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    音乐
+  </button>
+</div>
+
+<!-- 音频播放器（全局） -->
+<div id="audio-player" class="card" style="display:none;margin-bottom:var(--s4);padding:var(--s3)">
+  <div style="display:flex;align-items:center;gap:var(--s3)">
+    <button id="play-btn" onclick="togglePlay()" style="width:44px;height:44px;border-radius:50%;border:none;background:var(--pri);color:#fff;font-size:18px;cursor:pointer;flex-shrink:0">&#x25b6;</button>
+    <div style="flex:1;min-width:0">
+      <div id="now-playing" style="font-weight:500;font-size:var(--text-sm);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+      <div style="display:flex;align-items:center;gap:var(--s2)">
+        <span id="audio-current" style="font-size:var(--text-xs);color:var(--text-muted);min-width:36px">0:00</span>
+        <input type="range" id="audio-seek" value="0" max="100" style="flex:1;height:4px;cursor:pointer" oninput="seekAudio(this.value)">
+        <span id="audio-duration" style="font-size:var(--text-xs);color:var(--text-muted);min-width:36px;text-align:right">0:00</span>
+      </div>
+    </div>
+    <button onclick="stopAudio()" style="border:none;background:transparent;color:var(--text-muted);cursor:pointer;padding:8px;font-size:16px">&#x2715;</button>
+  </div>
+</div>
+
+<!-- BOOMBOX -->
+<div class="tab-panel active" id="panel-boombox">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--s2)">
+      <div>
+        <h3 style="font-size:var(--text-base);font-weight:600">&#x1f50a; Boombox 锁车音效</h3>
+        <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">上传自定义锁车音效，支持 MP3 / FLAC / WAV / AAC / M4A</p>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('boombox-upload').click()">&#x2b06; 上传音频</button>
+      <input type="file" id="boombox-upload" multiple accept=".mp3,.flac,.wav,.aac,.m4a" style="display:none" onchange="uploadBoombox(this.files)">
+    </div>
+    <div id="boombox-progress" style="display:none;margin-top:var(--s3)">
+      <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);margin-bottom:4px">
+        <span id="boombox-progress-text">上传中...</span>
+        <span id="boombox-progress-pct">0%</span>
+      </div>
+      <div class="upload-progress"><div class="upload-progress-bar" id="boombox-progress-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- 内嵌音频播放器 -->
+  <div id="audio-player" class="card" style="display:none;margin-bottom:var(--s4);padding:var(--s3)">
+    <div style="display:flex;align-items:center;gap:var(--s3)">
+      <button id="play-btn" onclick="togglePlay()" style="width:44px;height:44px;border-radius:50%;border:none;background:var(--pri);color:#fff;font-size:18px;cursor:pointer;flex-shrink:0">&#x25b6;</button>
+      <div style="flex:1;min-width:0">
+        <div id="now-playing" style="font-weight:500;font-size:var(--text-sm);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div style="display:flex;align-items:center;gap:var(--s2)">
+          <span id="audio-current" style="font-size:var(--text-xs);color:var(--text-muted);min-width:36px">0:00</span>
+          <input type="range" id="audio-seek" value="0" max="100" style="flex:1;height:4px;cursor:pointer" oninput="seekAudio(this.value)">
+          <span id="audio-duration" style="font-size:var(--text-xs);color:var(--text-muted);min-width:36px;text-align:right">0:00</span>
+        </div>
+      </div>
+      <button onclick="stopAudio()" style="border:none;background:transparent;color:var(--text-muted);cursor:pointer;padding:8px;font-size:16px">&#x2715;</button>
+    </div>
+  </div>
+
+  <div class="info-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:var(--s4)">
+    <div class="info-card"><div class="info-card-icon">&#x1f3b5;</div><div class="info-card-body"><div class="info-card-label">音频文件</div><div class="info-card-value" id="boombox-count">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4be;</div><div class="info-card-body"><div class="info-card-label">总大小</div><div class="info-card-value" id="boombox-size">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4bf;</div><div class="info-card-body"><div class="info-card-label">分区空间</div><div class="info-card-value" id="boombox-disk">&#x2014;</div><div class="progress-row" style="margin-top:4px"><div class="progress"><div class="progress-fill" id="boombox-disk-bar" style="width:0%"></div></div></div></div></div>
+  </div>
+  <div class="card"><div id="boombox-list" class="media-list"><div class="empty"><div class="empty-icon">&#x1f3b5;</div><div class="empty-text">暂无音频文件，点击上方按钮上传</div></div></div></div>
+</div>
+
+<!-- LIGHTSHOW -->
+<div class="tab-panel" id="panel-lightshow">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--s2)">
+      <div>
+        <h3 style="font-size:var(--text-base);font-weight:600">&#x26a1; Lightshow 灯光秀</h3>
+        <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">上传 ZIP 包（含 .fseq 序列 + .mp3 音频），系统自动解压</p>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('lightshow-upload').click()">&#x2b06; 上传 ZIP</button>
+      <input type="file" id="lightshow-upload" accept=".zip" style="display:none" onchange="uploadLightshow(this.files)">
+    </div>
+    <div id="lightshow-progress" style="display:none;margin-top:var(--s3)">
+      <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);margin-bottom:4px">
+        <span id="lightshow-progress-text">上传中...</span>
+        <span id="lightshow-progress-pct">0%</span>
+      </div>
+      <div class="upload-progress"><div class="upload-progress-bar" id="lightshow-progress-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+  <div class="info-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:var(--s4)">
+    <div class="info-card"><div class="info-card-icon">&#x1f4cb;</div><div class="info-card-body"><div class="info-card-label">灯光秀文件</div><div class="info-card-value" id="lightshow-count">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4be;</div><div class="info-card-body"><div class="info-card-label">总大小</div><div class="info-card-value" id="lightshow-size">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4bf;</div><div class="info-card-body"><div class="info-card-label">分区空间</div><div class="info-card-value" id="lightshow-disk">&#x2014;</div><div class="progress-row" style="margin-top:4px"><div class="progress"><div class="progress-fill" id="lightshow-disk-bar" style="width:0%"></div></div></div></div></div>
+  </div>
+  <div class="card"><div id="lightshow-list" class="media-list"><div class="empty"><div class="empty-icon">&#x26a1;</div><div class="empty-text">暂无灯光秀文件，上传 ZIP 包开始使用</div></div></div></div>
+</div>
+
+<!-- WRAPS -->
+<div class="tab-panel" id="panel-wraps">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--s2)">
+      <div>
+        <h3 style="font-size:var(--text-base);font-weight:600">&#x1f3a8; Custom Wraps 车辆贴纸</h3>
+        <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">PNG 格式，512~1024px</p>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('wraps-upload').click()">&#x2b06; 上传贴纸</button>
+      <input type="file" id="wraps-upload" multiple accept=".png" style="display:none" onchange="uploadWraps(this.files)">
+    </div>
+    <div id="wraps-progress" style="display:none;margin-top:var(--s3)">
+      <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);margin-bottom:4px">
+        <span id="wraps-progress-text">上传中...</span>
+        <span id="wraps-progress-pct">0%</span>
+      </div>
+      <div class="upload-progress"><div class="upload-progress-bar" id="wraps-progress-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+  <div class="info-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:var(--s4)">
+    <div class="info-card"><div class="info-card-icon">&#x1f5bc;</div><div class="info-card-body"><div class="info-card-label">贴纸数量</div><div class="info-card-value" id="wraps-count">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4be;</div><div class="info-card-body"><div class="info-card-label">总大小</div><div class="info-card-value" id="wraps-size">&#x2014;</div></div></div>
+  </div>
+  <div class="card"><div id="wraps-list" class="media-list wraps-grid"><div class="empty"><div class="empty-icon">&#x1f3a8;</div><div class="empty-text">暂无贴纸，上传 PNG 图片添加</div></div></div></div>
+</div>
+
+
+<!-- MUSIC -->
+<div class="tab-panel" id="panel-music">
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--s2)">
+      <div>
+        <h3 style="font-size:var(--text-base);font-weight:600">&#x1f3b5; 音乐文件</h3>
+        <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">上传音乐文件到 Tesla，支持 MP3 / FLAC / WAV / AAC / M4A / OGG / WMA</p>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('music-upload').click()">&#x2b06; 上传音乐</button>
+      <input type="file" id="music-upload" multiple accept=".mp3,.flac,.wav,.aac,.m4a,.ogg,.wma" style="display:none" onchange="uploadMusic(this.files)">
+    </div>
+    <div id="music-progress" style="display:none;margin-top:var(--s3)">
+      <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);margin-bottom:4px">
+        <span id="music-progress-text">上传中...</span>
+        <span id="music-progress-pct">0%</span>
+      </div>
+      <div class="upload-progress"><div class="upload-progress-bar" id="music-progress-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- 统计卡片 -->
+  <div class="info-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:var(--s4)">
+    <div class="info-card"><div class="info-card-icon">&#x1f3b5;</div><div class="info-card-body"><div class="info-card-label">音乐文件</div><div class="info-card-value" id="music-count">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4be;</div><div class="info-card-body"><div class="info-card-label">总大小</div><div class="info-card-value" id="music-size">&#x2014;</div></div></div>
+    <div class="info-card"><div class="info-card-icon">&#x1f4bf;</div><div class="info-card-body"><div class="info-card-label">分区空间</div><div class="info-card-value" id="music-disk">&#x2014;</div><div class="progress-row" style="margin-top:4px"><div class="progress"><div class="progress-fill" id="music-disk-bar" style="width:0%"></div></div></div></div></div>
+  </div>
+
+  <div class="card"><div id="music-list" class="media-list"><div class="empty"><div class="empty-icon">&#x1f3b5;</div><div class="empty-text">暂无音乐文件，点击上方按钮上传</div></div></div></div>
+</div>
+
+<!-- 删除确认 -->
+<div class="modal-overlay" id="deleteModal" style="display:none" onclick="if(event.target===this)closeDeleteModal()">
+  <div class="modal">
+    <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s2)">确认删除</h3>
+    <p id="deleteMsg" style="font-size:var(--text-sm);color:var(--text-muted);margin-bottom:var(--s4)">确定要删除此文件吗？此操作不可撤销。</p>
+    <div style="display:flex;gap:var(--s2);justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" onclick="closeDeleteModal()">取消</button>
+      <button class="btn btn-danger btn-sm" onclick="confirmDelete()">删除</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+<audio id="audio-el" preload="auto"></audio>
+
+
+</main>
+
+<!-- 页脚 -->
+<footer class="footer">
+  <span>TeslaUSB CL &copy; 2026</span>
+  <span class="footer-sep">·</span>
+  <span id="footerTime"></span>
+</footer>
+
+<script src="/static/app.js"></script>
+<script>
+// ── 导航切换 ──
+function toggleMenu() {
+  document.getElementById('navMenu').classList.toggle('open');
+  document.getElementById('overlay').classList.toggle('show');
+  document.getElementById('menuBtn').classList.toggle('active');
+}
+
+// 点击导航链接后关闭移动菜单
+document.querySelectorAll('.nav-link').forEach(a => {
+  a.addEventListener('click', () => {
+    if (window.innerWidth <= 768) toggleMenu();
+  });
+});
+
+// ── 主题切换 ──
+function toggleTheme() {
+  const html = document.documentElement;
+  const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
+  html.dataset.theme = next;
+  localStorage.setItem('theme', next);
+}
+
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.dataset.theme = saved;
+})();
+
+// ── 模式切换 ──
+let currentMode = null; // 将在 fetchCurrentMode() 中初始化
+
+async function toggleMode() {
+  const newMode = currentMode === 'present' ? 'edit' : 'present';
+  const btn = document.getElementById('modeBtn');
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch('/api/mode/switch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: newMode})
+    });
+
+    const data = await resp.json();
+
+    if (data.success) {
+      currentMode = newMode;
+      document.body.classList.toggle('mode-edit', newMode === 'edit');
+      document.getElementById('modeText').textContent = newMode === 'present' ? 'Present' : 'Edit';
+      showToast(`已切换到 ${newMode === 'present' ? 'Present (连接 Tesla)' : 'Edit (网络访问)'} 模式`, 'success');
+      
+      // 3秒后刷新页面（让模式切换生效）
+      setTimeout(() => location.reload(), 3000);
+    } else {
+      showToast(data.message || '模式切换失败', 'error');
+    }
+  } catch (err) {
+    showToast('网络错误：' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 获取当前模式
+async function fetchCurrentMode() {
+  try {
+    const resp = await fetch('/api/mode/status');
+    const data = await resp.json();
+    if (data.success) {
+      currentMode = data.mode || 'present';
+      document.body.classList.toggle('mode-edit', currentMode === 'edit');
+      document.getElementById('modeText').textContent = currentMode === 'present' ? 'Present' : 'Edit';
+    }
+  } catch (err) {
+    console.error('获取模式失败:', err);
+  }
+}
+
+// 页面加载时获取当前模式
+document.addEventListener('DOMContentLoaded', fetchCurrentMode);
+
+// Toast 提示函数
+if (typeof showToast !== 'function') {
+  function showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+  }
+}
+
+// ── 页脚时钟 ──
+function updateClock() {
+  const el = document.getElementById('footerTime');
+  if (el) el.textContent = new Date().toLocaleString('zh-CN', {hour12: false});
+}
+updateClock();
+setInterval(updateClock, 1000);
+</script>
+
+<style>
+.tab-bar{display:flex;gap:2px;background:var(--bg-card);border-radius:var(--r-md);padding:3px}
+.tab-btn{flex:1;padding:var(--s2) var(--s3);border:none;background:transparent;color:var(--text-muted);font-size:var(--text-sm);font-weight:500;border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .2s}
+.tab-btn:hover{color:var(--text);background:var(--bg-hover)}
+.tab-btn.active{color:var(--pri);background:var(--pri-alpha)}
+.tab-panel{display:none}.tab-panel.active{display:block}
+.media-list{max-height:500px;overflow-y:auto}
+.media-item{display:flex;align-items:center;padding:var(--s3) 0;border-bottom:1px solid var(--border);gap:var(--s3)}
+.media-item:last-child{border-bottom:none}
+.media-item-icon{font-size:24px;flex-shrink:0;width:40px;text-align:center}
+.media-item-info{flex:1;min-width:0}
+.media-item-name{font-size:var(--text-sm);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.media-item-meta{font-size:var(--text-xs);color:var(--text-muted);margin-top:2px}
+.media-item-badge{display:inline-block;padding:1px 6px;font-size:10px;border-radius:10px;background:var(--pri-alpha);color:var(--pri);margin-left:6px;vertical-align:middle}
+.media-item-actions{display:flex;gap:4px;flex-shrink:0}
+.media-item-btn{background:none;border:none;color:var(--text-muted);cursor:pointer;padding:6px;border-radius:var(--r-sm);transition:all .15s;font-size:16px}
+.media-item-btn:hover{color:var(--pri);background:var(--pri-alpha)}
+.media-item-btn.playing{color:var(--pri)}
+.media-item-del{background:none;border:none;color:var(--text-muted);cursor:pointer;padding:6px;border-radius:var(--r-sm);transition:all .15s;font-size:18px;flex-shrink:0}
+.media-item-del:hover{color:var(--danger);background:rgba(239,68,68,.1)}
+.wraps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:var(--s3);max-height:none}
+.wrap-card{text-align:center;padding:var(--s2);border:1px solid var(--border);border-radius:var(--r-md);transition:all .2s;position:relative}
+.wrap-card:hover{border-color:var(--pri);transform:translateY(-1px)}
+.wrap-thumb{width:100%;aspect-ratio:1;object-fit:contain;border-radius:var(--r-sm);margin-bottom:var(--s1);background:repeating-conic-gradient(var(--bg-card) 0% 25%,var(--bg-hover) 0% 50%) 50%/12px 12px}
+.wrap-name{font-size:var(--text-xs);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wrap-meta{font-size:10px;color:var(--text-muted)}
+.wrap-del{position:absolute;top:4px;right:4px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;opacity:0;transition:all .15s}
+.wrap-card:hover .wrap-del{opacity:1}
+.wrap-del:hover{color:var(--danger);border-color:var(--danger)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--s5);max-width:400px;width:90%;box-shadow:var(--shadow-lg)}
+.toast-container{position:fixed;top:70px;right:16px;z-index:200;display:flex;flex-direction:column;gap:8px}
+.toast{padding:var(--s2) var(--s3);border-radius:var(--r-sm);font-size:var(--text-sm);animation:toastIn .3s ease;box-shadow:var(--shadow-md)}
+.toast-success{background:#065f46;color:#a7f3d0}
+.toast-error{background:#7f1d1d;color:#fca5a5}
+@keyframes toastIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+.upload-progress{height:6px;background:var(--bg-hover);border-radius:3px;overflow:hidden}
+.upload-progress-bar{height:100%;background:linear-gradient(90deg,var(--pri),#60a5fa);border-radius:3px;transition:width .3s}
+#audio-player{background:linear-gradient(135deg,rgba(59,130,246,.1),rgba(139,92,246,.1));border:1px solid rgba(59,130,246,.3)}
+#audio-seek{-webkit-appearance:none;background:var(--bg-hover);border-radius:2px}
+#audio-seek::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;background:var(--pri);border-radius:50%;cursor:pointer}
+</style>
+<script>
+var pendingDelete=null,currentPlaying=null;
+var audio=document.getElementById('audio-el');
+
+function fmtBytes(b){if(!b)return'0 B';var k=1024,s=['B','KB','MB','GB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(1))+' '+s[i];}
+function fmtTime(ts){if(!ts)return'\u2014';var d=new Date(ts*1000);return d.toLocaleDateString('zh-CN')+' '+d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});}
+function fmtDur(s){if(!s||isNaN(s))return'0:00';var m=Math.floor(s/60),sec=Math.floor(s%60);return m+':'+(sec<10?'0':'')+sec;}
+function showToast(msg,type){type=type||'success';var c=document.getElementById('toastContainer'),t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.remove()},3000);}
+function escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function escAttr(s){return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');}
+
+// Tab
+function switchTab(tab){
+  document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.toggle('active',b.dataset.tab===tab);});
+  document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.toggle('active',p.id==='panel-'+tab);});
+  if(tab!=='boombox'&&tab!=='music')stopAudio();
+}
+
+// Upload with progress (XHR)
+function uploadWithProgress(url,fd,pfx,onOk){
+  var xhr=new XMLHttpRequest();
+  var progEl=document.getElementById(pfx+'-progress');
+  var barEl=document.getElementById(pfx+'-progress-bar');
+  var pctEl=document.getElementById(pfx+'-progress-pct');
+  var txtEl=document.getElementById(pfx+'-progress-text');
+  progEl.style.display='block';barEl.style.width='0%';pctEl.textContent='0%';txtEl.textContent='\u4e0a\u4f20\u4e2d...';
+  xhr.upload.onprogress=function(e){
+    if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);barEl.style.width=pct+'%';pctEl.textContent=pct+'%';txtEl.textContent='\u4e0a\u4f20\u4e2d... '+fmtBytes(e.loaded)+' / '+fmtBytes(e.total);}
+  };
+  xhr.onload=function(){
+    progEl.style.display='none';
+    try{var d=JSON.parse(xhr.responseText);if(d.success){showToast(d.message||'\u4e0a\u4f20\u6210\u529f');if(onOk)onOk();}else{showToast(d.error||'\u4e0a\u4f20\u5931\u8d25','error');}}catch(e){showToast('\u54cd\u5e94\u89e3\u6790\u5931\u8d25','error');}
+  };
+  xhr.onerror=function(){progEl.style.display='none';showToast('\u7f51\u7edc\u9519\u8bef','error');};
+  xhr.open('POST',url);xhr.send(fd);
+}
+
+// Audio player
+function playAudio(name){
+  if(currentPlaying===name&&!audio.paused){audio.pause();syncPlayBtn();return;}
+  currentPlaying=name;
+  audio.src='/api/media/boombox/play/'+encodeURIComponent(name);
+  audio.play();
+  document.getElementById('audio-player').style.display='block';
+  document.getElementById('now-playing').textContent=name;
+  syncPlayBtn();
+}
+function togglePlay(){if(audio.paused)audio.play();else audio.pause();syncPlayBtn();}
+function stopAudio(){audio.pause();audio.currentTime=0;audio.src='';currentPlaying=null;document.getElementById('audio-player').style.display='none';syncPlayBtn();}
+function syncPlayBtn(){
+  document.getElementById('play-btn').textContent=audio.paused?'\u25b6':'\u23f8';
+  document.querySelectorAll('.media-item-btn.play').forEach(function(b){
+    var isThis=b.dataset.name===currentPlaying&&!audio.paused;
+    b.classList.toggle('playing',isThis);b.textContent=isThis?'\u23f8':'\u25b6';
+  });
+}
+function seekAudio(v){if(audio.duration)audio.currentTime=audio.duration*v/100;}
+audio.ontimeupdate=function(){
+  document.getElementById('audio-current').textContent=fmtDur(audio.currentTime);
+  document.getElementById('audio-duration').textContent=fmtDur(audio.duration);
+  if(audio.duration)document.getElementById('audio-seek').value=audio.currentTime/audio.duration*100;
+};
+audio.onloadedmetadata=function(){
+  document.getElementById('audio-duration').textContent=fmtDur(audio.duration);
+};
+audio.onended=function(){currentPlaying=null;syncPlayBtn();};
+
+// Delete
+function askDelete(type,name){pendingDelete={type:type,name:name};document.getElementById('deleteMsg').textContent='\u786e\u5b9a\u8981\u5220\u9664 "'+name+'" \u5417\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002';document.getElementById('deleteModal').style.display='flex';}
+function closeDeleteModal(){document.getElementById('deleteModal').style.display='none';pendingDelete=null;}
+function confirmDelete(){
+  if(!pendingDelete)return;var t=pendingDelete.type,n=pendingDelete.name;closeDeleteModal();
+  if((t==='boombox'||t==='music')&&currentPlaying===n)stopAudio();
+  var fd=new FormData();fd.append('filename',n);
+  fetch('/api/media/'+t+'/delete',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(d){
+    if(d.success){showToast(d.message||'\u5df2\u5220\u9664');loadTab(t);}else{showToast(d.error||'\u5220\u9664\u5931\u8d25','error');}
+  }).catch(function(e){showToast('\u8bf7\u6c42\u5931\u8d25','error');});
+}
+
+// Boombox
+function uploadBoombox(files){if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('files',files[i]);uploadWithProgress('/api/media/boombox/upload',fd,'boombox',loadBoombox);document.getElementById('boombox-upload').value='';}
+function renderBoombox(files){
+  var el=document.getElementById('boombox-list');
+  if(!files.length){el.innerHTML='<div class="empty"><div class="empty-icon">\u{1f3b5}</div><div class="empty-text">\u6682\u65e0\u97f3\u9891\u6587\u4ef6\uff0c\u70b9\u51fb\u4e0a\u65b9\u6309\u94ae\u4e0a\u4f20</div></div>';return;}
+  el.innerHTML=files.map(function(f){
+    var icon=f.ext==='.flac'?'\u{1f3bb}':f.ext==='.wav'?'\u{1f3a4}':'\u{1f3b5}';
+    return '<div class="media-item"><div class="media-item-icon">'+icon+'</div><div class="media-item-info"><div class="media-item-name">'+escHtml(f.name)+'</div><div class="media-item-meta">'+fmtBytes(f.size)+' \u00b7 '+fmtTime(f.modified)+' <span class="media-item-badge">'+f.ext.slice(1).toUpperCase()+'</span></div></div><div class="media-item-actions"><button class="media-item-btn play" data-name="'+escAttr(f.name)+'" onclick="playAudio(\''+escAttr(f.name).replace(/\\/g,'\\\\')+'\')" title="\u64ad\u653e">\u25b6</button><button class="media-item-del" onclick="askDelete(\'boombox\',\''+escAttr(f.name).replace(/\\/g,'\\\\')+'\')" title="\u5220\u9664">\u2715</button></div></div>';
+  }).join('');
+}
+function loadBoombox(){
+  fetch('/api/media/boombox/list').then(function(r){return r.json();}).then(function(d){
+    renderBoombox(d.files||[]);
+    document.getElementById('boombox-count').textContent=(d.files||[]).length+' \u4e2a';
+    document.getElementById('boombox-size').textContent=fmtBytes(d.total_size||0);
+    if(d.disk){document.getElementById('boombox-disk').textContent=fmtBytes(d.disk.used)+' / '+fmtBytes(d.disk.total);var bar=document.getElementById('boombox-disk-bar');if(bar){bar.style.width=d.disk.percent+'%';}}
+  }).catch(function(){});
+}
+
+// Lightshow
+function uploadLightshow(files){if(!files.length)return;var fd=new FormData();fd.append('file',files[0]);uploadWithProgress('/api/media/lightshow/upload',fd,'lightshow',loadLightshow);document.getElementById('lightshow-upload').value='';}
+function renderLightshow(files){
+  var el=document.getElementById('lightshow-list');
+  if(!files.length){el.innerHTML='<div class="empty"><div class="empty-icon">\u26a1</div><div class="empty-text">\u6682\u65e0\u706f\u5149\u79c0\u6587\u4ef6\uff0c\u4e0a\u4f20 ZIP \u5305\u5f00\u59cb\u4f7f\u7528</div></div>';return;}
+  el.innerHTML=files.map(function(f){
+    var icon=f.type==='\u5e8f\u5217'?'\u{1f4cb}':'\u{1f3b5}';
+    return '<div class="media-item"><div class="media-item-icon">'+icon+'</div><div class="media-item-info"><div class="media-item-name">'+escHtml(f.name)+'<span class="media-item-badge">'+f.type+'</span></div><div class="media-item-meta">'+fmtBytes(f.size)+' \u00b7 '+fmtTime(f.modified)+'</div></div><button class="media-item-del" onclick="askDelete(\'lightshow\',\''+escAttr(f.name).replace(/\\/g,'\\\\')+'\')" title="\u5220\u9664">\u2715</button></div>';
+  }).join('');
+}
+function loadLightshow(){
+  fetch('/api/media/lightshow/list').then(function(r){return r.json();}).then(function(d){
+    renderLightshow(d.files||[]);
+    document.getElementById('lightshow-count').textContent=(d.files||[]).length+' \u4e2a';
+    document.getElementById('lightshow-size').textContent=fmtBytes(d.total_size||0);
+    if(d.disk){document.getElementById('lightshow-disk').textContent=fmtBytes(d.disk.used)+' / '+fmtBytes(d.disk.total);var bar=document.getElementById('lightshow-disk-bar');if(bar){bar.style.width=d.disk.percent+'%';}}
+  }).catch(function(){});
+}
+
+// Wraps
+function uploadWraps(files){if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('files',files[i]);uploadWithProgress('/api/media/wraps/upload',fd,'wraps',loadWraps);document.getElementById('wraps-upload').value='';}
+function renderWraps(files){
+  var el=document.getElementById('wraps-list');
+  if(!files.length){el.innerHTML='<div class="empty"><div class="empty-icon">\u{1f3a8}</div><div class="empty-text">\u6682\u65e0\u8d34\u7eb8\uff0c\u4e0a\u4f20 PNG \u56fe\u7247\u6dfb\u52a0</div></div>';return;}
+  el.innerHTML=files.map(function(f){
+    return '<div class="wrap-card"><button class="wrap-del" onclick="askDelete(\'wraps\',\''+escAttr(f.name).replace(/\\/g,'\\\\')+'\')" title="\u5220\u9664">\u2715</button><img class="wrap-thumb" src="/api/media/wraps/preview/'+encodeURIComponent(f.name)+'" alt="'+escAttr(f.name)+'" loading="lazy"><div class="wrap-name" title="'+escAttr(f.name)+'">'+escHtml(f.name)+'</div><div class="wrap-meta">'+f.width+'\u00d7'+f.height+' \u00b7 '+fmtBytes(f.size)+'</div></div>';
+  }).join('');
+}
+function loadWraps(){
+  fetch('/api/media/wraps/list').then(function(r){return r.json();}).then(function(d){
+    renderWraps(d.files||[]);
+    document.getElementById('wraps-count').textContent=(d.files||[]).length+' \u4e2a';
+    document.getElementById('wraps-size').textContent=fmtBytes(d.total_size||0);
+  }).catch(function(){});
+}
+
+// Music
+function uploadMusic(files){if(!files.length)return;var fd=new FormData();for(var i=0;i<files.length;i++)fd.append('files',files[i]);uploadWithProgress('/api/media/music/upload',fd,'music',loadMusic);document.getElementById('music-upload').value='';}
+function renderMusic(files){
+  var el=document.getElementById('music-list');
+  if(!files.length){el.innerHTML='<div class="empty"><div class="empty-icon">&#x1f3b5;</div><div class="empty-text">\u6682\u65e0\u97f3\u4e50\u6587\u4ef6\uff0c\u70b9\u51fb\u4e0a\u65b9\u6309\u94ae\u4e0a\u4f20</div></div>';return;}
+  el.innerHTML=files.map(function(f){
+    var icon=f.ext==='.flac'?'\u{1f3bb}':f.ext==='.wav'?'\u{1f3a4}':'\u{1f3b5}';
+    return '<div class="media-item"><div class="media-item-icon">'+icon+'</div><div class="media-item-info"><div class="media-item-name">'+escHtml(f.name)+'</div><div class="media-item-meta">'+fmtBytes(f.size)+' \u00b7 '+fmtTime(f.modified)+' <span class="media-item-badge">'+f.ext.slice(1).toUpperCase()+'</span></div></div><div class="media-item-actions"><button class="media-item-btn play" data-name="'+escAttr(f.name)+'" data-type="music" onclick="playMusic(\''+escAttr(f.name).replace(/\\/g,'\\\\')+'\')" title="\u64ad\u653e">&#x25b6;</button><button class="media-item-del" onclick="askDelete(\'music\',\''+escAttr(f.name).replace(/\\/g,'\\\\')+'\')" title="\u5220\u9664">&#x2715;</button></div></div>';
+  }).join('');
+}
+function playMusic(name){
+  if(currentPlaying===name&&!audio.paused){audio.pause();syncPlayBtn();return;}
+  currentPlaying=name;
+  audio.src='/api/media/music/play/'+encodeURIComponent(name);
+  audio.play();
+  document.getElementById('audio-player').style.display='block';
+  document.getElementById('now-playing').textContent=name;
+  syncPlayBtn();
+}
+function loadMusic(){
+  fetch('/api/media/music/list').then(function(r){return r.json();}).then(function(d){
+    renderMusic(d.files||[]);
+    document.getElementById('music-count').textContent=(d.files||[]).length+' \u4e2a';
+    document.getElementById('music-size').textContent=fmtBytes(d.total_size||0);
+    if(d.disk){document.getElementById('music-disk').textContent=fmtBytes(d.disk.used)+' / '+fmtBytes(d.disk.total);var bar=document.getElementById('music-disk-bar');if(bar){bar.style.width=d.disk.percent+'%';}}
+  }).catch(function(){});
+}
+
+// Init
+function loadTab(tab){if(tab==='boombox')loadBoombox();else if(tab==='lightshow')loadLightshow();else if(tab==='wraps')loadWraps();else if(tab==='music')loadMusic();}
+loadBoombox();loadLightshow();loadWraps();loadMusic();
+</script>
+
+</body>
+</html>

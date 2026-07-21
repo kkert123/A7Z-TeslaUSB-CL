@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %} · 灯光秀{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>✨ 灯光秀管理</h2>
+  <span style="font-size:var(--text-xs);color:var(--text-muted)">
+    Tesla 灯光秀 (.fseq + .mp3/.wav)
+  </span>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📤 上传灯光秀</h3>
+  <div style="display:flex;gap:12px;flex-wrap:wrap">
+    <form method="POST" action="/lightshow/upload" enctype="multipart/form-data"
+          style="display:flex;gap:8px;align-items:center;flex:1;min-width:250px">
+      <input type="file" name="file" accept=".fseq,.mp3,.wav" required
+             style="flex:1;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <button type="submit" class="btn btn-sm">⬆ 单个文件</button>
+    </form>
+    <form method="POST" action="/lightshow/upload/zip" enctype="multipart/form-data"
+          style="display:flex;gap:8px;align-items:center;flex:1;min-width:250px">
+      <input type="file" name="zipfile" accept=".zip" required
+             style="flex:1;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <button type="submit" class="btn btn-sm">📦 ZIP 导入</button>
+    </form>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">💡 现有灯光秀 ({{ shows|length }})</h3>
+  {% if shows %}
+  {% for s in shows %}
+  <div style="padding:var(--s2) 0;border-bottom:1px solid var(--border)">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <strong style="font-size:var(--text-sm)">{{ s.name }}</strong>
+      <span style="font-size:var(--text-xs);color:var(--text-muted)">
+        {{ s.files|length }} 个文件 · {{ '%.0f'|format(s.total_size/1024) if s.total_size < 1048576 else '%.1f'|format(s.total_size/1048576) + 'MB' }} KB
+      </span>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
+      {% for f in s.files %}
+      <span style="font-size:var(--text-xs);background:var(--bg-primary);padding:2px 6px;border-radius:4px;border:1px solid var(--border)">
+        {{ f.filename }}
+        {% if f.ext in ['.mp3','.wav'] %}
+        <a href="#" onclick="previewAudio('/api/lightshow/preview/{{ f.filename }}');return false" 
+           style="margin-left:4px;text-decoration:none" title="试听">▶</a>
+        {% endif %}
+      </span>
+      {% endfor %}
+    </div>
+    <div style="margin-top:6px">
+      <form method="POST" action="/lightshow/delete/{{ s.name }}"
+            onsubmit="return confirm('确认删除灯光秀 {{ s.name }} 的所有文件？')" style="margin:0">
+        <button type="submit" class="btn btn-sm btn-danger" style="font-size:var(--text-xs)">🗑 删除</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div style="text-align:center;padding:var(--s5);color:var(--text-muted)">
+    📭 暂无灯光秀 — 上传 .fseq 和同名的 .mp3/.wav 文件，或导入 ZIP
+  </div>
+  {% endif %}
+</div>
+
+<audio id="audio-player" controls style="display:none;width:100%;margin-top:var(--s2)"></audio>
+{% endblock %}
+
+<style>
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{opacity:0.85}
+</style>
+
+<script>
+function previewAudio(url) {
+  var a = document.getElementById('audio-player');
+  a.src = url; a.style.display = 'block'; a.play();
+}
+</script>

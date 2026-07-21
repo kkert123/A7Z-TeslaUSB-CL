@@ -1,0 +1,10 @@
+[Unit]
+Description=TeslaUSB Video Sync (oneshot)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/radxa_data/tesla_sync.sh
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal

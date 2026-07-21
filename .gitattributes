@@ -1,0 +1,25 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python: force LF
+*.py text eol=lf
+
+# Shell scripts: force LF (critical for Linux deploy)
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+
+# Web: force LF
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+
+# Proto/JSON/Config: force LF
+*.proto text eol=lf
+*.json text eol=lf
+*.svg text eol=lf
+
+# Binary
+*.jpg binary
+*.png binary
+*.gif binary

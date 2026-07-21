@@ -1,0 +1,443 @@
+{% extends "base.html" %}
+{% block title %} — 实时日志{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>📋 实时日志</h2>
+  <div class="btn-group">
+    <span class="badge badge-info" id="log-count">0 行</span>
+    <select id="log-source" style="padding:4px 8px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);font-size:var(--text-xs);font-family:var(--font)">
+      <option value="">全部日志</option>
+      <option value="teslausb-web">TeslaUSB Web</option>
+      <option value="kernel">内核 (Kernel)</option>
+      <option value="systemd">systemd</option>
+      <option value="cron">Cron</option>
+      <option value="smbd">Samba</option>
+      <optgroup label="── 文件日志 ──">
+        <option value="file:bg_preview">bg_preview 后台预览</option>
+        <option value="file:sentry">sentry 哨兵监听</option>
+        <option value="file:wifi">wifi WiFi 管理</option>
+        <option value="file:web_log">web_log 应用日志</option>
+        <option value="file:boot">boot 启动通知</option>
+        <option value="file:notify">notify 推送重试</option>
+      </optgroup>
+    </select>
+    <input type="text" id="log-search" placeholder="搜索..." oninput="applyFilter()"
+      style="padding:4px 10px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);font-size:var(--text-xs);width:140px;font-family:var(--font)">
+    <button id="btn-pause" onclick="togglePause()" class="btn btn-ghost btn-sm">⏸ 暂停</button>
+    <button onclick="clearLog()" class="btn btn-ghost btn-sm">🗑 清屏</button>
+    <span class="toolbar-sep">|</span>
+    <select id="history-date" onchange="onDateChange()"
+      style="padding:4px 8px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);font-size:var(--text-xs);font-family:var(--font)">
+      <option value="">📅 选择日期...</option>
+    </select>
+    <button id="btn-load-history" onclick="loadHistory()" class="btn btn-ghost btn-sm" disabled>📥 加载</button>
+    <button id="btn-back-live" onclick="backToLive()" class="btn btn-ghost btn-sm" style="display:none">🔴 回到实时</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--text-secondary);cursor:pointer;">
+      <input type="checkbox" id="auto-scroll" checked> 自动滚动
+    </label>
+    <button id="btn-download" onclick="downloadLog()" class="btn btn-ghost btn-sm" style="display:none" title="下载当前日志">⬇</button>
+    <button id="btn-clear" onclick="clearLogFile()" class="btn btn-ghost btn-sm" style="display:none;color:var(--danger)" title="清空日志文件">🗑</button>
+  </div>
+  <div id="log-sizes" style="font-size:var(--text-xs);color:var(--text-muted);padding:2px 0 4px 0;border-bottom:1px solid var(--border)">日志大小加载中...</div>
+</div>
+<div id="log-box" class="log-box">
+  <div id="log-status" class="log-status"></div>
+  <div id="log-content"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let paused = false, source = null, logLines = [];
+let lineCount = 0, historyMode = false;
+
+// ── 日期列表构建（最近 7 天） ──
+(function initDates(){
+  const sel = document.getElementById('history-date');
+  const today = new Date();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const iso = d.toISOString().slice(0, 10);
+    const label = iso + (i === 0 ? ' (今天)' : i === 1 ? ' (昨天)' : '');
+    const opt = document.createElement('option');
+    opt.value = iso;
+    opt.textContent = label;
+    sel.appendChild(opt);
+  }
+})();
+
+function onDateChange() {
+  const val = document.getElementById('history-date').value;
+  document.getElementById('btn-load-history').disabled = !val;
+}
+
+function showStatus(msg, type) {
+  const el = document.getElementById('log-status');
+  el.textContent = msg;
+  el.className = 'log-status log-status-' + (type || 'info');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+async function loadHistory() {
+  const sel = document.getElementById('history-date');
+  const date = sel.value;
+  if (!date) return;
+
+  // 暂停 SSE、隐藏按钮
+  if (source) { source.close(); source = null; }
+  paused = true;
+  document.getElementById('btn-pause').textContent = '▶ 继续';
+  document.getElementById('btn-load-history').disabled = true;
+  document.getElementById('btn-back-live').style.display = '';
+  document.getElementById('history-date').disabled = true;
+  historyMode = true;
+  clearLog();
+
+  const val = document.getElementById('log-source').value;
+  if (val.startsWith('file:')) {
+    showStatus('文件日志暂不支持历史查询，请使用实时流', 'warn');
+    return;
+  }
+  const unit = val;
+  const limit = 1000;
+  let url = `/api/logs/history?date=${encodeURIComponent(date)}&limit=${limit}`;
+  if (unit) url += '&unit=' + encodeURIComponent(unit);
+
+  showStatus(`正在加载 ${date} 的日志...`, 'info');
+
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.error) {
+      showStatus('错误: ' + data.error, 'error');
+      appendLine('', '⚠ ' + data.error);
+      document.getElementById('btn-load-history').disabled = false;
+      document.getElementById('btn-load-history').textContent = '🔄 重新加载';
+    } else if (data.count === 0) {
+      showStatus(date + ' — 无日志记录', 'info');
+      appendLine('', '-- ' + date + ' 没有匹配的日志记录 --');
+      document.getElementById('btn-load-history').disabled = false;
+      document.getElementById('btn-load-history').textContent = '🔄 重新加载';
+    } else {
+      const lines = data.lines;
+      // 分批渲染避免 9833 行一次性插入导致浏览器卡死
+      let ri = 0;
+      const BATCH = 200;
+      function renderChunk() {
+        const end = Math.min(ri + BATCH, lines.length);
+        for (; ri < end; ri++) {
+          appendLine(lines[ri], '');
+        }
+        if (ri < lines.length) {
+          setTimeout(renderChunk, 10);
+        } else {
+          const total = data.total || data.count;
+          const extra = data.has_more ? ' (显示 ' + data.count + ' / ' + total + ' 条)' : '';
+          showStatus(date + ' — 共 ' + total + ' 条日志' + extra, 'success');
+          document.getElementById('btn-load-history').disabled = false;
+          if (historyMode) {
+            document.getElementById('btn-load-history').textContent = '🔄 重新加载';
+          }
+        }
+      }
+      renderChunk();
+      return;
+    }
+  } catch (err) {
+    showStatus('加载失败: ' + err.message, 'error');
+    appendLine('', '⚠ 加载历史日志失败: ' + err.message);
+    document.getElementById('btn-load-history').disabled = false;
+    if (historyMode) {
+      document.getElementById('btn-load-history').textContent = '🔄 重新加载';
+    }
+  }
+}
+
+function backToLive() {
+  historyMode = false;
+  paused = false;
+  document.getElementById('btn-pause').textContent = '⏸ 暂停';
+  document.getElementById('btn-back-live').style.display = 'none';
+  document.getElementById('history-date').disabled = false;
+  document.getElementById('btn-load-history').disabled = false;
+  document.getElementById('btn-load-history').textContent = '📥 加载';
+  clearLog();
+  startStream();
+}
+
+function startStream(){
+  if (source) { source.close(); source = null; }
+  if (historyMode) return;
+
+  const val = document.getElementById('log-source').value;
+  let url;
+  if (val.startsWith('file:')) {
+    const fname = val.substring(5);
+    url = '/api/logs/file-stream?name=' + encodeURIComponent(fname);
+  } else {
+    url = '/api/logs/stream';
+    if (val) url += '?unit=' + encodeURIComponent(val);
+  }
+
+  source = new EventSource(url);
+  source.onmessage = function(e){
+    if (paused) return;
+    try {
+      const data = JSON.parse(e.data);
+      const text = typeof data === 'string' ? data : (data.text || data.line || JSON.stringify(data));
+      appendLine(text, data.timestamp || '');
+    } catch(ex) {
+      appendLine(String(e.data), '');
+    }
+  };
+  source.onerror = function(){
+    appendLine('', '⚠ 连接断开，5秒后重连...');
+    source.close();
+    setTimeout(startStream, 5000);
+  };
+}
+
+// ── 日志大小摘要 ──
+async function loadLogSizes() {
+  const el = document.getElementById('log-sizes');
+  try {
+    const resp = await fetch('/api/logs/sizes');
+    const data = await resp.json();
+    let html = '';
+    for (const [name, info] of Object.entries(data)) {
+      const cls = info.size > 5 * 1024 * 1024 ? 'style="color:var(--danger)"' : '';
+      html += '<span ' + cls + '>' + name + ': ' + info.size_fmt + '</span> &nbsp; ';
+    }
+    el.innerHTML = html || '无日志文件';
+  } catch(e) {
+    el.textContent = '加载失败';
+  }
+}
+
+// 显示/隐藏文件操作按钮
+function onSourceChange() {
+  const val = document.getElementById('log-source').value;
+  const isFile = val.startsWith('file:');
+  document.getElementById('btn-download').style.display = isFile ? '' : 'none';
+  document.getElementById('btn-clear').style.display = isFile ? '' : 'none';
+  restartStream();
+}
+
+function downloadLog() {
+  const val = document.getElementById('log-source').value;
+  if (!val.startsWith('file:')) return;
+  const name = val.substring(5);
+  window.open('/api/logs/download?name=' + encodeURIComponent(name), '_blank');
+}
+
+async function clearLogFile() {
+  const val = document.getElementById('log-source').value;
+  if (!val.startsWith('file:')) return;
+  const name = val.substring(5);
+  if (!confirm('确定清空 ' + name + ' 日志文件？此操作不可撤销。')) return;
+  try {
+    const resp = await fetch('/api/logs/clear?name=' + encodeURIComponent(name), {method:'POST'});
+    const data = await resp.json();
+    showStatus(data.message || data.error, data.error ? 'error' : 'success');
+    if (data.success) { clearLog(); loadLogSizes(); }
+  } catch(e) {
+    showStatus('清除失败: ' + e.message, 'error');
+  }
+}
+
+// 页面加载
+loadLogSizes();
+// 替换 onchange 绑定
+document.getElementById('log-source').onchange = onSourceChange;
+
+function appendLine(text, ts) {
+  if (ts === '⚠ 连接断开，5秒后重连...') {
+    const c = document.getElementById('log-content');
+    const d = document.createElement('div');
+    d.className = 'log-line log-warn';
+    d.textContent = ts;
+    d.style.paddingLeft = '0';
+    c.appendChild(d);
+    updateCount();
+    scrollIfNeeded();
+    return;
+  }
+
+  const searchTerm = document.getElementById('log-search').value.toLowerCase();
+  lineCount++;
+
+  // 解析日志格式: 2026-05-16T10:30:45+0800 hostname process[pid]: message
+  let displayTs = ts, displayMsg = text;
+  if (!ts && text) {
+    // 尝试从文本中提取 ISO 时间戳
+    const m = text.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})\s/);
+    if (m) {
+      try {
+        const d = new Date(m[1]);
+        displayTs = d.toLocaleTimeString('zh-CN', { hour12: false });
+        displayMsg = text.substring(m[0].length);
+      } catch(e) { displayTs = ''; displayMsg = text; }
+    }
+  }
+
+  const c = document.getElementById('log-content');
+  const d = document.createElement('div');
+  d.className = 'log-line';
+  d.dataset.raw = (displayMsg || '').toLowerCase();
+
+  // 着色
+  if (/error|fail|fatal|critical|err/i.test(displayMsg)) d.classList.add('log-error');
+  else if (/warn|warning/i.test(displayMsg)) d.classList.add('log-warn');
+  else if (/success|ok|done|started|active|restart/i.test(displayMsg)) d.classList.add('log-success');
+
+  // 时间戳
+  if (displayTs) {
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'log-ts';
+    tsSpan.textContent = displayTs;
+    d.appendChild(tsSpan);
+  }
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'log-msg';
+  msgSpan.textContent = displayMsg;
+
+  // 搜索高亮
+  if (searchTerm && displayMsg.toLowerCase().includes(searchTerm)) {
+    d.classList.add('log-highlight');
+    // 简单高亮：按匹配词拆分
+    const re = new RegExp('(' + searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    msgSpan.innerHTML = displayMsg.replace(re, '<mark>$1</mark>');
+  }
+
+  d.appendChild(msgSpan);
+  c.appendChild(d);
+
+  // 限制行数
+  while (c.children.length > 5000) c.removeChild(c.firstChild);
+
+  // 搜索过滤
+  if (searchTerm && !displayMsg.toLowerCase().includes(searchTerm)) {
+    d.style.display = 'none';
+  }
+
+  updateCount();
+  scrollIfNeeded();
+}
+
+function scrollIfNeeded() {
+  if (document.getElementById('auto-scroll').checked) {
+    const b = document.getElementById('log-box');
+    b.scrollTop = b.scrollHeight;
+  }
+}
+
+function updateCount() {
+  const el = document.getElementById('log-count');
+  if (el) {
+    const visible = document.querySelectorAll('#log-content .log-line:not([style*="display: none"])').length;
+    el.textContent = visible + ' 行';
+    el.className = 'badge badge-info';
+  }
+}
+
+function applyFilter() {
+  const searchTerm = document.getElementById('log-search').value.toLowerCase();
+  const lines = document.querySelectorAll('#log-content .log-line');
+  lines.forEach(d => {
+    if (!d.dataset.raw) { d.style.display = ''; return; }
+    d.style.display = (searchTerm && !d.dataset.raw.includes(searchTerm)) ? 'none' : '';
+    // 重新高亮
+    const msgSpan = d.querySelector('.log-msg');
+    if (msgSpan) {
+      const raw = d.dataset.raw;
+      if (searchTerm && raw.includes(searchTerm)) {
+        const re = new RegExp('(' + searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+        msgSpan.innerHTML = raw.replace(re, '<mark>$1</mark>');
+        d.classList.add('log-highlight');
+      } else {
+        msgSpan.textContent = raw;
+        d.classList.remove('log-highlight');
+      }
+    }
+  });
+  updateCount();
+}
+
+function togglePause() {
+  paused = !paused;
+  document.getElementById('btn-pause').textContent = paused ? '▶ 继续' : '⏸ 暂停';
+}
+
+function clearLog() {
+  document.getElementById('log-content').innerHTML = '';
+  document.getElementById('log-status').style.display = 'none';
+  lineCount = 0;
+  updateCount();
+}
+
+function restartStream() {
+  clearLog();
+  if (historyMode) return;
+  startStream();
+}
+
+startStream();
+</script>
+
+<style>
+.toolbar-sep {
+  color: var(--border);
+  font-size: 16px;
+  padding: 0 4px;
+  user-select: none;
+}
+.log-ts {
+  color: var(--text-muted);
+  margin-right: 10px;
+  font-size: 11px;
+  flex-shrink: 0;
+  min-width: 70px;
+}
+.log-line {
+  display: flex;
+  align-items: baseline;
+}
+.log-msg { word-break: break-all; }
+.log-highlight { background: rgba(245, 158, 11, 0.08); }
+.log-highlight mark {
+  background: rgba(245, 158, 11, 0.35);
+  color: var(--warning);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.log-status {
+  display: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: var(--r-sm);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+.log-status-info { background: rgba(59, 130, 246, 0.12); color: var(--info); }
+.log-status-success { background: rgba(16, 185, 129, 0.12); color: var(--success); }
+.log-status-error { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
+#history-date {
+  max-width: 150px;
+}
+#btn-load-history {
+  min-width: 70px;
+}
+#btn-back-live {
+  min-width: 90px;
+  background: var(--danger);
+  color: white;
+  border-color: var(--danger);
+}
+#btn-back-live:hover {
+  filter: brightness(1.15);
+}
+</style>
+{% endblock %}

@@ -1,0 +1,826 @@
+{% extends "base.html" %}
+{% block title %} · 云归档{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>☁️ 云归档</h2>
+  <span style="font-size:var(--text-xs);color:var(--text-muted)">多平台支持 · 手动同步</span>
+</div>
+
+<!-- ═══ 云服务商选择 ═══ -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s2)">
+    <h3 style="margin:0;font-size:var(--text-base)">🔌 云服务商</h3>
+    <span id="cloudProviderStatus" style="font-size:var(--text-xs);color:var(--text-muted)">未配置</span>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:var(--s3)">
+    <select id="providerSelect" onchange="onProviderChange()"
+            style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <option value="">-- 选择服务商 --</option>
+    </select>
+    <button class="btn btn-sm btn-danger" id="btnDisconnect" onclick="disconnectProvider()" style="display:none">断开</button>
+  </div>
+
+  <!-- OAuth 提供商 (Google/OneDrive/Dropbox) -->
+  <div id="cfg-oauth" class="hidden">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <input type="text" id="oauthClientId" placeholder="Client ID (可选)"
+             style="flex:1;min-width:180px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="password" id="oauthClientSecret" placeholder="Client Secret (可选)"
+             style="flex:1;min-width:180px;max-width:280px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn btn-sm" onclick="startOAuth()">🔑 开始授权</button>
+      <div id="oauthFlow" class="hidden" style="flex:1;min-width:300px">
+        <div style="background:rgba(59,130,246,.1);border:1px solid rgba(59,130,246,.3);border-radius:6px;padding:var(--s2);margin-bottom:4px;font-size:var(--text-xs)">在浏览器打开链接 → 授权 → 粘贴授权码</div>
+        <div id="authUrl" style="background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-family:monospace;font-size:var(--text-xs);word-break:break-all;max-height:48px;overflow-y:auto;margin-bottom:8px"></div>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="authCode" placeholder="粘贴授权码..."
+                 style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+          <button class="btn btn-sm" style="background:var(--success);color:#fff;border-color:var(--success)" onclick="completeOAuth()">✅ 完成</button>
+          <button class="btn btn-sm" onclick="cancelOAuth()">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Token 粘贴模式 (Dropbox) -->
+  <div id="cfg-token" class="hidden">
+    <div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);border-radius:6px;padding:var(--s2);margin-bottom:8px;font-size:var(--text-xs)">
+      在终端执行 <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">rclone authorize "provider"</code>，然后将输出的 Token JSON 粘贴到下方
+    </div>
+    <textarea id="tokenJson" placeholder='粘贴 rclone 输出的 {"access_token":"...","refresh_token":"...",...}'
+              style="width:100%;height:80px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-xs);font-family:monospace;resize:vertical"></textarea>
+    <button class="btn btn-sm" style="background:var(--success);color:#fff;border-color:var(--success);margin-top:8px" onclick="saveTokenConfig()">💾 保存连接</button>
+  </div>
+
+  <!-- S3 Key 表单 -->
+  <div id="cfg-s3" class="hidden">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+      <input type="text" id="s3AccessKey" placeholder="Access Key ID"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="password" id="s3SecretKey" placeholder="Secret Access Key"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="text" id="s3Region" placeholder="Region (如 us-east-1)"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="text" id="s3Bucket" placeholder="Bucket 名称"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="text" id="s3Endpoint" placeholder="Endpoint (MinIO/Wasabi 必填)"
+             style="grid-column:1/-1;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <label style="display:flex;align-items:center;gap:4px;font-size:var(--text-sm);color:var(--text-muted);grid-column:1/-1;margin-top:4px">
+        <input type="checkbox" id="s3V2Auth" style="accent-color:var(--accent)"> 使用 V2 签名 (Signature V2，部分老 S3 兼容需要)
+      </label>
+    </div>
+    <button class="btn btn-sm" style="background:var(--success);color:#fff;border-color:var(--success)" onclick="saveS3Config()">💾 保存连接</button>
+  </div>
+
+  <!-- NAS / 自定义表单 -->
+  <div id="cfg-nas" class="hidden">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+      <input type="text" id="nasHost" placeholder="服务器地址 (host)"
+             style="grid-column:1/-1;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="text" id="nasUser" placeholder="用户名"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="password" id="nasPassword" placeholder="密码"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="text" id="nasPort" placeholder="端口 (默认)"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+      <input type="text" id="nasPath" placeholder="路径 (如 /)"
+             style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+    </div>
+    <button class="btn btn-sm" style="background:var(--success);color:#fff;border-color:var(--success)" onclick="saveNasConfig()">💾 保存连接</button>
+  </div>
+
+  <!-- rclone.conf 粘贴 -->
+  <div id="cfg-custom" class="hidden">
+    <div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);border-radius:6px;padding:var(--s2);margin-bottom:8px;font-size:var(--text-xs)">
+      粘贴完整的 rclone 配置块（包含 <code>[remote_name]</code> 段），A7Z 将直接使用此配置。
+    </div>
+    <textarea id="customConf" placeholder='[myremote]&#10;type = sftp&#10;host = 192.168.1.100&#10;user = admin&#10;pass = xxx'
+              style="width:100%;height:100px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-xs);font-family:monospace;resize:vertical"></textarea>
+    <button class="btn btn-sm" style="background:var(--success);color:#fff;border-color:var(--success);margin-top:8px" onclick="saveCustomConfig()">💾 保存配置</button>
+  </div>
+
+  <div id="providerMsg" style="margin-top:8px"></div>
+</div>
+
+<!-- ═══ 状态 + 同步 ═══ -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📊 系统状态</h3>
+  <div id="statusContent"><div style="color:var(--text-muted)">加载中...</div></div>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📁 云端文件</h3>
+  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span id="cloudBreadcrumb" style="font-size:var(--text-xs);color:var(--text-muted)">/</span>
+  </div>
+  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+    <button class="btn btn-sm" onclick="refreshCloudFiles()">🔄 刷新</button>
+    <button class="btn btn-sm" onclick="navigateCloudUp()" id="btnCloudUp" style="display:none">⬆ 上级</button>
+  </div>
+  <div id="cloudFiles"><div style="color:var(--text-muted)">未授权或未连接</div></div>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📤 同步控制</h3>
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:var(--s2)">
+    <button class="btn btn-sm" style="background:var(--success);color:#fff;border-color:var(--success)" id="btnSyncAll" onclick="triggerFullSync()" disabled>
+      🔄 手动同步
+    </button>
+    <button class="btn btn-sm btn-danger" id="btnCancelSync" onclick="cancelSync()" style="display:none">
+      ⏹ 停止同步
+    </button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:var(--text-sm);cursor:pointer">
+      <input type="checkbox" id="autoSyncToggle" onchange="toggleAutoSync()"> 自动同步
+    </label>
+    <span id="workerStatus" style="font-size:var(--text-xs);color:var(--text-muted)"></span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span style="font-size:var(--text-xs);color:var(--text-muted);white-space:nowrap">带宽限制:</span>
+    <input type="range" id="bwlimitSlider" min="0" max="10000" step="100" value="0" oninput="onBwlimitChange()"
+           style="flex:1;min-width:100px;max-width:200px;height:4px;cursor:pointer">
+    <span id="bwlimitVal" style="font-size:var(--text-xs);min-width:50px">不限</span>
+    <button class="btn btn-sm" onclick="saveBwlimit()" style="font-size:var(--text-xs)">💾 保存</button>
+  </div>
+  <div id="syncResult" style="margin-top:var(--s2)"></div>
+</div>
+
+<!-- ═══ 同步统计 + 历史 ═══ -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📈 同步统计</h3>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s2);margin-bottom:var(--s3)" id="statsGrid">
+    <div class="stat-card"><div class="stat-num" id="statSynced">—</div><div class="stat-label">总同步次数</div></div>
+    <div class="stat-card"><div class="stat-num" id="statFiles">—</div><div class="stat-label">总文件数</div></div>
+    <div class="stat-card"><div class="stat-num" id="statBytes">—</div><div class="stat-label">总数据量</div></div>
+    <div class="stat-card"><div class="stat-num" id="statFailed">—</div><div class="stat-label">失败次数</div></div>
+  </div>
+  <button class="btn btn-sm" onclick="loadSyncHistory()">🔄 刷新历史</button>
+  <div id="syncHistory" style="margin-top:var(--s2);max-height:300px;overflow-y:auto"></div>
+</div>
+
+<!-- ═══ 文件夹选择 + 排序 ═══ -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📁 同步文件夹</h3>
+  <p style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s2)">选择要同步的 TeslaCam 子文件夹，拖拽调整优先级</p>
+  <div id="folderList">
+    <div style="color:var(--text-muted)">加载中...</div>
+  </div>
+  <button class="btn btn-sm" style="margin-top:var(--s2)" onclick="saveFolderConfig()">💾 保存文件夹设置</button>
+  <div id="folderMsg" style="margin-top:8px"></div>
+</div>
+
+<!-- ═══ 上传队列 ═══ -->
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📤 上传队列</h3>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s2);margin-bottom:var(--s3)">
+    <div class="stat-card"><div class="stat-num" id="uq-active" style="color:var(--success)">—</div><div class="stat-label">上传中</div></div>
+    <div class="stat-card"><div class="stat-num" id="uq-pending" style="color:var(--warning)">—</div><div class="stat-label">等待中</div></div>
+    <div class="stat-card"><div class="stat-num" id="uq-completed">—</div><div class="stat-label">已完成</div></div>
+    <div class="stat-card"><div class="stat-num" id="uq-failed" style="color:var(--danger)">—</div><div class="stat-label">失败</div></div>
+  </div>
+  <button class="btn btn-sm" onclick="loadUploadQueue()">🔄 刷新</button>
+  <div id="uploadQueueList" style="margin-top:var(--s2);max-height:300px;overflow-y:auto;font-size:var(--text-xs)"></div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<style>
+.hidden{display:none !important}
+.status-row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:var(--text-sm)}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-dot.ok{background:var(--success)}
+.status-dot.warn{background:var(--warning)}
+.status-dot.err{background:var(--danger)}
+.progress-bar{width:100%;height:6px;background:var(--bg-secondary);border-radius:3px;margin:8px 0;overflow:hidden}
+.progress-fill{height:100%;background:var(--pri);border-radius:3px;transition:width .3s}
+.file-list{max-height:400px;overflow-y:auto;font-size:var(--text-sm)}
+.file-item{display:flex;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)}
+.file-item:hover{background:var(--bg-secondary)}
+.file-name{color:var(--text-primary)}
+.file-size{color:var(--text-muted);font-size:var(--text-xs)}
+.msg{padding:8px 12px;border-radius:6px;margin:8px 0;font-size:var(--text-sm)}
+.msg-info{background:rgba(59,130,246,.1);color:var(--pri)}
+.msg-ok{background:rgba(52,211,153,.1);color:var(--success)}
+.msg-err{background:rgba(239,68,68,.1);color:var(--danger)}
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{opacity:.85}
+.stat-card{background:var(--bg-secondary);border-radius:8px;padding:var(--s3);text-align:center}
+.stat-num{font-size:var(--text-lg);font-weight:700}
+.stat-label{font-size:var(--text-xs);color:var(--text-muted);margin-top:2px}
+.folder-item{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;background:var(--bg-secondary);font-size:var(--text-sm)}
+.folder-item input[type=checkbox]{cursor:pointer;width:16px;height:16px}
+.folder-item .arrows{display:flex;flex-direction:column;gap:2px;margin-left:auto}
+.folder-item .arrows button{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:12px;padding:0 4px}
+.folder-item .arrows button:hover{color:var(--pri)}
+.hist-item{padding:6px 0;border-bottom:1px solid var(--border);font-size:var(--text-xs);display:flex;justify-content:space-between;gap:8px}
+.hist-item .hist-left{flex:1;min-width:0}
+.hist-item .hist-time{color:var(--text-muted)}
+.hist-item .hist-detail{color:var(--text-primary);margin-top:2px}
+.hist-item .hist-status{padding:1px 6px;border-radius:4px;font-size:10px;white-space:nowrap}
+.hist-ok{background:rgba(52,211,153,.15);color:var(--success)}
+.hist-err{background:rgba(239,68,68,.15);color:var(--danger)}
+</style>
+
+<script>
+// 当前选中的 provider
+var curProvider='';
+var _providers={};
+
+async function loadProviders(){
+  try{
+    const r=await fetch('/api/cloud/providers/list');const d=await r.json();
+    if(!d.success)return;
+    _providers=d.providers;
+    var sel=document.getElementById('providerSelect');
+    // 分组
+    var groups={oauth:[],s3:[],nas:[],custom:[]};
+    var cats=[];
+    for(var k in _providers){
+      var p=_providers[k];p.id=k;
+      var t=p.type;
+      if(['drive','onedrive','dropbox'].includes(t)){groups.oauth.push(p);}
+      else if(t==='s3'){groups.s3.push(p);}
+      else if(t==='custom'){groups.custom.push(p);}
+      else{groups.nas.push(p);}
+    }
+    function addGroup(label,items){
+      if(!items.length)return;
+      var g=document.createElement('optgroup');g.label=label;
+      items.forEach(function(p){var o=document.createElement('option');o.value=p.id;o.textContent=p.label+' — '+p.desc;g.appendChild(o);});
+      sel.appendChild(g);
+    }
+    addGroup('☁️ OAuth 云盘',groups.oauth);
+    addGroup('🗄 S3 兼容存储',groups.s3);
+    addGroup('🏠 NAS / 服务器',groups.nas);
+    addGroup('🔧 自定义',groups.custom);
+    
+    // 检测当前已配置的 provider 并预选
+    try{
+      const sr=await fetch('/api/cloud/status');const sd=await sr.json();
+      if(sd.success&&sd.configured_provider&&sd.configured_provider.provider_id){
+        var cpid=sd.configured_provider.provider_id;
+        if(_providers[cpid]){
+          sel.value=cpid;
+          onProviderChange();
+          // 回显 S3/NAS 表单参数
+          var cp=sd.configured_provider;
+          var t=(_providers[cpid]||{}).type||'';
+          if(t==='s3'){
+            // S3 凭证存在 rclone.conf 中，用占位符回显
+            document.getElementById('s3AccessKey').placeholder='已保存 (留空不修改)';
+            document.getElementById('s3SecretKey').placeholder='已保存 (留空不修改)';
+            if(cp.config){
+              if(cp.config.region) document.getElementById('s3Region').value=cp.config.region;
+              if(cp.config.bucket) document.getElementById('s3Bucket').value=cp.config.bucket;
+              if(cp.config.endpoint) document.getElementById('s3Endpoint').value=cp.config.endpoint;
+            }
+          } else if(t==='sftp'||t==='smb'||t==='ftp'||t==='webdav'){
+            if(cp.config){
+              if(cp.config.host) document.getElementById('nasHost').value=cp.config.host;
+              if(cp.config.user) document.getElementById('nasUser').value=cp.config.user;
+              if(cp.config.port) document.getElementById('nasPort').value=cp.config.port;
+              if(cp.config.path) document.getElementById('nasPath').value=cp.config.path;
+              if(cp.config.has_password){
+                document.getElementById('nasPassword').placeholder='已保存 (重新输入以覆盖)';
+              }
+            }
+          }
+        }
+      }
+    }catch(e){}
+  }catch(e){console.error(e);}
+}
+
+function onProviderChange(){
+  curProvider=document.getElementById('providerSelect').value;
+  var p=_providers[curProvider];
+  // 隐藏所有配置区
+  ['oauth','token','s3','nas','custom'].forEach(function(x){document.getElementById('cfg-'+x).classList.add('hidden');});
+  document.getElementById('btnDisconnect').style.display='none';
+  if(!curProvider)return;
+  document.getElementById('btnDisconnect').style.display='inline-block';
+  var t=(p||{}).type||'';
+  if(t==='drive'||t==='onedrive'){document.getElementById('cfg-oauth').classList.remove('hidden');}
+  else if(t==='dropbox'){document.getElementById('cfg-token').classList.remove('hidden');}
+  else if(t==='s3'){document.getElementById('cfg-s3').classList.remove('hidden');}
+  else if(t==='custom'){document.getElementById('cfg-custom').classList.remove('hidden');}
+  else{document.getElementById('cfg-nas').classList.remove('hidden');}
+}
+
+function msg(elId,type,txt){
+  document.getElementById(elId).innerHTML='<div class="msg msg-'+type+'">'+txt+'</div>';
+  if(type==='ok')setTimeout(function(){document.getElementById(elId).innerHTML='';},5000);
+}
+
+// ── OAuth ──
+async function startOAuth(){
+  var cid=document.getElementById('oauthClientId').value.trim();
+  var cse=document.getElementById('oauthClientSecret').value.trim();
+  try{
+    const r=await fetch('/api/cloud/oauth/authorize',{method:'POST'});
+    const d=await r.json();
+    if(d.success){
+      document.getElementById('authUrl').textContent=d.auth_url;
+      document.getElementById('oauthFlow').classList.remove('hidden');
+    }else msg('providerMsg','err',d.message);
+  }catch(e){msg('providerMsg','err','启动失败: '+e.message);}
+}
+function cancelOAuth(){
+  document.getElementById('oauthFlow').classList.add('hidden');
+  document.getElementById('authCode').value='';
+}
+async function completeOAuth(){
+  var code=document.getElementById('authCode').value.trim();
+  if(!code){msg('providerMsg','err','请输入授权码');return;}
+  try{
+    var cid=document.getElementById('oauthClientId').value.trim();
+    var cse=document.getElementById('oauthClientSecret').value.trim();
+    const r=await fetch('/api/cloud/oauth/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code})});
+    const d=await r.json();
+    if(d.success){
+      var cfg={provider_id:curProvider,token_json:d.token_json||'',client_id:cid,client_secret:cse};
+      saveProviderConfig(cfg);
+    }else msg('providerMsg','err',d.message);
+  }catch(e){msg('providerMsg','err','完成失败: '+e.message);}
+}
+
+// ── Token 粘贴 ──
+async function saveTokenConfig(){
+  var tok=document.getElementById('tokenJson').value.trim();
+  if(!tok){msg('providerMsg','err','请粘贴 Token JSON');return;}
+  var cfg={provider_id:curProvider,token_json:tok};
+  saveProviderConfig(cfg);
+}
+
+// ── S3 ──
+async function saveS3Config(){
+  var cfg={
+    provider_id:curProvider,
+    access_key_id:document.getElementById('s3AccessKey').value.trim(),
+    secret_access_key:document.getElementById('s3SecretKey').value.trim(),
+    region:document.getElementById('s3Region').value.trim(),
+    bucket:document.getElementById('s3Bucket').value.trim(),
+    endpoint:document.getElementById('s3Endpoint').value.trim(),
+    v2_auth:document.getElementById('s3V2Auth').checked,
+  };
+  if(!cfg.access_key_id||!cfg.secret_access_key){msg('providerMsg','err','Access Key 和 Secret Key 不能为空');return;}
+  saveProviderConfig(cfg);
+}
+
+// ── NAS ──
+async function saveNasConfig(){
+  var cfg={
+    provider_id:curProvider,
+    host:document.getElementById('nasHost').value.trim(),
+    user:document.getElementById('nasUser').value.trim(),
+    password:document.getElementById('nasPassword').value.trim(),
+    port:document.getElementById('nasPort').value.trim(),
+    path:document.getElementById('nasPath').value.trim()||'/',
+  };
+  if(!cfg.host){msg('providerMsg','err','服务器地址不能为空');return;}
+  // 密码为空时不要发送，避免覆盖已保存的密码
+  if(!cfg.password) delete cfg.password;
+  saveProviderConfig(cfg);
+}
+
+// ── Custom ──
+async function saveCustomConfig(){
+  var conf=document.getElementById('customConf').value.trim();
+  if(!conf){msg('providerMsg','err','请粘贴 rclone 配置');return;}
+  var cfg={provider_id:curProvider,config_block:conf};
+  saveProviderConfig(cfg);
+}
+
+// ── 统一保存 ──
+async function saveProviderConfig(cfg){
+  try{
+    const r=await fetch('/api/cloud/provider/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+    const d=await r.json();
+    msg('providerMsg',d.success?'ok':'err',d.message||d.error);
+    if(d.success){refreshStatus();refreshCloudFiles();}
+  }catch(e){msg('providerMsg','err','保存失败: '+e.message);}
+}
+
+async function disconnectProvider(){
+  if(!confirm('确定断开云服务连接？'))return;
+  try{
+    const r=await fetch('/api/cloud/provider/disconnect',{method:'POST'});
+    const d=await r.json();
+    msg('providerMsg',d.success?'ok':'err',d.message);
+    if(d.success){
+      document.getElementById('providerSelect').value='';
+      curProvider='';
+      ['oauth','token','s3','nas','custom'].forEach(function(x){document.getElementById('cfg-'+x).classList.add('hidden');});
+      document.getElementById('btnDisconnect').style.display='none';
+      refreshStatus();
+    }
+  }catch(e){}
+}
+
+// ── 状态 ──
+async function refreshStatus(fast){
+  // fast=true: 跳过慢速 rclone 调用（about/lsjson），立即返回基本状态
+  var url = fast ? '/api/cloud/status?fast=true' : '/api/cloud/status';
+  try{const r=await fetch(url);const d=await r.json();if(!d.success){showStatusError(d.error);return;}_lastStatus=d;renderStatus(d);}catch(e){showStatusError('获取状态失败');}
+}
+var _lastStatus=null;
+function showStatusError(m){document.getElementById('statusContent').innerHTML='<div class="status-row"><span class="status-dot err"></span>'+m+'</div>';}
+function renderStatus(s){
+  var h='';var dot=function(v){return v?'ok':'err';};
+  h+='<div class="status-row"><span class="status-dot '+dot(s.rclone_installed)+'"></span>rclone: '+(s.rclone_installed?s.rclone_version:'未安装')+'</div>';
+  h+='<div class="status-row"><span class="status-dot '+dot(s.oauth_authorized)+'"></span>OAuth: '+(s.oauth_authorized?'已授权 (剩余 '+formatSec(s.oauth_expires_sec)+')':'未授权')+'</div>';
+  h+='<div class="status-row"><span class="status-dot '+dot(s.remote_configured)+'"></span>远程连接: '+(s.remote_configured?'已配置':'未配置')+'</div>';
+  if(s.remote_usage&&s.remote_usage.total_bytes){h+='<div class="status-row"><span class="status-dot ok"></span>云端空间: 已用 '+s.remote_usage.used_fmt+' / '+s.remote_usage.total_fmt+' ('+s.remote_usage.percent+'%)</div>';h+='<div class="progress-bar"><div class="progress-fill" style="width:'+s.remote_usage.percent+'%"></div></div>';}
+  if(s._fast){h+='<div class=\"status-row\"><span class=\"status-dot\" style=\"background:var(--warning)\"></span>云端详情加载中...</div>';}
+  else{h+='<div class=\"status-row\"><span class=\"status-dot ok\"></span>云端文件数: '+s.files_in_cloud+'</div>';}
+  if(s.last_sync)h+='<div class="status-row"><span class="status-dot ok"></span>上次同步: '+s.last_sync+'</div>';
+  document.getElementById('statusContent').innerHTML=h;
+  // 按钮启用逻辑：OAuth 类型需授权，NAS/S3 类型只需 rclone.conf
+  var cp=s.configured_provider||{};
+  var isOauth=['gdrive','onedrive','dropbox'].includes(cp.provider_id);
+  document.getElementById('btnSyncAll').disabled=!s.remote_configured||(isOauth&&!s.oauth_authorized);
+  // 更新云服务商标题状态
+  var psEl=document.getElementById('cloudProviderStatus');
+  if(psEl){
+    if(cp.provider_id){
+      var stOk=s.remote_configured?'ok':'err';
+      var stLabel = s.remote_configured ? (cp.provider_label || cp.provider_id) : cp.provider_label;
+      psEl.innerHTML='<span class=\"status-dot '+stOk+'\"></span> '+stLabel+' · '+(s.remote_configured?'已连接':'未连接');
+      psEl.style.color='var(--text-secondary)';
+    }else{
+      psEl.innerHTML='未配置';
+      psEl.style.color='var(--text-muted)';
+    }
+  }
+}
+function formatSec(s){if(s<=0)return '已过期';var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return h>0?h+'时'+m+'分':m+'分';}
+
+// ── 云端文件 ──
+var _cloudPath = '';
+
+function navigateCloudTo(subpath){
+  _cloudPath = subpath || '';
+  refreshCloudFiles();
+}
+
+function navigateCloudUp(){
+  if(!_cloudPath) return;
+  var parts = _cloudPath.split('/').filter(Boolean);
+  parts.pop();
+  _cloudPath = parts.join('/');
+  refreshCloudFiles();
+}
+
+function updateBreadcrumb(){
+  var el = document.getElementById('cloudBreadcrumb');
+  if(!el) return;
+  if(!_cloudPath){ el.textContent = '/'; return; }
+  var parts = _cloudPath.split('/').filter(Boolean);
+  var html = '<a href=\"#\" onclick=\"navigateCloudTo(\"\")\" style=\"color:var(--pri);text-decoration:none\">/</a>';
+  var acc = '';
+  parts.forEach(function(p){
+    acc += '/' + p;
+    html += ' <span style=\"color:var(--text-muted)\">/</span> ';
+    html += '<a href=\"#\" onclick=\"navigateCloudTo(\''+acc.slice(1)+'\')\" style=\"color:var(--pri);text-decoration:none\">'+p+'</a>';
+  });
+  el.innerHTML = html;
+  document.getElementById('btnCloudUp').style.display = _cloudPath ? 'inline-block' : 'none';
+}
+
+async function refreshCloudFiles(){
+  var el=document.getElementById('cloudFiles');
+  try{
+    var url = '/api/cloud/files' + (_cloudPath ? '?path=' + encodeURIComponent(_cloudPath) : '');
+    const r=await fetch(url);const d=await r.json();
+    updateBreadcrumb();
+    if(!d.success){el.innerHTML='<div class="msg msg-err">'+(d.error||d.message||'无法获取')+'</div>';return;}
+    var files=d.files||[];
+    if(!files.length){el.innerHTML='<div class="msg msg-info">'+(d.path?'此目录为空':'云端暂无文件')+'</div>';return;}
+    var h='<div class="file-list">';
+    files.forEach(function(f){
+      var icon = f.is_dir ? '📁' : '🎬';
+      var name = f.name;
+      var onclick = '';
+      if(f.is_dir){
+        var subpath = _cloudPath ? _cloudPath + '/' + name : name;
+        onclick = ' onclick=\"navigateCloudTo(\'' + subpath.replace(/'/g, '\\\'') + '\')\"';
+      }
+      h+='<div class="file-item"'+onclick+' style="'+(f.is_dir?'cursor:pointer':'')+'"><span class="file-name">'+icon+' '+name+'</span><span class="file-size">'+f.size_fmt+'</span></div>';
+    });
+    h+='</div>';el.innerHTML=h;
+  }catch(e){el.innerHTML='<div class="msg msg-err">获取文件失败</div>';}
+}
+
+// ── 同步 ──
+var _syncPollTimer=null;
+var _syncRunning=false;
+
+function _stopSyncPoll(){
+  if(_syncPollTimer){clearInterval(_syncPollTimer);_syncPollTimer=null;}
+}
+
+async function _pollSyncProgress(){
+  try{
+    var r=await fetch('/api/cloud/sync/progress');var d=await r.json();
+    if(!d.success)return;
+    var p=Math.max(0,Math.min(100,d.progress||0));  // 限制 0-100 范围
+    if(d.running){
+      // 更新按钮和上传队列
+      var btn=document.getElementById('btnSyncAll');
+      btn.textContent='⏳ '+(p>=0&&p<100?p+'%':'同步中...');
+      btn.disabled=true;
+      document.getElementById('btnCancelSync').style.display='inline-block';
+      // 更新上传队列实时状态（进度条 + 消息）
+      loadUploadQueue();
+    }else{
+      _stopSyncPoll();
+      _syncRunning=false;
+      var btn=document.getElementById('btnSyncAll');
+      btn.disabled=false;btn.textContent='🔄 手动同步';
+      document.getElementById('btnCancelSync').style.display='none';
+      loadSyncHistory();loadUploadQueue();refreshStatus();
+    }
+  }catch(e){}
+}
+
+async function cancelSync(){
+  if(!confirm('确定要停止当前同步吗？已上传的文件不会丢失。'))return;
+  var cancelBtn=document.getElementById('btnCancelSync');
+  cancelBtn.textContent='⏳ 正在取消...';
+  cancelBtn.disabled=true;
+  try{
+    const r=await fetch('/api/cloud/sync/cancel',{method:'POST'});const d=await r.json();
+    if(d.success){
+      msg('syncResult','info','⏳ 取消请求已发送，正在终止同步...');
+      // 保持轮询直到同步真正停止
+      setTimeout(function(){
+        cancelBtn.textContent='⏹ 停止同步';
+        cancelBtn.disabled=false;
+      },3000);
+    }else{
+      msg('syncResult','err',d.message||'取消失败');
+      cancelBtn.textContent='⏹ 停止同步';
+      cancelBtn.disabled=false;
+    }
+  }catch(e){msg('syncResult','err','取消失败: '+e.message);cancelBtn.textContent='⏹ 停止同步';cancelBtn.disabled=false;}
+}
+
+async function triggerFullSync(){
+  var btn=document.getElementById('btnSyncAll');btn.disabled=true;btn.textContent='⏳ 准备中...';
+  var cancelBtn=document.getElementById('btnCancelSync');cancelBtn.style.display='inline-block';
+  document.getElementById('syncResult').innerHTML='';
+  // 重置上传状态
+  document.getElementById('uq-active').textContent='⏳';
+  _syncRunning=true;
+  // 开始轮询
+  _stopSyncPoll();_syncPollTimer=setInterval(_pollSyncProgress,2000);
+  try{
+    const r=await fetch('/api/cloud/sync/trigger',{method:'POST'});const d=await r.json();
+    _stopSyncPoll();
+    btn.disabled=false;btn.textContent='🔄 手动同步';
+    cancelBtn.style.display='none';
+    _syncRunning=false;
+    msg('syncResult',d.success?'ok':'err',d.message||(d.success?'同步完成':'同步失败'));
+    refreshStatus();loadSyncHistory();loadUploadQueue();
+  }catch(e){
+    _stopSyncPoll();
+    msg('syncResult','err','异常: '+e.message);
+    btn.disabled=false;btn.textContent='🔄 手动同步';
+    cancelBtn.style.display='none';
+    _syncRunning=false;
+  }
+}
+
+// ── 自动同步 ──
+async function toggleAutoSync(){
+  var on=document.getElementById('autoSyncToggle').checked;
+  var url=on?'/api/cloud/worker/start':'/api/cloud/worker/stop';
+  try{const r=await fetch(url,{method:'POST'});const d=await r.json();
+    document.getElementById('workerStatus').textContent=d.message||(on?'运行中':'已停止');
+    document.getElementById('workerStatus').style.color=on?'var(--success)':'var(--text-muted)';
+    if(on)saveAutoSyncConfig(true);else saveAutoSyncConfig(false);
+  }catch(e){}
+}
+async function saveAutoSyncConfig(on){
+  await fetch('/api/cloud/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_sync_enabled:on})});
+}
+async function loadWorkerStatus(){
+  try{const r=await fetch('/api/cloud/worker/status');const d=await r.json();
+    document.getElementById('autoSyncToggle').checked=d.running;
+    document.getElementById('workerStatus').textContent=d.running?'运行中':'已停止';
+    document.getElementById('workerStatus').style.color=d.running?'var(--success)':'var(--text-muted)';
+  }catch(e){}
+}
+// ── 带宽限制 ──
+function onBwlimitChange(){
+  var v=parseInt(document.getElementById('bwlimitSlider').value);
+  document.getElementById('bwlimitVal').textContent=v==0?'不限':(v>=1000?(v/1000)+' MB/s':v+' KB/s');
+}
+async function saveBwlimit(){
+  var v=parseInt(document.getElementById('bwlimitSlider').value);
+  try{const r=await fetch('/api/cloud/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bandwidth_limit_kb:v})});const d=await r.json();msg('syncResult',d.success?'ok':'err',d.message||'已保存');}catch(e){}
+}
+// Patch refreshStatus to load bandwidth config too
+var _origRefreshStatus=refreshStatus;
+refreshStatus=function(fast){
+  _origRefreshStatus(fast);
+  loadWorkerStatus();
+  try{
+    fetch('/api/cloud/config').then(function(r){return r.json()}).then(function(d){
+      if(d.success&&d.config){
+        var bw=d.config.bandwidth_limit_kb||0;
+        document.getElementById('bwlimitSlider').value=bw;
+        document.getElementById('bwlimitVal').textContent=bw==0?'不限':(bw>=1000?(bw/1000)+' MB/s':bw+' KB/s');
+      }
+    });
+  }catch(e){}
+};
+
+// ── 文件夹配置 ──
+var _folderOrder=[];
+async function loadFolderConfig(){
+  try{
+    const r=await fetch('/api/cloud/config');const d=await r.json();
+    if(d.success&&d.config){
+      _folderOrder=d.config.sync_order||['SentryClips','SavedClips','ArchivedClips'];
+      var sel=d.config.sync_folders||['SentryClips','SavedClips','ArchivedClips'];
+      renderFolders(sel);
+    }else{renderFolders(['SentryClips','SavedClips','ArchivedClips']);}
+  }catch(e){}
+}
+function renderFolders(sels){
+  var labels={SentryClips:'🛡️ 哨兵事件',SavedClips:'💾 手动保存',ArchivedClips:'📦 存档'};
+  var h='';
+  _folderOrder.forEach(function(name,i){
+    var chk=sels.includes(name)?' checked':'';
+    var up=i>0?'<button onclick=\"moveFolder('+i+',-1)\">▲</button>':'<button style=\"visibility:hidden\">▲</button>';
+    var dn=i<_folderOrder.length-1?'<button onclick=\"moveFolder('+i+',1)\">▼</button>':'<button style=\"visibility:hidden\">▼</button>';
+    h+='<div class="folder-item"><input type="checkbox" id=\"fld-'+name+'\" '+chk+' onchange=\"onFolderChange()\"> '+(labels[name]||name)+'<div class=\"arrows\">'+up+dn+'</div></div>';
+  });
+  document.getElementById('folderList').innerHTML=h;
+}
+function moveFolder(idx,dir){
+  var tmp=_folderOrder[idx];_folderOrder[idx]=_folderOrder[idx+dir];_folderOrder[idx+dir]=tmp;
+  renderFolders(getSelectedFolders());
+  onFolderChange();
+}
+function getSelectedFolders(){
+  return _folderOrder.filter(function(name){return document.getElementById('fld-'+name).checked;});
+}
+function onFolderChange(){document.getElementById('folderMsg').innerHTML='<div class="msg msg-info">已修改 — 点击"保存文件夹设置"生效</div>';}
+async function saveFolderConfig(){
+  var sel=getSelectedFolders();
+  try{
+    const r=await fetch('/api/cloud/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sync_folders:sel,sync_order:_folderOrder})});
+    const d=await r.json();
+    msg('folderMsg',d.success?'ok':'err',d.message||d.error);
+  }catch(e){msg('folderMsg','err','保存失败');}
+}
+
+// ── 同步历史 ──
+async function loadSyncHistory(){
+  try{
+    const r=await fetch('/api/cloud/history');const d=await r.json();
+    if(d.success&&d.stats){
+      document.getElementById('statSynced').textContent=d.stats.total_synced;
+      document.getElementById('statFiles').textContent=d.stats.total_files;
+      document.getElementById('statBytes').textContent=d.stats.total_bytes_fmt;
+      document.getElementById('statFailed').textContent=d.stats.failed;
+      var his=d.history||[];
+      var h='';
+      if(!his.length){h='<div style="color:var(--text-muted);padding:var(--s2);text-align:center">暂无同步记录</div>';}
+      else{
+        his.forEach(function(r){
+          var cls=r.success?'hist-ok':'hist-err';
+          var lbl=r.success?'✅ 成功':'❌ 失败';
+          var time=r.time||'';
+          h+='<div class="hist-item"><div class="hist-left"><div class="hist-time">'+time+'</div><div class="hist-detail">'+(r.message||'')+' · '+((r.files||0)+' 文件')+' · '+((r.duration_sec||0)+'s')+'</div></div><span class="hist-status '+cls+'">'+lbl+'</span></div>';
+        });
+      }
+      document.getElementById('syncHistory').innerHTML=h;
+    }
+  }catch(e){}
+}
+// ── 上传队列（实时同步状态 + 历史摘要）──
+async function loadUploadQueue(){
+  try{
+    // 融合统计 API（云同步 + 哨兵上传）
+    var qr=await fetch('/api/cloud/queue-stats');
+    try{var qd=await qr.json();}catch(e){qd={};}
+    
+    // 同步状态
+    var pr=await fetch('/api/cloud/sync/progress');
+    try{var pd=await pr.json();}catch(e){pd={};}
+    
+    // 历史数据
+    var hr=await fetch('/api/cloud/history');
+    try{var hd=await hr.json();}catch(e){hd={};}
+    
+    // Worker 状态
+    var wr=await fetch('/api/cloud/worker/status');
+    try{var wd=await wr.json();}catch(e){wd={};}
+    
+    var stats={active:0,pending:0,completed:0,failed:0};
+    
+    if(qd.success&&qd.stats){
+      var qs=qd.stats;
+      // 修复百分比显示：active 始终为 0-100 的数字，前端统一加 %
+      if(qs.sync_running){
+        stats.active=(qs.active>=0?qs.active+'%':'⏳');
+      }else{
+        stats.active=0;  // 未运行时显示 "0"
+      }
+      stats.pending=qs.pending;
+      stats.completed=qs.completed;
+      stats.failed=qs.failed;
+    }else{
+      // fallback to old logic
+      if(pd.success&&pd.running){
+        stats.active=pd.progress>=0?pd.progress+'%':'⏳';
+      }else if(wd.running){
+        stats.active='auto';
+      }
+      if(hd.success&&hd.stats){
+        stats.completed=hd.stats.total_files||0;
+        stats.failed=hd.stats.failed||0;
+        stats.pending=hd.stats.pending||0;
+      }
+    }
+    
+    // 显示数字（0 显示为 "0"，非 "—")
+    var fmt=function(v){return (v===0||v===0||v==='0'||v==='0%')?v:(v||'—');};
+    document.getElementById('uq-active').textContent=fmt(stats.active);
+    document.getElementById('uq-pending').textContent=fmt(stats.pending);
+    document.getElementById('uq-completed').textContent=fmt(stats.completed);
+    document.getElementById('uq-failed').textContent=fmt(stats.failed);
+    
+    var el=document.getElementById('uploadQueueList');
+    
+    // 同步进行中 → 显示进度条和百分比
+    if(pd.success&&pd.running){
+      var pct=pd.progress>=0?Math.max(0,Math.min(100,pd.progress)):0;
+      el.innerHTML='<div style="padding:var(--s2)">'
+        +'<div style="font-size:var(--text-sm);color:var(--text-primary);margin-bottom:8px">⏳ '+pd.message+'</div>'
+        +'<div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%"></div></div>'
+        +'<div style="text-align:right;font-size:var(--text-xs);color:var(--text-muted);margin-top:4px">'+pct+'%</div>'
+        +'</div>';
+      return;
+    }
+    
+    // Worker 运行中（自动同步）
+    if(wd.running){
+      el.innerHTML='<div style="padding:var(--s2);text-align:center;color:var(--text-muted)">🔄 自动同步运行中 — 逐个文件夹上传</div>';
+      return;
+    }
+    
+    // 空闲状态：显示最近历史
+    var his=hd.history||[];
+    if(!his.length){
+      el.innerHTML='<div style="color:var(--text-muted);text-align:center;padding:var(--s2)">暂无上传记录</div>';
+    }else{
+      var recent=his.slice(0,5);
+      var h='';
+      recent.forEach(function(r){
+        var lbl=r.success?'✅':'❌';
+        var time=r.time||'';
+        h+='<div class="hist-item"><div class="hist-left"><div class="hist-time">'+time+'</div><div class="hist-detail">'+lbl+' '+(r.message||'')+' · '+((r.files||0)+' 文件')+' · '+((r.duration_sec||0)+'s')+'</div></div></div>';
+      });
+      el.innerHTML=h;
+    }
+  }catch(e){}
+}
+
+// ── 页面刷新时恢复同步状态 ──
+async function checkRunningSyncOnLoad(){
+  try{
+    const r=await fetch('/api/cloud/sync/progress');const d=await r.json();
+    if(d.success&&d.running){
+      // 有正在运行的同步，显示停止按钮并开始轮询
+      var p=Math.max(0,Math.min(100,d.progress||0));
+      document.getElementById('btnSyncAll').disabled=true;
+      document.getElementById('btnSyncAll').textContent='⏳ '+(p>=0?p+'%':'同步中...');
+      document.getElementById('btnCancelSync').style.display='inline-block';
+      _syncRunning=true;
+      _stopSyncPoll();_syncPollTimer=setInterval(_pollSyncProgress,2000);
+    }
+  }catch(e){}
+}
+
+// ═══ 页面初始化（放在所有函数定义和 patch 之后）═══
+// 步骤1: 快速API并行加载（无需 rclone，瞬间完成）
+loadProviders();           // ~0.1s — 服务商列表
+loadFolderConfig();        // ~0.1s — 文件夹配置
+loadSyncHistory();         // ~0.1s — 同步历史
+loadUploadQueue();         // ~0.1s — 上传队列
+checkRunningSyncOnLoad();  // 检查是否有正在运行的同步
+// 步骤2: 状态快速检查（跳过 rclone about/lsjson，瞬间返回基本状态）
+refreshStatus(true);       // fast=true — 仅检查 rclone/config，不调用 S3
+// 步骤3: 异步加载慢速 rclone 数据和云端文件列表
+setTimeout(function(){
+  refreshStatus();          // 完整状态（含 about/lsjson）
+  refreshCloudFiles();      // 云端文件列表
+}, 500);
+</script>
+{% endblock %}

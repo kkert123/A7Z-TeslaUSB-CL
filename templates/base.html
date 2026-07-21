@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeslaUSB CL{% block title %}{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="/">
+      <svg class="nav-logo" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 17h14M5 17a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1l2-3h8l2 3h1a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2M5 17l-1 2M19 17l1 2M9 14h6M9 14a3 3 0 1 1-3-3M15 14a3 3 0 1 0 3-3"/>
+      </svg>
+      <span>TeslaUSB</span>
+    </a>
+
+    <!-- 桌面导航 -->
+    <ul class="nav-menu" id="navMenu">
+      <li><a href="/" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" data-page="dashboard">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span>仪表盘</span>
+      </a></li>
+      <li><a href="/sentry" class="nav-link {% if request.path == '/sentry' %}active{% endif %}" data-page="sentry">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>哨兵</span>
+      </a></li>
+      <li><a href="/videos" class="nav-link {% if request.path == '/videos' %}active{% endif %}" data-page="videos">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+        <span>视频</span>
+      </a></li>
+      <li><a href="/recent-clips" class="nav-link {% if request.path == '/recent-clips' %}active{% endif %}" data-page="recent-clips">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span>车外</span>
+      </a></li>
+      <li><a href="/wifi" class="nav-link {% if request.endpoint == 'wifi_page' %}active{% endif %}" data-page="wifi">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+        <span>WiFi</span>
+      </a></li>
+      <li><a href="/media" class="nav-link {% if request.path == '/media' %}active{% endif %}" data-page="media">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>
+        <span>媒体</span>
+      </a></li>
+      <li><a href="/cloud" class="nav-link {% if request.path == '/cloud' %}active{% endif %}" data-page="cloud">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+        <span>云归档</span>
+      </a></li>
+      <li><a href="/logs" class="nav-link {% if request.endpoint == 'logs_page' %}active{% endif %}" data-page="logs">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span>日志</span>
+      </a></li>
+      <li><a href="/system" class="nav-link {% if request.endpoint == 'system_page' %}active{% endif %}" data-page="system">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>系统</span>
+      </a></li>
+      <li><a href="/analytics" class="nav-link {% if request.path == '/analytics' %}active{% endif %}" data-page="analytics">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        <span>统计</span>
+      </a></li>
+    </ul>
+
+    <div class="nav-actions">
+      <button class="mode-btn" id="modeBtn" onclick="toggleMode()" aria-label="切换 Present/Edit 模式">
+        <svg class="icon-present" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><circle cx="12" cy="14" r="2"/></svg>
+        <svg class="icon-edit" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        <span id="modeText">Present</span>
+      </button>
+      <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" aria-label="切换主题">
+        <svg class="icon-sun" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <button class="menu-btn" id="menuBtn" aria-label="菜单">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- 移动端遮罩 + 抽屉（动态生成，脱离 nav 容器） -->
+<div class="mobile-drawer-overlay" id="mOverlay"></div>
+<div class="mobile-drawer" id="mDrawer"></div>
+
+<!-- Flash 消息 -->
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+  <div class="toast toast-{{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+<!-- 主内容区 -->
+<main class="main">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  <span>TeslaUSB CL &copy; 2026</span>
+  <span class="footer-sep">·</span>
+  <span id="footerTime"></span>
+</footer>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+// ── 移动端导航 ──
+(function() {
+  var drawer = document.getElementById('mDrawer');
+  var overlay = document.getElementById('mOverlay');
+  var menuBtn = document.getElementById('menuBtn');
+  var srcMenu = document.getElementById('navMenu');
+
+  function closeDrawer() {
+    drawer.classList.remove('open');
+    overlay.classList.remove('show');
+    menuBtn.classList.remove('active');
+  }
+  function openDrawer() {
+    drawer.classList.add('open');
+    overlay.classList.add('show');
+    menuBtn.classList.add('active');
+  }
+
+  // 从桌面菜单克隆导航链接
+  var links = srcMenu.querySelectorAll('.nav-link');
+  links.forEach(function(a) {
+    var clone = a.cloneNode(true);
+    clone.addEventListener('click', function(e) {
+      closeDrawer();
+    });
+    drawer.appendChild(clone);
+  });
+
+  // 遮罩点击关闭
+  overlay.addEventListener('click', function() { closeDrawer(); });
+
+  // 汉堡按钮切换
+  menuBtn.addEventListener('click', function() {
+    if (drawer.classList.contains('open')) { closeDrawer(); }
+    else { openDrawer(); }
+  });
+})();
+
+// ── 主题切换 ──
+function toggleTheme() {
+  var h = document.documentElement;
+  var n = h.dataset.theme === 'dark' ? 'light' : 'dark';
+  h.dataset.theme = n;
+  localStorage.setItem('theme', n);
+}
+(function() {
+  var s = localStorage.getItem('theme');
+  if (s) document.documentElement.dataset.theme = s;
+})();
+
+// ── 模式切换 ──
+var currentMode = 'present';
+var autoPresentTimer = null;
+var autoPresentEnd = 0;
+
+function updateModeButtonDisplay() {
+  var btn = document.getElementById('modeBtn');
+  var text = document.getElementById('modeText');
+  if (currentMode === 'edit' && autoPresentEnd > 0) {
+    var remaining = Math.max(0, Math.ceil((autoPresentEnd - Date.now()) / 1000));
+    if (remaining > 0) {
+      var min = Math.floor(remaining / 60);
+      var sec = remaining % 60;
+      text.textContent = 'Edit ⏱ ' + min + ':' + (sec < 10 ? '0' : '') + sec;
+      btn.classList.add('mode-countdown');
+      return;
+    }
+  }
+  text.textContent = currentMode === 'present' ? 'Present' : 'Edit';
+  btn.classList.remove('mode-countdown');
+}
+
+function startAutoPresentTimer() {
+  var updateFn = function() {
+    updateModeButtonDisplay();
+    if (autoPresentEnd > 0 && Date.now() >= autoPresentEnd) {
+      // 倒计时结束，页面即将刷新到 Present
+      stopAutoPresentTimer();
+    }
+  };
+  updateFn();
+  if (autoPresentTimer) clearInterval(autoPresentTimer);
+  autoPresentTimer = setInterval(updateFn, 1000);
+}
+
+function stopAutoPresentTimer() {
+  if (autoPresentTimer) { clearInterval(autoPresentTimer); autoPresentTimer = null; }
+  autoPresentEnd = 0;
+  updateModeButtonDisplay();
+}
+
+function syncAutoPresentStatus() {
+  fetch('/api/auto-present/status').then(function(r){ return r.json(); }).then(function(d){
+    if (d.success && d.active) {
+      autoPresentEnd = Date.now() + d.remaining_seconds * 1000;
+      if (currentMode === 'edit') startAutoPresentTimer();
+    } else {
+      stopAutoPresentTimer();
+    }
+  }).catch(function(){});
+}
+
+async function toggleMode() {
+  var nm = currentMode === 'present' ? 'edit' : 'present';
+  var btn = document.getElementById('modeBtn');
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/mode/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({mode: nm}) });
+    var d = await r.json();
+    if (d.success) {
+      currentMode = nm;
+      document.body.classList.toggle('mode-edit', nm === 'edit');
+      if (nm === 'edit') {
+        // 切换到 Edit → 查询倒计时状态
+        syncAutoPresentStatus();
+      } else {
+        stopAutoPresentTimer();
+      }
+      showToast('已切换到 ' + (nm === 'present' ? 'Present (连接 Tesla)' : 'Edit (网络访问)') + ' 模式', 'success');
+      setTimeout(function() { location.reload(); }, 3000);
+    } else { showToast(d.message || '模式切换失败', 'error'); }
+  } catch(err) { showToast('网络错误：' + err.message, 'error'); }
+  finally { btn.disabled = false; }
+}
+async function fetchCurrentMode() {
+  try {
+    var r = await fetch('/api/mode/status'); var d = await r.json();
+    if (d.success) {
+      currentMode = d.mode || 'present';
+      document.body.classList.toggle('mode-edit', currentMode === 'edit');
+      if (currentMode === 'edit') {
+        syncAutoPresentStatus();
+      }
+    }
+  } catch(err) {}
+}
+document.addEventListener('DOMContentLoaded', function() {
+  fetchCurrentMode();
+});
+
+function showToast(msg, type) {
+  var t = document.createElement('div');
+  t.className = 'toast toast-' + (type || 'info');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(function() { t.remove(); }, 3000);
+}
+
+// 页脚时钟
+function updateClock() {
+  var el = document.getElementById('footerTime');
+  if (el) el.textContent = new Date().toLocaleString('zh-CN', {hour12: false});
+}
+updateClock();
+setInterval(updateClock, 1000);
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

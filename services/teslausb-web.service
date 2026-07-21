@@ -1,0 +1,15 @@
+[Unit]
+Description=TeslaUSB Neo Web Manager
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/radxa_data/teslausb
+ExecStart=/usr/bin/python3 -u app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

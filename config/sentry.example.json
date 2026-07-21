@@ -1,0 +1,18 @@
+{
+  "wecom_status_webhook_key": "YOUR_WECOM_STATUS_WEBHOOK_KEY",
+  "wecom_sentry_webhook_key": "YOUR_WECOM_SENTRY_WEBHOOK_KEY",
+  "sentry_clips_path": "/mnt/teslacam/TeslaCam/SentryClips",
+  "state_file": "/opt/radxa_data/data/sentry_events.json",
+  "home_delay_minutes": 30,
+  "away_confirm_timeout_minutes": 30,
+  "scan_interval_seconds": 10,
+  "preview_enabled": true,
+  "watermark_enabled": true,
+  "nas_base_path": "/mnt/nas/TeslaSentry",
+  "upload_enabled": false,
+  "teslamate_url": "http://YOUR_TESLAMATE_HOST:7777",
+  "teslamate_password": "",
+  "home_location": "家",
+  "home_wifi_ssids": [],
+  "hotspot_ssids": []
+}

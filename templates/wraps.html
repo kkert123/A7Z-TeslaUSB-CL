@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %} · 贴膜管理{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>🎨 贴膜管理</h2>
+  <span style="font-size:var(--text-xs);color:var(--text-muted)">
+    Tesla 自定义贴膜 (PNG · 512~1024 px · ≤1MB)
+  </span>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📤 上传新贴膜</h3>
+  <form method="POST" action="/wraps/upload" enctype="multipart/form-data"
+        style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <input type="file" name="file" accept=".png" required
+           style="flex:1;min-width:200px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-sm)">
+    <button type="submit" class="btn">⬆️ 上传</button>
+  </form>
+  <div style="margin-top:var(--s2);font-size:var(--text-xs);color:var(--text-muted)">
+    要求: PNG格式 · 512×512~1024×1024 px · 文件名允许字母数字/下划线/破折号/空格 · 最多30字符 · ≤1MB
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:var(--s4)">
+  <h3 style="margin-bottom:var(--s2);font-size:var(--text-base)">📋 现有贴膜 ({{ wraps|length }})</h3>
+  {% if wraps %}
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s3)">
+    {% for w in wraps %}
+    <div style="background:var(--bg-secondary);border-radius:8px;overflow:hidden;border:1px solid var(--border)">
+      <div style="background:var(--bg-primary);text-align:center;padding:var(--s3)">
+        <img src="/api/wraps/preview/{{ w.filename }}" alt="{{ w.filename }}"
+             style="max-width:100%;max-height:140px;object-fit:contain;border-radius:4px"
+             onerror="this.parentElement.innerHTML='<div style=padding:20px;color:var(--text-muted)>预览加载失败</div>'">
+      </div>
+      <div style="padding:var(--s3)">
+        <div style="font-size:var(--text-xs);font-weight:600;margin-bottom:4px;word-break:break-all">{{ w.filename }}</div>
+        <div style="font-size:var(--text-xs);color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:var(--s2)">
+          <span>{{ '%.0f'|format(w.size/1024) if w.size < 1048576 else '%.1f'|format(w.size/1048576) + 'MB' if w.size > 1024 else '%.0f'|format(w.size/1024) }} KB</span>
+          <span>{{ w.width }}×{{ w.height }}</span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <a href="/api/wraps/download/{{ w.filename }}" class="btn btn-sm" style="font-size:var(--text-xs)">⬇ 下载</a>
+          <form method="POST" action="/wraps/delete/{{ w.filename }}"
+                onsubmit="return confirm('确认删除 {{ w.filename }}？')" style="margin:0">
+            <button type="submit" class="btn btn-sm btn-danger" style="font-size:var(--text-xs)">🗑 删除</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div style="text-align:center;padding:var(--s5);color:var(--text-muted);font-size:var(--text-sm)">
+    📭 暂无贴膜文件 — 上传 512~1024px PNG 格式的贴膜背景
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+<style>
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-danger:hover{opacity:0.85}
+</style>

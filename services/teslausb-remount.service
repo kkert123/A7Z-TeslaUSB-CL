@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaUSB RO Remount Keeper (Present Mode)
+Documentation=https://github.com/mphacker/TeslaUSB
+After=network.target teslausb-mode.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash -c 'mountpoint -q /mnt/teslacam && exit 0; mount -o ro /dev/nvme0n1p2 /mnt/teslacam || true'
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
