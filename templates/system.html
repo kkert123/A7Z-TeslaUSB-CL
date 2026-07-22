@@ -17,6 +17,30 @@
   </div>
 </div>
 
+<!-- 📦 版本管理 -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">📦 版本管理</h3>
+  <div class="detail-grid">
+    <div class="detail-item"><span class="label">当前版本</span><span class="value" id="ver-current">{{ version }}</span></div>
+    <div class="detail-item"><span class="label">最新版本</span><span class="value" id="ver-latest">检查中...</span></div>
+    <div class="detail-item"><span class="label">状态</span><span class="value" id="ver-status">—</span></div>
+  </div>
+  <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <button class="btn btn-sm" onclick="checkVersionNow()">🔍 检查更新</button>
+    <span id="ver-changelog" style="font-size:0.78rem;color:var(--text-muted)"></span>
+  </div>
+  <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+    <label style="font-size:0.82rem;font-weight:500">GitHub 令牌</label>
+    <span style="font-size:0.72rem;color:var(--text-muted)">（私有仓库版本检测必需，拥有 repo 读权限即可）</span>
+    <div style="display:flex;gap:6px;margin-top:4px">
+      <input type="password" id="gh-token" placeholder="ghp_..." style="flex:1;font-family:monospace;font-size:0.78rem" autocomplete="off">
+      <button class="btn btn-sm" onclick="saveGithubToken()">保存</button>
+      <button class="btn btn-sm btn-outline" onclick="clearGithubToken()">清除</button>
+    </div>
+    <span id="gh-token-status" style="font-size:0.72rem;color:var(--text-muted)"></span>
+  </div>
+</div>
+
 <!-- 🆕 当前模式 -->
 <div class="section">
   <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🔀 USB 模式</h3>
@@ -541,6 +565,85 @@ async function saveFanCurve() {
   }
 }
 
+// ── 版本管理 ──────────────────────────────────────────────
+
+function checkVersionNow() {
+  const latestEl = document.getElementById('ver-latest');
+  const statusEl = document.getElementById('ver-status');
+  const changelogEl = document.getElementById('ver-changelog');
+  if (latestEl) latestEl.textContent = '查询中...';
+  if (statusEl) statusEl.textContent = '—';
+  if (changelogEl) changelogEl.textContent = '';
+
+  fetch('/api/version/check')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success || d.error) {
+        if (latestEl) latestEl.textContent = d.error || '检查失败';
+        if (statusEl) { statusEl.textContent = '⚠️'; statusEl.style.color = 'var(--warning)'; }
+        return;
+      }
+      if (latestEl) latestEl.textContent = d.latest ? 'v' + d.latest : '—';
+      if (d.has_update) {
+        statusEl.textContent = '🔴 有新版本';
+        statusEl.style.color = '#e74c3c';
+        if (d.changelog) {
+          const firstLine = d.changelog.split('\\n')[0].substring(0, 120);
+          changelogEl.textContent = firstLine;
+        }
+      } else if (d.latest) {
+        statusEl.textContent = '✅ 已是最新';
+        statusEl.style.color = '#27ae60';
+      }
+    })
+    .catch(() => {
+      if (latestEl) latestEl.textContent = '网络不可达';
+      if (statusEl) { statusEl.textContent = '⚠️'; statusEl.style.color = 'var(--warning)'; }
+    });
+}
+
+function loadGithubToken() {
+  fetch('/api/version/token')
+    .then(r => r.json())
+    .then(d => {
+      const st = document.getElementById('gh-token-status');
+      if (d.has_token) {
+        st.textContent = '已配置 (' + (d.token_preview || '***') + ')';
+        st.style.color = '#27ae60';
+      } else {
+        st.textContent = '未配置 — 私有仓库需要令牌才能检测版本';
+        st.style.color = 'var(--text-muted)';
+      }
+    });
+}
+
+function saveGithubToken() {
+  const inp = document.getElementById('gh-token');
+  const st = document.getElementById('gh-token-status');
+  const token = inp.value.trim();
+  if (!token) return;
+  fetch('/api/version/token', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token})
+  }).then(r => r.json()).then(d => {
+    st.textContent = d.success ? '✅ 已保存' : '❌ 保存失败';
+    st.style.color = d.success ? '#27ae60' : '#e74c3c';
+    if (d.success) { inp.value = ''; loadGithubToken(); }
+  });
+}
+
+function clearGithubToken() {
+  const st = document.getElementById('gh-token-status');
+  fetch('/api/version/token', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token: ''})
+  }).then(r => r.json()).then(d => {
+    st.textContent = d.success ? '✅ 已清除' : '❌ 清除失败';
+    st.style.color = d.success ? '#27ae60' : '#e74c3c';
+    if (d.success) loadGithubToken();
+  });
+}
+
 // 初始化
 loadSystemInfo();
 loadModeDisplay();
@@ -548,5 +651,7 @@ loadAutoPresentConfig();
 loadMountStatus();
 loadThumbResetConfig();
 loadFanCurve();
+loadGithubToken();
+setTimeout(checkVersionNow, 1000);
 </script>
 {% endblock %}

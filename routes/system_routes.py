@@ -551,6 +551,74 @@ def api_system_info():
 
 
 
+# ── 版本管理 API ──────────────────────────────────────────────
+
+@system_bp.route('/api/version/check')
+def api_version_check():
+    """查询当前版本与 GitHub 最新 release"""
+    try:
+        import version_service
+        result = version_service.check_latest_release()
+        return jsonify({'success': True, **result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/version/token', methods=['GET', 'POST'])
+def api_version_token():
+    """读取/保存 GitHub 版本检测令牌（写入 config/sentry.json）"""
+    cfg_path = getattr(config, 'SENTRY_CONFIG_FILE', '') or '/opt/radxa_data/teslausb/config/sentry.json'
+    if request.method == 'GET':
+        token = ''
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path) as f:
+                    token = json.load(f).get('github_version_token', '')
+            except (json.JSONDecodeError, IOError):
+                pass
+        return jsonify({
+            'success': True,
+            'has_token': bool(token),
+            'token_preview': (token[:8] + '***') if len(token) > 8 else ''
+        })
+
+    data = request.get_json(silent=True) or {}
+    new_token = (data.get('token') or '').strip()
+    cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    if new_token:
+        cfg['github_version_token'] = new_token
+    else:
+        cfg.pop('github_version_token', None)
+
+    import tempfile
+    cfg_dir = os.path.dirname(cfg_path)
+    os.makedirs(cfg_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=cfg_dir, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, cfg_path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return jsonify({'success': False, 'error': '配置文件写入失败'}), 500
+
+    return jsonify({
+        'success': True,
+        'has_token': bool(new_token),
+        'message': '令牌已保存' if new_token else '令牌已清除'
+    })
+
+
+# ── 系统挂载点 API ──────────────────────────────────────────────
+
 @system_bp.route('/api/system/mounts')
 def api_system_mounts():
     """系统挂载点信息（df -h + 缓存回退，支持 Present 模式下显示未挂载分区）"""

@@ -109,5 +109,13 @@ class AppState:
         self.thermal_gpu_idx = None
 
 
+        # ═══════════════════════════════════════════════════════
+        # 版本检查缓存（1h TTL，避免频繁调 GitHub API）
+        # ═══════════════════════════════════════════════════════
+        self._version_cache = {}
+        self._version_last_check = 0
+        self.version_cache_lock = threading.Lock()
+
+
 # 全局单例 — 所有模块通过 from app_state import state 引用
 state = AppState()

@@ -3,6 +3,7 @@
 {% block content %}
 <div class="page-header">
   <h2>仪表盘</h2>
+  <span class="badge" id="versionBadge" title="点击检查更新" style="cursor:pointer" onclick="checkVersion()">v{{ version }}</span>
   <span class="badge" id="lastUpdate">{{ now }}</span>
 </div>
 
@@ -707,5 +708,40 @@ function updateDashboard(d) {
 }
 
 startStatsStream();
+
+// ── 版本检查 ──
+let _versionChecked = false;
+function checkVersion() {
+  const badge = document.getElementById('versionBadge');
+  if (!badge) return;
+  badge.textContent = 'v{{ version }} ···';
+  fetch('/api/version/check')
+    .then(r => r.json())
+    .then(data => {
+      _versionChecked = true;
+      if (!data.success || data.error) {
+        badge.textContent = 'v' + (data.current || '{{ version }}');
+        badge.title = data.error || '检查失败';
+        badge.style.background = 'var(--text-muted)';
+        return;
+      }
+      badge.textContent = 'v' + data.current;
+      if (data.has_update) {
+        badge.style.background = '#e74c3c';
+        badge.title = '有新版本: v' + data.latest + ' — 点击前往系统页查看';
+        badge.onclick = () => location.href = '/system';
+      } else {
+        badge.style.background = '#27ae60';
+        badge.title = '已是最新版本';
+      }
+    })
+    .catch(() => {
+      badge.textContent = 'v{{ version }}';
+      badge.title = '网络不可达';
+      badge.style.background = 'var(--text-muted)';
+    });
+}
+// 页面加载 2 秒后静默检查
+setTimeout(checkVersion, 2000);
 </script>
 {% endblock %}

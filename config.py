@@ -3,44 +3,26 @@
 A7Z TeslaUSB 统一配置文件
 ===========================
 所有模块应从此文件导入路径常量，避免路径碎片化。
-
-之前存在三套路径体系：
-  - app.py 使用 /mnt/teslacam 等
-  - media_service.py 使用 /media/cnlvan/cam 等
-  - clean_deploy 模块使用 /opt/teslausb-web/ 等
-
-现在统一为以下体系（A7Z 实际部署环境）。
 """
 
 import os
+
+# ─── 应用版本号 ───
+APP_VERSION = "0.1.0"
 
 # ─── 数据根目录 ───
 DATA_ROOT = "/opt/radxa_data"
 TESLAUSB_ROOT = os.path.join(DATA_ROOT, "teslausb")
 
-# ─── 分区挂载点（A7Z NVMe 分区布局，默认值） ───
-# 可通过 config/paths.json 在安装时按设备实际情况覆盖（不进版本库）。
+# ─── 分区挂载点（A7Z NVMe 分区布局） ───
 PARTITIONS = {
-    "cam": "/mnt/teslacam",          # TeslaCam 视频（哨兵/最近/保存片段）
-    "music": "/mnt/music",            # 音乐文件
-    "boombox": "/mnt/boombox",        # boombox 音频
-    "lightshow": "/mnt/lightshow",    # lightshow 灯光秀
+    "cam": "/mnt/teslacam",
+    "music": "/mnt/music",
+    "boombox": "/mnt/boombox",
+    "lightshow": "/mnt/lightshow",
 }
 
-# ─── 可选：从 config/paths.json 覆盖挂载点（安装脚本写入） ───
-_PATHS_OVERRIDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "paths.json")
-if os.path.isfile(_PATHS_OVERRIDE):
-    try:
-        import json
-        with open(_PATHS_OVERRIDE, "r", encoding="utf-8") as _f:
-            _ov = json.load(_f)
-        for _k, _v in _ov.items():
-            if _k in PARTITIONS and isinstance(_v, str) and _v.strip():
-                PARTITIONS[_k] = _v.strip().rstrip("/")
-    except Exception as _e:  # noqa: BLE001
-        print(f"[config] 读取 {_PATHS_OVERRIDE} 失败，使用默认挂载点：{_e}")
-
-# ─── TeslaCam 子目录（依赖 PARTITIONS，须在覆盖之后定义） ───
+# ─── TeslaCam 子目录 ───
 SENTRY_CLIPS_PATH = os.path.join(PARTITIONS["cam"], "TeslaCam", "SentryClips")
 RECENT_CLIPS_PATH = os.path.join(PARTITIONS["cam"], "TeslaCam", "RecentClips")
 SAVED_CLIPS_PATH = os.path.join(PARTITIONS["cam"], "TeslaCam", "SavedClips")
