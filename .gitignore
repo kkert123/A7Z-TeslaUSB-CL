@@ -52,6 +52,13 @@ _*.py
 _*.sh
 _*.ps1
 test_*.py
+test_*.html
+test_*.js
+*_preview.html
+*_remote.html
+package.json
+package-lock.json
+docs/conversation-summary-*.md
 
 # ===== Local assistant artifacts =====
 .workbuddy/
