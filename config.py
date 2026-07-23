@@ -10,6 +10,9 @@ import os
 # ─── 应用版本号 ───
 APP_VERSION = "0.1.0"
 
+# ─── 升级系统 Ed25519 公钥（私钥 upgrade_key 本地保管，不进仓库） ───
+UPGRADE_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeYRpMBX5sn0tsR+IRuwtUbI6qWu+5VTcK4NWL2AOt6 a7z-upgrade"
+
 # ─── 数据根目录 ───
 DATA_ROOT = "/opt/radxa_data"
 TESLAUSB_ROOT = os.path.join(DATA_ROOT, "teslausb")

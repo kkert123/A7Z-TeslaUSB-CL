@@ -63,3 +63,4 @@ docs/conversation-summary-*.md
 # ===== Local assistant artifacts =====
 .workbuddy/
 .gstack/
+upgrade_key

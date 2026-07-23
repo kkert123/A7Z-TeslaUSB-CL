@@ -617,6 +617,61 @@ def api_version_token():
     })
 
 
+@system_bp.route('/api/version/upgrade', methods=['POST'])
+def api_version_upgrade():
+    """触发一键升级（同步执行，前端需等待）"""
+    data = request.get_json(silent=True) or {}
+    new_version = (data.get('version') or '').strip()
+    asset_url = (data.get('asset_url') or '').strip()
+    sha256 = (data.get('sha256') or '').strip()
+    sig_url = (data.get('sig_url') or '').strip()
+
+    if not all([new_version, asset_url, sha256]):
+        return jsonify({'success': False, 'error': '缺少参数: version/asset_url/sha256 必需'}), 400
+
+    try:
+        import upgrade_service
+        ok, msg = upgrade_service.do_upgrade(new_version, asset_url, sha256, sig_url or None)
+        if ok:
+            return jsonify({
+                'success': True,
+                'message': msg,
+                'version': new_version,
+                'need_restart': True,
+            })
+        return jsonify({'success': False, 'error': msg}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/version/rollback-info')
+def api_version_rollback_info():
+    """查询是否可回退、回退到哪个版本"""
+    try:
+        import upgrade_service
+        info = upgrade_service.get_rollback_info()
+        return jsonify({
+            'success': True,
+            'can_rollback': info is not None,
+            'rollback_info': info,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/version/rollback', methods=['POST'])
+def api_version_rollback():
+    """执行回退"""
+    try:
+        import upgrade_service
+        ok, msg = upgrade_service.do_rollback()
+        if ok:
+            return jsonify({'success': True, 'message': msg})
+        return jsonify({'success': False, 'error': msg}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ── 系统挂载点 API ──────────────────────────────────────────────
 
 @system_bp.route('/api/system/mounts')

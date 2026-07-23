@@ -118,9 +118,26 @@ def check_latest_release(force=False):
     result['latest'] = tag.lstrip('v') if tag else None
     result['changelog'] = data.get('body', '')
     result['html_url'] = data.get('html_url', '')
+
     assets = data.get('assets', [])
-    if assets:
-        result['asset_url'] = assets[0].get('browser_download_url', '')
+    result['asset_url'] = ''
+    result['sig_url'] = ''
+    result['sha256'] = ''
+
+    for a in assets:
+        url = a.get('browser_download_url', '')
+        name = a.get('name', '')
+        if name.endswith('.sig'):
+            result['sig_url'] = url
+        elif not result['asset_url']:
+            result['asset_url'] = url
+
+    # 从 release body 提取 SHA-256
+    import re
+    body = data.get('body', '')
+    m = re.search(r'(?:SHA-?256|sha256)[:\s]+([a-fA-F0-9]{64})', body)
+    if m:
+        result['sha256'] = m.group(1)
 
     if result['latest'] and result['current']:
         result['has_update'] = _compare_versions(
