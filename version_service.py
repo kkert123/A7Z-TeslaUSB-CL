@@ -94,6 +94,7 @@ def check_latest_release(force=False):
 
     data = None
     last_error = None
+    error_detail = ''
 
     # 优先匿名（公开仓库），失败再用 token 重试（私有仓库）
     for use_token in (False, True):
@@ -103,15 +104,25 @@ def check_latest_release(force=False):
         except urllib.error.HTTPError as e:
             if e.code == 404 and not use_token and token:
                 continue  # 公开接口 404 → 用 token 重试
-            last_error = f'GitHub API 错误: HTTP {e.code}'
+            if e.code == 404:
+                error_detail = '未找到 Release（仓库尚无发布版本或为私有）'
+            elif e.code == 403:
+                error_detail = 'API 限流（60次/小时），请稍后再试'
+            else:
+                error_detail = f'HTTP {e.code}'
+            last_error = error_detail
         except urllib.error.URLError as e:
-            last_error = f'网络错误: {e.reason}'
+            error_detail = f'网络不可达 ({e.reason})'
+            last_error = error_detail
         except Exception as e:
-            last_error = f'检查失败: {e}'
+            error_detail = str(e)
+            last_error = error_detail
 
     if data is None:
         result['error'] = last_error or '未知错误'
-        _update_cache(state, result)
+        # 失败不缓存（下次请求重试）
+        state._version_cache = {}
+        state._version_last_check = 0
         return result
 
     tag = data.get('tag_name', '')
