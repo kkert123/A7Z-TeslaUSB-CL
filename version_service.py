@@ -82,37 +82,50 @@ def check_latest_release(force=False):
     }
 
     token = _read_github_token()
-    if not token:
-        result['error'] = '未配置 GitHub 令牌（在系统页面设置）'
-        _update_cache(state, result)
-        return result
 
-    try:
+    def _do_request(auth_token=None):
         req = urllib.request.Request(GITHUB_API)
-        req.add_header('Authorization', f'token {token}')
+        if auth_token:
+            req.add_header('Authorization', f'token {auth_token}')
         req.add_header('Accept', 'application/vnd.github+json')
         req.add_header('User-Agent', 'A7Z-TeslaUSB-VersionCheck/1.0')
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
+            return json.loads(resp.read().decode('utf-8'))
 
-        tag = data.get('tag_name', '')
-        result['latest'] = tag.lstrip('v') if tag else None
-        result['changelog'] = data.get('body', '')
-        result['html_url'] = data.get('html_url', '')
-        assets = data.get('assets', [])
-        if assets:
-            result['asset_url'] = assets[0].get('browser_download_url', '')
+    data = None
+    last_error = None
 
-        if result['latest'] and result['current']:
-            result['has_update'] = _compare_versions(
-                result['latest'], result['current']
-            ) > 0
-    except urllib.error.HTTPError as e:
-        result['error'] = f'GitHub API 错误: HTTP {e.code}'
-    except urllib.error.URLError as e:
-        result['error'] = f'网络错误: {e.reason}'
-    except Exception as e:
-        result['error'] = f'检查失败: {e}'
+    # 优先匿名（公开仓库），失败再用 token 重试（私有仓库）
+    for use_token in (False, True):
+        try:
+            data = _do_request(token if use_token else None)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and not use_token and token:
+                continue  # 公开接口 404 → 用 token 重试
+            last_error = f'GitHub API 错误: HTTP {e.code}'
+        except urllib.error.URLError as e:
+            last_error = f'网络错误: {e.reason}'
+        except Exception as e:
+            last_error = f'检查失败: {e}'
+
+    if data is None:
+        result['error'] = last_error or '未知错误'
+        _update_cache(state, result)
+        return result
+
+    tag = data.get('tag_name', '')
+    result['latest'] = tag.lstrip('v') if tag else None
+    result['changelog'] = data.get('body', '')
+    result['html_url'] = data.get('html_url', '')
+    assets = data.get('assets', [])
+    if assets:
+        result['asset_url'] = assets[0].get('browser_download_url', '')
+
+    if result['latest'] and result['current']:
+        result['has_update'] = _compare_versions(
+            result['latest'], result['current']
+        ) > 0
 
     _update_cache(state, result)
     return result
