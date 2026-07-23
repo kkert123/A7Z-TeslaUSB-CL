@@ -7,8 +7,8 @@
 ## 装
 
 ```bash
-git clone <repo> /opt/radxa_data/teslausb && cd /opt/radxa_data/teslausb
-chmod +x install.sh && sudo ./install.sh
+git clone https://github.com/kkert123/A7Z-TeslaUSB-CL.git /opt/radxa_data/teslausb
+cd /opt/radxa_data/teslausb && chmod +x install.sh && sudo ./install.sh
 ```
 
 跑完装好 venv、ffmpeg、rclone 和 systemd 服务。脚本会问你几个分区路径，回答完就行。
