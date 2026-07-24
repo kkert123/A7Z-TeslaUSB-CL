@@ -3,16 +3,15 @@
 A7Z TeslaUSB 统一配置文件
 ===========================
 所有模块应从此文件导入路径常量，避免路径碎片化。
-
-之前存在三套路径体系：
-  - app.py 使用 /mnt/teslacam 等
-  - media_service.py 使用 /media/cnlvan/cam 等
-  - clean_deploy 模块使用 /opt/teslausb-web/ 等
-
-现在统一为以下体系（A7Z 实际部署环境）。
 """
 
 import os
+
+# ─── 应用版本号 ───
+APP_VERSION = "0.1.1"
+
+# ─── 升级系统 Ed25519 公钥（私钥 upgrade_key 本地保管，不进仓库） ───
+UPGRADE_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeYRpMBX5sn0tsR+IRuwtUbI6qWu+5VTcK4NWL2AOt6 a7z-upgrade"
 
 # ─── 数据根目录 ───
 DATA_ROOT = "/opt/radxa_data"
@@ -24,7 +23,6 @@ PARTITIONS = {
     "music": "/mnt/music",
     "boombox": "/mnt/boombox",
     "lightshow": "/mnt/lightshow",
-    "wraps": "/mnt/wraps",
 }
 
 # ─── TeslaCam 子目录 ───
@@ -39,7 +37,8 @@ STATIC_DIR = os.path.join(TESLAUSB_ROOT, "static")
 THUMBNAIL_DIR = os.path.join(STATIC_DIR, "thumbnails")
 
 # ─── 关键文件路径 ───
-SENTRY_STATE_FILE = os.path.join(DATA_DIR, "sentry_events.json")
+# 哨兵状态文件与 sentry_service.py / config/sentry.json 保持一致
+SENTRY_STATE_FILE = os.path.join(DATA_ROOT, "data", "sentry_events.json")
 SENTRY_CONFIG_FILE = os.path.join(CONFIG_DIR, "sentry.json")
 PUSH_HEALTH_FILE = os.path.join(DATA_DIR, "push_health.json")
 APP_CONFIG_FILE = os.path.join(TESLAUSB_ROOT, "config.json")
@@ -55,6 +54,9 @@ WIFI_LOG = os.path.join(LOG_DIR, "wifi-smart-switch.log")
 GADGET_SCRIPT = "/opt/radxa_data/usb_gadget_init.sh"
 GADGET_SOCKET = "/tmp/teslausb-gadget.sock"
 GADGET_PID_FILE = "/var/run/teslausb-gadgetd.pid"
+
+# ─── WiFi SSID 配置 ───
+TESLA_SSID_PREFIX = "Tesla"  # Tesla 车机 WiFi SSID 前缀，用于门控启动
 
 # ─── 微信通知器数据路径 ───
 # 覆盖 weixin_notifier.py 的硬编码路径
