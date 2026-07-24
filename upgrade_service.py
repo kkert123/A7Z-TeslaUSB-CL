@@ -216,11 +216,38 @@ def get_rollback_info():
 # ═══════════════════════════════════════════════════════════════
 
 def _download(url, dest):
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "A7Z-TeslaUSB-Upgrade/1.0")
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(resp, f)
+    """下载文件，支持重试 + 国内镜像回退"""
+    import socket
+    max_retries = 3
+    last_error = None
+
+    # 如果 url 是 github.com，准备镜像回退 URL
+    mirror_url = url.replace(
+        "https://github.com/kkert123/A7Z-TeslaUSB-CL/releases/download/",
+        "https://ghproxy.net/https://github.com/kkert123/A7Z-TeslaUSB-CL/releases/download/"
+    )
+
+    urls_to_try = [url, mirror_url]
+    if mirror_url == url:
+        urls_to_try = [url]
+
+    for attempt, try_url in enumerate(urls_to_try):
+        for retry in range(max_retries):
+            try:
+                req = urllib.request.Request(try_url)
+                req.add_header("User-Agent", "A7Z-TeslaUSB-Upgrade/1.0")
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    with open(dest, "wb") as f:
+                        shutil.copyfileobj(resp, f)
+                return  # 成功
+            except Exception as e:
+                last_error = e
+                if retry < max_retries - 1:
+                    import time
+                    time.sleep((retry + 1) * 3)  # 3s, 6s, 9s 退避
+                continue
+        # 所有重试耗尽，继续尝试下一个 URL
+    raise last_error or Exception("下载失败: 所有重试均已耗尽")
 
 
 def _verify_sha256(filepath, expected):

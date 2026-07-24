@@ -115,7 +115,7 @@
     <div id="upgrade-controls" style="display:none;padding:10px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px">
       <div class="btn-row">
         <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()">Upgrade to <span id="upgrade-target"></span></button>
-        <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">Rollback to <span id="rollback-target"></span></button>
+        <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">回退到 <span id="rollback-target"></span></button>
       </div>
       <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
       <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
@@ -328,8 +328,8 @@ function showResult(id, msg, ok) {
 
 // ═══ Service control ═══
 function serviceAction(a) {
-  var labels = { restart: 'Restart', stop: 'Stop', start: 'Start' };
-  if (!confirm('Confirm ' + labels[a] + ' service?')) return;
+  var labels = { restart: '重启', stop: '停止', start: '启动' };
+  if (!confirm('确定' + labels[a] + '服务？')) return;
   fetch('/api/system/service', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: a })
@@ -340,13 +340,13 @@ function serviceAction(a) {
 }
 
 function systemReboot() {
-  if (!confirm('Confirm reboot?')) return;
+  if (!confirm('确定重启系统？')) return;
   fetch('/api/system/reboot', { method: 'POST' })
     .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
 }
 
 function systemShutdown() {
-  if (!confirm('Confirm shutdown?')) return;
+  if (!confirm('确定关机？')) return;
   fetch('/api/system/shutdown', { method: 'POST' })
     .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
 }
@@ -540,7 +540,7 @@ async function loadMountStatus() {
   } catch (e) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--danger)">Failed</td></tr>'; }
 }
 async function formatTeslaCam() {
-  if (!confirm('This will erase all TeslaCam data. Continue?')) return;
+  if (!confirm('此操作将清除 TeslaCam 分区所有数据，确定继续？')) return;
   const output = document.getElementById('format-output');
   output.style.display = 'block'; output.textContent = 'Formatting...';
   try {
@@ -632,24 +632,24 @@ function loadRollbackInfo() {
 
 let _upgradeData = null;
 function startUpgrade() {
-  if (!_upgradeData || !confirm('Upgrade to v' + _upgradeData.latest + '?\n\nBackup -> Download -> SHA-256 + Ed25519 verify -> Install -> Restart')) return;
+  if (!_upgradeData || !confirm('确认升级到 v' + _upgradeData.latest + '？\n\n操作流程：\n1. 备份当前版本\n2. 下载升级包\n3. SHA-256 + Ed25519 双重校验\n4. 安装并重启服务\n\n下载超时后会自动重试 3 次并用镜像加速')) return;
   var btn = document.getElementById('btn-upgrade'), prog = document.getElementById('upgrade-progress'), res = document.getElementById('upgrade-result');
-  btn.disabled = true; prog.style.display = 'block'; prog.textContent = 'Upgrading...\n'; res.style.display = 'none';
+  btn.disabled = true; prog.style.display = 'block'; prog.textContent = '升级中...\n'; res.style.display = 'none';
   var body = { version: _upgradeData.latest, asset_url: _upgradeData.asset_url, sha256: _upgradeData.sha256 || '', sig_url: _upgradeData.sig_url || '' };
-  if (!body.sha256) { prog.textContent += '\nMissing SHA-256 in release body. Aborted.'; btn.disabled = false; return; }
+  if (!body.sha256) { prog.textContent += '\n发布页未找到 SHA-256 校验码，升级中止。'; btn.disabled = false; return; }
   fetch('/api/version/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(r => r.json()).then(d => {
       prog.textContent += (d.message || d.error || '') + '\n'; prog.scrollTop = prog.scrollHeight;
-      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">Upgrade complete! Reloading...</span>'; setTimeout(() => location.reload(), 3000); }
-      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">Failed: ' + (d.error || 'unknown') + '</span>'; }
+      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>'; setTimeout(() => location.reload(), 3000); }
+      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>'; }
       btn.disabled = false;
     }).catch(e => { prog.textContent += 'Error: ' + e + '\n'; btn.disabled = false; });
 }
 
 function startRollback() {
-  if (!confirm('Rollback to previous version?')) return;
+  if (!confirm('确定回退到上一版本？')) return;
   var prog = document.getElementById('upgrade-progress');
-  prog.style.display = 'block'; prog.textContent = 'Rollback...\n';
+  prog.style.display = 'block'; prog.textContent = '回退中...\n';
   fetch('/api/version/rollback', { method: 'POST' }).then(r => r.json()).then(d => {
     prog.textContent += (d.message || d.error) + '\n';
     if (d.success) setTimeout(() => location.reload(), 3000);
@@ -673,9 +673,9 @@ uz.addEventListener('drop', function(e) { e.preventDefault(); uz.classList.remov
 function startManualUpgrade() {
   var inp = document.getElementById('upgrade-file');
   if (!inp.files.length) return;
-  if (!confirm('Install ' + inp.files[0].name + '?\n\nBackup -> SHA-256 -> Ed25519 -> Install -> Restart')) return;
+  if (!confirm('确定安装 ' + inp.files[0].name + '？\n\n操作流程：备份 → SHA-256 校验 → 安装 → 重启服务')) return;
   var btn = document.getElementById('btn-manual-upgrade'), prog = document.getElementById('upgrade-progress'), res = document.getElementById('upgrade-result');
-  btn.disabled = true; prog.style.display = 'block'; prog.textContent = 'Uploading...\n'; res.style.display = 'none';
+  btn.disabled = true; prog.style.display = 'block'; prog.textContent = '上传中...\n'; res.style.display = 'none';
   var form = new FormData();
   form.append('file', inp.files[0]);
   var sha = document.getElementById('upload-sha256').value.trim();
@@ -683,8 +683,8 @@ function startManualUpgrade() {
   fetch('/api/version/upgrade-upload', { method: 'POST', body: form })
     .then(r => r.json()).then(d => {
       prog.textContent += (d.message || d.error || '') + '\n';
-      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">Upgrade complete! Reloading...</span>'; setTimeout(() => location.reload(), 3000); }
-      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">Failed: ' + (d.error || 'unknown') + '</span>'; }
+      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>'; setTimeout(() => location.reload(), 3000); }
+      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>'; }
       btn.disabled = false;
     }).catch(e => { prog.textContent += 'Error: ' + e + '\n'; btn.disabled = false; });
 }
