@@ -216,38 +216,40 @@ def get_rollback_info():
 # ═══════════════════════════════════════════════════════════════
 
 def _download(url, dest):
-    """下载文件，支持重试 + 国内镜像回退"""
-    import socket
-    max_retries = 3
+    """下载文件 — 国内优先走镜像，直连做回退"""
+    max_retries = 2
     last_error = None
 
-    # 如果 url 是 github.com，准备镜像回退 URL
+    # 国内优先 ghproxy 镜像直连
     mirror_url = url.replace(
-        "https://github.com/kkert123/A7Z-TeslaUSB-CL/releases/download/",
-        "https://ghproxy.net/https://github.com/kkert123/A7Z-TeslaUSB-CL/releases/download/"
+        "https://github.com/",
+        "https://ghproxy.net/https://github.com/"
     )
 
-    urls_to_try = [url, mirror_url]
+    # 镜像优先，直连做 fallback
+    urls_to_try = [mirror_url, url]
     if mirror_url == url:
         urls_to_try = [url]
 
-    for attempt, try_url in enumerate(urls_to_try):
+    for try_url in urls_to_try:
         for retry in range(max_retries):
             try:
                 req = urllib.request.Request(try_url)
                 req.add_header("User-Agent", "A7Z-TeslaUSB-Upgrade/1.0")
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=300) as resp:
                     with open(dest, "wb") as f:
                         shutil.copyfileobj(resp, f)
                 return  # 成功
             except Exception as e:
                 last_error = e
+                # GitHub 直连 504 不用重试，直接切镜像
+                if hasattr(e, 'code') and e.code == 504:
+                    break
                 if retry < max_retries - 1:
                     import time
-                    time.sleep((retry + 1) * 3)  # 3s, 6s, 9s 退避
+                    time.sleep((retry + 1) * 5)
                 continue
-        # 所有重试耗尽，继续尝试下一个 URL
-    raise last_error or Exception("下载失败: 所有重试均已耗尽")
+    raise last_error or Exception("下载失败")
 
 
 def _verify_sha256(filepath, expected):
