@@ -53,6 +53,8 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
         return False, "当前部署目录不存在，无法升级"
 
     new_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{new_version}")
+    if os.path.realpath(new_dir) == os.path.realpath(current_dir):
+        return False, f"已是最新版本 v{new_version}，无需升级"
     if os.path.exists(new_dir):
         shutil.rmtree(new_dir)
 
@@ -103,6 +105,7 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     ok, msg = _extract_and_setup(tarball, new_dir)
     if not ok:
         _cleanup(tarball, sig_file)
+        shutil.rmtree(new_dir, ignore_errors=True)  # 清理残留，便于重试
         return False, f"安装失败: {msg}"
     steps[-1] = "安装完成"
 
@@ -139,6 +142,8 @@ def do_upgrade_from_tarball(tarball_path, new_version):
         return False, "当前部署目录不存在，无法升级"
 
     new_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{new_version}")
+    if os.path.realpath(new_dir) == os.path.realpath(current_dir):
+        return False, f"已是最新版本 v{new_version}，无需升级"
     if os.path.exists(new_dir):
         shutil.rmtree(new_dir)
 
@@ -151,6 +156,7 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     steps.append("解压安装...")
     ok, msg = _extract_and_setup(tarball_path, new_dir)
     if not ok:
+        shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"安装失败: {msg}"
     steps[-1] = "安装完成"
 
@@ -312,14 +318,15 @@ def _extract_and_setup(tarball, target_dir):
     venv_dir = os.path.join(target_dir, "venv")
     rc, stdout, stderr = _run(["python3", "-m", "venv", venv_dir], timeout=120)
     if rc != 0:
-        # venv 创建失败（通常是没装 python3-venv），尝试复用旧 venv
+        # venv 创建失败（通常是没装 python3-venv 包），尝试复用旧 venv
+        # 注意：python3 -m venv 失败前可能已创建部分目录，先清理
+        if os.path.exists(venv_dir):
+            shutil.rmtree(venv_dir, ignore_errors=True)
         current_dir = get_current_version_dir()
         old_venv = os.path.join(current_dir, "venv") if current_dir else None
         if old_venv and os.path.isdir(old_venv):
             shutil.copytree(old_venv, venv_dir, symlinks=True)
-        else:
-            # 没有旧 venv 可复用，跳过 venv（直接用系统 Python 也能跑）
-            pass
+        # 无旧 venv → 跳过，所有 service 用 /usr/bin/python3 直接运行
 
     pip = os.path.join(venv_dir, "bin", "pip") if os.path.isdir(venv_dir) else None
     req = os.path.join(target_dir, "requirements.txt")
