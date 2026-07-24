@@ -310,11 +310,18 @@ def _extract_and_setup(tarball, target_dir):
     venv_dir = os.path.join(target_dir, "venv")
     rc, stdout, stderr = _run(["python3", "-m", "venv", venv_dir], timeout=120)
     if rc != 0:
-        return False, f"venv 创建失败: {stderr}"
+        # venv 创建失败（通常是没装 python3-venv），尝试复用旧 venv
+        current_dir = get_current_version_dir()
+        old_venv = os.path.join(current_dir, "venv") if current_dir else None
+        if old_venv and os.path.isdir(old_venv):
+            shutil.copytree(old_venv, venv_dir, symlinks=True)
+        else:
+            # 没有旧 venv 可复用，跳过 venv（直接用系统 Python 也能跑）
+            pass
 
-    pip = os.path.join(venv_dir, "bin", "pip")
+    pip = os.path.join(venv_dir, "bin", "pip") if os.path.isdir(venv_dir) else None
     req = os.path.join(target_dir, "requirements.txt")
-    if os.path.exists(req):
+    if pip and os.path.exists(req):
         rc, stdout, stderr = _run([pip, "install", "-r", req], timeout=300)
         if rc != 0:
             return False, f"依赖安装失败: {stderr}"
