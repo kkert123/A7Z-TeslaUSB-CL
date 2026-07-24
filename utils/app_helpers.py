@@ -733,15 +733,17 @@ def _stats_broadcaster():
             except Exception:
                 pass
 
-            # 版本信息（每 5 分钟检查一次，check_latest_release 自身有 1h 内存缓存）
+            # 版本信息 — 每次采集都检查，check_latest_release 内部有 1h 缓存
             # 仪表盘服务卡片实时显示当前/最新版本
-            if now - _last_version_check > 300:
-                _last_version_check = now
-                try:
-                    import version_service
-                    stats['version_info'] = version_service.check_latest_release()
-                except Exception:
-                    pass
+            try:
+                import version_service
+                stats['version_info'] = version_service.check_latest_release()
+            except Exception as e:
+                stats['version_info'] = {
+                    'current': getattr(config, 'APP_VERSION', '0'),
+                    'latest': None, 'has_update': False,
+                    'error': f'版本检查异常: {e}',
+                }
 
             with state.stats_subscribers_lock:
                 dead = []
