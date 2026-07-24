@@ -1,184 +1,374 @@
 {% extends "base.html" %}
 
 {% block title %} — 系统控制{% endblock %}
+
 {% block content %}
-<div class="page-header"><h2>⚙️ 系统控制</h2></div>
+<div class="page-header"><h2>系统控制</h2></div>
 
-<!-- 🆕 系统信息卡片 -->
-<div class="section">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🖥️ 系统信息</h3>
-  <div class="detail-grid">
-    <div class="detail-item"><span class="label">发行版</span><span class="value" id="sys-distro">—</span></div>
-    <div class="detail-item"><span class="label">内核</span><span class="value" id="sys-kernel">—</span></div>
-    <div class="detail-item"><span class="label">架构</span><span class="value" id="sys-arch">—</span></div>
-    <div class="detail-item"><span class="label">CPU 型号</span><span class="value" id="sys-cpu-model">—</span></div>
-    <div class="detail-item"><span class="label">运行时间</span><span class="value" id="sys-uptime">{% if system_uptime %}{{ system_uptime }}{% else %}—{% endif %}</span></div>
-    <div class="detail-item"><span class="label">Python</span><span class="value" id="sys-python">—</span></div>
+<style>
+/* ═══ 折叠面板样式 ═══ */
+.sys-group { margin-bottom: 6px; border-radius: var(--r-md); overflow: hidden; border: 0.5px solid var(--border); }
+.sys-group-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; cursor: pointer; user-select: none;
+  background: var(--bg-card); font-size: 0.85rem; font-weight: 600;
+  transition: background 0.15s;
+}
+.sys-group-header:hover { background: var(--bg-hover); }
+.sys-group-header .sg-summary { font-size: 0.7rem; color: var(--text-muted); font-weight: 400; margin-left: 10px; }
+.sys-group-header .sg-chevron { font-size: 0.7rem; color: var(--text-muted); transition: transform 0.2s; }
+.sys-group.open .sys-group-header .sg-chevron { transform: rotate(90deg); }
+.sys-group-body { display: none; padding: 14px 16px; background: var(--bg-page); }
+.sys-group.open .sys-group-body { display: block; }
+
+/* 系统信息表格 */
+.sys-info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 16px; }
+.sys-info-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.8rem; border-bottom: 0.5px solid var(--border); }
+.sys-info-row .k { color: var(--text-muted); }
+.sys-info-row .v { font-weight: 500; }
+
+/* 版本卡 */
+.version-card { display: flex; align-items: center; gap: 16px; padding: 10px 14px; background: var(--bg-card); border-radius: var(--r-md); margin-bottom: 10px; }
+.version-card .vc-badge { font-size: 1.1rem; font-weight: 700; }
+.version-card .vc-status { font-size: 0.75rem; }
+.version-card .vc-latest { font-size: 0.85rem; color: var(--text-muted); }
+
+/* 服务列表 */
+.service-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 0.5px solid var(--border); font-size: 0.8rem; }
+.service-row:last-child { border-bottom: none; }
+.service-row .sr-name { font-weight: 500; }
+.service-row .sr-timer { font-size: 0.68rem; color: var(--text-muted); }
+
+/* 按钮组 */
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* 上传区 */
+.upload-zone { border: 1.5px dashed var(--border); border-radius: var(--r-md); padding: 16px; text-align: center; margin-top: 10px; }
+.upload-zone input[type="file"] { display: none; }
+.upload-zone.drag-over { border-color: var(--accent); background: rgba(59,130,246,0.05); }
+
+/* 调温控曲线行 */
+.fan-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.fan-row input[type="number"] { width: 55px; padding: 2px 6px; font-size: 0.75rem; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); }
+
+@media (max-width: 600px) {
+  .sys-info-grid { grid-template-columns: 1fr; }
+  .version-card { flex-direction: column; align-items: flex-start; }
+}
+</style>
+
+<!-- ═══════════════════════════════════════════
+     Group 1: System info
+     ═══════════════════════════════════════════ -->
+<div class="sys-group open" id="grp-system">
+  <div class="sys-group-header" onclick="toggleGroup('grp-system')">
+    <span>System info <span class="sg-summary" id="sys-summary-line">Loading...</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <div class="sys-info-grid" id="sys-info-grid">
+      <div class="sys-info-row"><span class="k">OS</span><span class="v" id="sys-distro">—</span></div>
+      <div class="sys-info-row"><span class="k">Kernel</span><span class="v" id="sys-kernel">—</span></div>
+      <div class="sys-info-row"><span class="k">Arch</span><span class="v" id="sys-arch">—</span></div>
+      <div class="sys-info-row"><span class="k">CPU</span><span class="v" id="sys-cpu-model">—</span></div>
+      <div class="sys-info-row"><span class="k">Uptime</span><span class="v" id="sys-uptime">{% if system_uptime %}{{ system_uptime }}{% else %}—{% endif %}</span></div>
+      <div class="sys-info-row"><span class="k">Python</span><span class="v" id="sys-python">—</span></div>
+      <div class="sys-info-row"><span class="k">Version</span><span class="v" id="sys-version-display" style="color:var(--success)">v{{ version }}</span></div>
+      <div class="sys-info-row"><span class="k">Service</span><span class="v" id="sys-service-status" style="color:var(--success)">{% if service.active %}Running{% else %}Stopped{% endif %}</span></div>
+    </div>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn btn-sm" onclick="serviceAction('restart')">Restart service</button>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('stop')">Stop</button>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('start')">Start</button>
+    </div>
   </div>
 </div>
 
-<!-- 🆕 当前模式 -->
-<div class="section">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🔀 USB 模式</h3>
-  <div style="display:flex;align-items:center;gap:var(--s4)">
-    <span style="font-size:var(--text-lg);font-weight:700" id="current-mode-display">
-      <span class="status status-ok">加载中...</span>
-    </span>
-    <button class="btn btn-primary btn-sm" onclick="toggleModeBtn()">切换模式</button>
+<!-- ═══════════════════════════════════════════
+     Group 2: Version & upgrade
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-version">
+  <div class="sys-group-header" onclick="toggleGroup('grp-version')">
+    <span>Version & upgrade <span class="sg-summary" id="ver-summary">v{{ version }}</span></span>
+    <span class="sg-chevron">▶</span>
   </div>
-  <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:var(--s2)">
-    <strong>Present 模式</strong>: USB 连接 Tesla，提供行车记录存储 · 
-    <strong>Edit 模式</strong>: 断开 USB，允许通过 Samba/Web 管理文件
-  </p>
-</div>
-
-<!-- 🆕 磁盘挂载状态 -->
-<div class="section">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">💿 磁盘挂载状态</h3>
-  <div style="overflow-x:auto">
-    <table style="width:100%">
-      <thead>
-        <tr>
-          <th>挂载点</th>
-          <th>设备</th>
-          <th>文件系统</th>
-          <th>容量</th>
-          <th>已用</th>
-          <th>使用率</th>
-          <th>状态</th>
-        </tr>
-      </thead>
-      <tbody id="mount-table-body">
-        <tr><td colspan="7" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <button class="btn btn-ghost btn-sm" style="margin-top:var(--s2)" onclick="loadMountStatus()">🔄 刷新挂载状态</button>
-</div>
-
-<!-- 服务控制 -->
-<div class="section">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">TeslaUSB 服务</h3>
-  <div style="display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s4)">
-    <span class="status {% if service.active %}status-ok{% else %}status-err{% endif %}">{{ '运行中' if service.active else '已停止' }}</span>
-    {% if service.uptime %}<span style="font-size:var(--text-sm);color:var(--text-secondary)">运行时长: {{ service.uptime }}</span>{% endif %}
-  </div>
-  <div class="btn-group">
-    <button class="btn btn-primary btn-sm" onclick="serviceAction('restart')">🔄 重启服务</button>
-    <button class="btn btn-ghost btn-sm" onclick="serviceAction('stop')">⏹ 停止</button>
-    <button class="btn btn-ghost btn-sm" onclick="serviceAction('start')">▶ 启动</button>
-  </div>
-</div>
-
-<!-- 企业微信机器人 -->
-<div class="section">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">📱 企业微信机器人</h3>
-  {% if wecom.configured and wecom.bots %}
-  <div style="margin-bottom:var(--s3);font-size:var(--text-sm)">
-    {% for bot in wecom.bots %}
-    <div style="padding:10px 0;{% if not loop.first %}border-top:1px solid var(--border);{% endif %}">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-        <strong>{{ bot.name }}</strong>
-        <code style="font-size:var(--text-xs);background:var(--bg-secondary);padding:2px 8px;border-radius:4px">...{{ bot.key_suffix }}</code>
+  <div class="sys-group-body">
+    <!-- 当前/最新版本 -->
+    <div class="version-card">
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Current</div>
+        <div class="vc-badge" id="ver-current-display">v{{ version }}</div>
       </div>
-      <div style="font-size:var(--text-xs);color:var(--text-muted)">{{ bot.desc }}</div>
+      <div style="font-size:0.7rem;color:var(--text-muted)">→</div>
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Latest</div>
+        <div class="vc-latest" id="ver-latest">Checking...</div>
+      </div>
+      <div class="vc-status" id="ver-status">—</div>
     </div>
-    {% endfor %}
-    <div style="margin-top:8px;font-size:var(--text-xs);color:var(--text-muted)">
-      配置文件: <code style="background:var(--bg-secondary);padding:1px 6px;border-radius:3px">config/sentry.json</code>
+
+    <!-- 检查 + 升级按钮 -->
+    <div class="btn-row" style="margin-bottom:8px">
+      <button class="btn btn-sm btn-primary" onclick="checkVersionNow()">Check update</button>
+      <span id="ver-changelog" style="font-size:0.72rem;color:var(--text-muted)"></span>
+    </div>
+    <div id="upgrade-controls" style="display:none;padding:10px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px">
+      <div class="btn-row">
+        <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()">Upgrade to <span id="upgrade-target"></span></button>
+        <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">Rollback to <span id="rollback-target"></span></button>
+      </div>
+      <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
+      <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
+    </div>
+
+    <!-- 手动上传升级包 -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Manual upload</div>
+      <div class="upload-zone" id="upload-zone" onclick="document.getElementById('upgrade-file').click()">
+        <input type="file" id="upgrade-file" accept=".tar.gz" onchange="onFileSelected()">
+        <div id="upload-prompt">Click or drag .tar.gz here</div>
+        <div id="upload-file-name" style="display:none;font-weight:500;margin-top:4px"></div>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <input type="text" id="upload-sha256" placeholder="SHA256 (optional)" style="flex:1;padding:4px 8px;font-size:0.78rem;font-family:monospace;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
+        <button class="btn btn-primary btn-sm" id="btn-manual-upgrade" onclick="startManualUpgrade()" disabled>Install</button>
+      </div>
+    </div>
+
+    <!-- 内测密钥 -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <label style="font-size:0.75rem;font-weight:500">Beta key</label>
+      <span style="font-size:0.68rem;color:var(--text-muted)">（仅内测版本需要，公开版本留空即可）</span>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <input type="password" id="gh-token" placeholder="key..." style="flex:1;font-family:monospace;font-size:0.75rem" autocomplete="off">
+        <button class="btn btn-sm" onclick="saveGithubToken()">Save</button>
+        <button class="btn btn-sm btn-outline" onclick="clearGithubToken()">Clear</button>
+      </div>
+      <span id="gh-token-status" style="font-size:0.68rem;color:var(--text-muted)"></span>
     </div>
   </div>
-  <div class="btn-group">
-    <button class="btn btn-primary btn-sm" onclick="testWecom()">📤 测试推送</button>
-  </div>
-  {% else %}
-  <div style="font-size:var(--text-sm);color:var(--text-muted);padding:8px 0">
-    未配置企业微信机器人。请在 <code style="background:var(--bg-secondary);padding:2px 6px;border-radius:4px">config/sentry.json</code> 中设置 <code>wecom_status_webhook_key</code> 和/或 <code>wecom_sentry_webhook_key</code>。
-  </div>
-  {% endif %}
-  <div id="wecom-result" class="alert" style="display:none"></div>
 </div>
 
-<!-- 系统操作 -->
-<div class="section">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🔌 系统操作</h3>
-  <div class="btn-group" style="margin-bottom:var(--s3)">
-    <button class="btn btn-warning btn-sm" onclick="systemReboot()">🔁 重启</button>
-    <button class="btn btn-danger btn-sm" onclick="systemShutdown()">🔌 关机</button>
+<!-- ═══════════════════════════════════════════
+     Group 3: USB mode
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-usb">
+  <div class="sys-group-header" onclick="toggleGroup('grp-usb')">
+    <span>USB mode <span class="sg-summary" id="usb-summary">Loading...</span></span>
+    <span class="sg-chevron">▶</span>
   </div>
-  <p style="font-size:var(--text-xs);color:var(--text-muted)">关机后需断电重新上电启动</p>
+  <div class="sys-group-body">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <span style="font-size:1rem;font-weight:700" id="current-mode-display">
+        <span class="status status-ok">Loading...</span>
+      </span>
+      <button class="btn btn-primary btn-sm" onclick="toggleModeBtn()">Switch</button>
+    </div>
+    <p style="font-size:0.68rem;color:var(--text-muted)">Present: USB connected to Tesla · Edit: Samba/Web file management</p>
+
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Auto return</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;cursor:pointer">
+          <input type="checkbox" id="ap-enabled" onchange="autoPresentChanged()"> Enable
+        </label>
+        <span style="font-size:0.8rem">Timeout:</span>
+        <input type="number" id="ap-timeout" min="1" max="60" value="5" onchange="autoPresentChanged()"
+          style="width:60px;padding:4px 6px;font-size:0.8rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
+        <span style="font-size:0.8rem;color:var(--text-muted)">min</span>
+        <button id="ap-save-btn" class="btn btn-primary btn-sm" onclick="saveAutoPresent()" disabled>Save</button>
+        <span id="ap-status" style="font-size:0.75rem;display:none"></span>
+      </div>
+      <div id="ap-live" style="display:none;padding:8px 12px;margin-top:8px;background:rgba(245,158,11,0.1);border-radius:6px;font-size:0.8rem">
+        Countdown: <strong id="ap-countdown" style="color:var(--warning)">—</strong>
+        <button class="btn btn-sm btn-outline" onclick="cancelAutoPresent()" style="margin-left:10px">Cancel</button>
+      </div>
+    </div>
+  </div>
 </div>
 
-<!-- 操作结果 -->
+<!-- ═══════════════════════════════════════════
+     Group 4: Health & notifications
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-health">
+  <div class="sys-group-header" onclick="toggleGroup('grp-health')">
+    <span>Health & notifications <span class="sg-summary" id="health-summary">Loading...</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <!-- 系统健康 -->
+    <div style="margin-bottom:14px">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">System health</div>
+      <div id="health-details" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+    </div>
+
+    <!-- 推送健康 -->
+    <div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:0.8rem;font-weight:600">WeChat push health</span>
+        <button class="btn btn-sm btn-outline" onclick="loadPushHealth()">Refresh</button>
+      </div>
+      <div id="push-health-list" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+    </div>
+
+    <!-- 服务状态 -->
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:0.8rem;font-weight:600">Service status</span>
+        <button class="btn btn-sm btn-outline" onclick="loadServices()">Refresh</button>
+      </div>
+      <div id="services-list" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     Group 5: Storage
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-storage">
+  <div class="sys-group-header" onclick="toggleGroup('grp-storage')">
+    <span>Storage <span class="sg-summary" id="storage-summary">Loading...</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <div style="overflow-x:auto">
+      <table style="width:100%;font-size:0.75rem">
+        <thead>
+          <tr style="color:var(--text-muted);border-bottom:0.5px solid var(--border)">
+            <th style="padding:4px 6px;text-align:left">Mount</th>
+            <th style="padding:4px 6px;text-align:left">Device</th>
+            <th style="padding:4px 6px;text-align:left">FS</th>
+            <th style="padding:4px 6px;text-align:right">Total</th>
+            <th style="padding:4px 6px;text-align:right">Used</th>
+            <th style="padding:4px 6px">Usage</th>
+          </tr>
+        </thead>
+        <tbody id="mount-table-body">
+          <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:10px">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn btn-sm btn-outline" onclick="loadMountStatus()">Refresh</button>
+      <button class="btn btn-sm btn-danger" onclick="formatTeslaCam()" style="background:#dc2626;color:#fff">Format TeslaCam</button>
+    </div>
+    <pre id="format-output" style="display:none;margin-top:8px;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:0.7rem;max-height:200px;overflow-y:auto"></pre>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     Group 6: Tools
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-tools">
+  <div class="sys-group-header" onclick="toggleGroup('grp-tools')">
+    <span>Tools <span class="sg-summary">Fan curve · Thumbnail reset</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <!-- 风扇 -->
+    <div style="margin-bottom:12px">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Fan curve</div>
+      <div id="fan-curve-rows" style="margin-bottom:6px"><span style="color:var(--text-muted);font-size:0.75rem">Loading...</span></div>
+      <div class="btn-row">
+        <button class="btn btn-sm btn-outline" onclick="fanCurveAddRow()">+ Add</button>
+        <button class="btn btn-sm btn-primary" onclick="saveFanCurve()">Save</button>
+        <span id="fan-curve-status" style="font-size:0.7rem"></span>
+        <span style="font-size:0.7rem;color:var(--text-muted);margin-left:auto">Base PWM: <input type="number" id="fan-lowest-pwm" min="0" max="255" value="50" style="width:50px;padding:2px 6px;font-size:0.7rem"></span>
+      </div>
+    </div>
+
+    <!-- 缩略图 -->
+    <div style="padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Thumbnail reset range</div>
+      <div class="btn-row">
+        <input type="number" id="thumb-reset-minutes" min="1" max="1440" value="60" style="width:60px;padding:4px 6px;font-size:0.75rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
+        <span style="font-size:0.75rem;color:var(--text-muted)">minutes</span>
+        <button id="thumb-reset-save" class="btn btn-primary btn-sm" onclick="saveThumbReset()">Save</button>
+        <span id="thumb-reset-status" style="font-size:0.7rem;color:var(--text-muted)"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     Group 7: Power
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-power">
+  <div class="sys-group-header" onclick="toggleGroup('grp-power')">
+    <span style="color:var(--danger)">Power</span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <div class="btn-row">
+      <button class="btn btn-sm" onclick="systemReboot()" style="color:var(--warning);border-color:var(--warning)">Reboot</button>
+      <button class="btn btn-sm" onclick="systemShutdown()" style="color:var(--danger);border-color:var(--danger)">Shutdown</button>
+    </div>
+    <p style="font-size:0.68rem;color:var(--text-muted);margin-top:6px">Power cycle required after shutdown</p>
+  </div>
+</div>
+
 <div id="op-result" class="alert" style="display:none"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function showResult(id, msg, ok){
+// ═══ Accordion toggle ═══
+function toggleGroup(id) {
+  document.getElementById(id).classList.toggle('open');
+}
+
+// ═══ Toast ═══
+function showResult(id, msg, ok) {
   var el = document.getElementById(id);
   el.textContent = msg;
   el.className = 'alert ' + (ok ? 'alert-success' : 'alert-danger');
   el.style.display = 'flex';
-  setTimeout(function(){ el.style.display = 'none'; }, 5000);
+  setTimeout(function() { el.style.display = 'none'; }, 5000);
 }
 
-function serviceAction(a){
-  var labels = {restart:'重启', stop:'停止', start:'启动'};
-  if(!confirm('确定' + labels[a] + '服务？')) return;
+// ═══ Service control ═══
+function serviceAction(a) {
+  var labels = { restart: 'Restart', stop: 'Stop', start: 'Start' };
+  if (!confirm('Confirm ' + labels[a] + ' service?')) return;
   fetch('/api/system/service', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:a})
-  }).then(function(r){return r.json();}).then(function(d){
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: a })
+  }).then(r => r.json()).then(d => {
     showResult('op-result', d.message, d.success);
-    if(d.success) setTimeout(function(){ location.reload(); }, 2000);
-  }).catch(function(){ showResult('op-result', '请求失败', false); });
+    if (d.success) setTimeout(() => location.reload(), 2000);
+  }).catch(() => showResult('op-result', 'Request failed', false));
 }
 
-function systemReboot(){
-  if(!confirm('确定重启系统？')) return;
-  fetch('/api/system/reboot', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
-    showResult('op-result', d.message, d.success);
-  }).catch(function(){ showResult('op-result', '请求失败', false); });
+function systemReboot() {
+  if (!confirm('Confirm reboot?')) return;
+  fetch('/api/system/reboot', { method: 'POST' })
+    .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
 }
 
-function systemShutdown(){
-  if(!confirm('确定关机？')) return;
-  fetch('/api/system/shutdown', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
-    showResult('op-result', d.message, d.success);
-  }).catch(function(){ showResult('op-result', '请求失败', false); });
+function systemShutdown() {
+  if (!confirm('Confirm shutdown?')) return;
+  fetch('/api/system/shutdown', { method: 'POST' })
+    .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
 }
 
-function testWecom(){
-  showResult('wecom-result', '正在发送测试消息...', true);
-  fetch('/api/system/wecom-test', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
-    showResult('wecom-result', d.message, d.success);
-  }).catch(function(e){ showResult('wecom-result', '请求失败: ' + e.message, false); });
-}
-
-// ── 系统信息加载 ──
+// ═══ System info ═══
 async function loadSystemInfo() {
   try {
-    const r = await fetch('/api/system/stats');
-    const d = await r.json();
-    if (!d.success) return;
-
-    // 系统信息从服务端获取
-    const infoR = await fetch('/api/system/info');
-    if (infoR.ok) {
-      const info = await infoR.json();
-      if (info.success) {
-        document.getElementById('sys-distro').textContent = info.distro || '—';
-        document.getElementById('sys-kernel').textContent = info.kernel || '—';
-        document.getElementById('sys-arch').textContent = info.arch || '—';
-        document.getElementById('sys-cpu-model').textContent = info.cpu_model || '—';
-        document.getElementById('sys-python').textContent = info.python || '—';
-      }
+    const ir = await fetch('/api/system/info');
+    const info = await ir.json();
+    if (info.success) {
+      document.getElementById('sys-distro').textContent = info.distro || '—';
+      document.getElementById('sys-kernel').textContent = info.kernel || '—';
+      document.getElementById('sys-arch').textContent = info.arch || '—';
+      document.getElementById('sys-cpu-model').textContent = info.cpu_model || '—';
+      document.getElementById('sys-python').textContent = info.python || '—';
+      document.getElementById('sys-summary-line').textContent =
+        (info.distro || '—') + ' · ' + (info.arch || '') + ' · v{{ version }}';
     }
-  } catch(e) { console.error('loadSystemInfo error:', e); }
+  } catch (e) { console.error('loadSystemInfo:', e); }
 }
 
-// ── 模式显示 ──
+// ═══ USB mode ═══
 async function loadModeDisplay() {
   try {
     const r = await fetch('/api/mode/status');
@@ -186,79 +376,346 @@ async function loadModeDisplay() {
     if (d.success) {
       const el = document.getElementById('current-mode-display');
       const mode = d.mode || 'edit';
-      if (mode === 'present') {
-        el.innerHTML = '<span class="status status-ok" style="color:var(--success)">🚗 Present — USB 连接 Tesla</span>';
-      } else {
-        el.innerHTML = '<span class="status status-warn" style="color:var(--warning)">✏️ Edit — 网络管理模式</span>';
-      }
+      el.innerHTML = mode === 'present'
+        ? '<span style="color:var(--success);font-size:1rem">Present</span>'
+        : '<span style="color:var(--warning);font-size:1rem">Edit</span>';
+      document.getElementById('usb-summary').textContent = (mode === 'present' ? 'Present' : 'Edit');
     }
-  } catch(e) { console.error('loadModeDisplay error:', e); }
-}
-
-// ── 挂载状态 ──
-async function loadMountStatus() {
-  const tbody = document.getElementById('mount-table-body');
-  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center">加载中...</td></tr>';
-  try {
-    const r = await fetch('/api/system/mounts');
-    const d = await r.json();
-    if (!d.success) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">加载失败</td></tr>';
-      return;
-    }
-    const mounts = d.mounts || [];
-    if (!mounts.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">无挂载数据</td></tr>';
-      return;
-    }
-    tbody.innerHTML = mounts.map(m => {
-      const pct = m.percent || 0;
-      const isCached = !m.mounted && m.total_fmt && m.total_fmt !== '0' && m.total_fmt !== '—';
-      const statusColor = !m.mounted ? (isCached ? 'var(--warning)' : 'var(--danger)') :
-        pct > 90 ? 'var(--danger)' : pct > 85 ? 'var(--warning)' : 'var(--success)';
-      const statusText = !m.mounted ? (isCached ? '💾 缓存' : '❌ 未挂载') :
-        pct > 90 ? '⚠️ 空间紧张' : pct > 85 ? '⚠️ 警告' : '✅ 正常';
-      return `<tr>
-        <td><code>${m.mount_point || '—'}</code></td>
-        <td>${m.device || '—'}</td>
-        <td>${m.fs_type || '—'}</td>
-        <td>${m.total_fmt || '—'}</td>
-        <td>${m.used_fmt || '—'}</td>
-        <td>
-          <div style="display:flex;align-items:center;gap:8px">
-            <div style="flex:1;height:4px;background:var(--progress-bg);border-radius:2px;overflow:hidden">
-              <div style="height:100%;width:${pct}%;background:${statusColor};border-radius:2px"></div>
-            </div>
-            <span style="font-size:var(--text-xs);font-weight:600">${pct}%</span>
-          </div>
-        </td>
-        <td><span style="color:${statusColor};font-size:var(--text-xs);font-weight:600">${statusText}</span></td>
-      </tr>`;
-    }).join('');
-  } catch(e) {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--danger)">请求失败</td></tr>';
-    console.error('loadMountStatus error:', e);
-  }
+  } catch (e) {}
 }
 
 function toggleModeBtn() {
   const newMode = document.getElementById('current-mode-display').textContent.includes('Present') ? 'edit' : 'present';
   fetch('/api/mode/switch', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({mode: newMode})
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: newMode })
   }).then(r => r.json()).then(d => {
-    if (d.success) {
-      showResult('op-result', d.message, true);
-      setTimeout(() => location.reload(), 2000);
-    } else {
-      showResult('op-result', d.error || '切换失败', false);
-    }
-  }).catch(e => showResult('op-result', '请求失败: ' + e.message, false));
+    if (d.success) { showResult('op-result', d.message, true); setTimeout(() => location.reload(), 2000); }
+    else showResult('op-result', d.error || 'Failed', false);
+  });
 }
 
-// 初始化
-loadSystemInfo();
-loadModeDisplay();
-loadMountStatus();
+// ═══ Auto present ═══
+let apConfigLoaded = false;
+async function loadAutoPresentConfig() {
+  try {
+    const r = await fetch('/api/auto-present/status');
+    const d = await r.json();
+    if (!d.success) return;
+    apConfigLoaded = true;
+    document.getElementById('ap-enabled').checked = d.enabled;
+    document.getElementById('ap-timeout').value = d.timeout_minutes;
+    document.getElementById('ap-save-btn').disabled = true;
+    updateAutoPresentLive(d);
+  } catch (e) {}
+}
+function autoPresentChanged() { if (apConfigLoaded) document.getElementById('ap-save-btn').disabled = false; }
+async function saveAutoPresent() {
+  const enabled = document.getElementById('ap-enabled').checked;
+  const timeout = parseInt(document.getElementById('ap-timeout').value, 10);
+  if (isNaN(timeout) || timeout < 1 || timeout > 60) { showResult('op-result', 'Timeout must be 1-60', false); return; }
+  const st = document.getElementById('ap-status');
+  st.textContent = 'Saving...'; st.style.display = 'inline'; st.style.color = 'var(--text-muted)';
+  try {
+    const r = await fetch('/api/auto-present/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, timeout_minutes: timeout })
+    });
+    const d = await r.json();
+    if (d.success) { st.textContent = 'Saved'; st.style.color = 'var(--success)'; document.getElementById('ap-save-btn').disabled = true; updateAutoPresentLive(d); }
+    else { st.textContent = 'Failed'; st.style.color = 'var(--danger)'; }
+    setTimeout(() => st.style.display = 'none', 3000);
+  } catch (e) { st.textContent = 'Error'; st.style.color = 'var(--danger)'; setTimeout(() => st.style.display = 'none', 3000); }
+}
+function updateAutoPresentLive(d) {
+  const live = document.getElementById('ap-live'), ct = document.getElementById('ap-countdown');
+  if (d.active) {
+    live.style.display = 'block';
+    ct.textContent = Math.floor(d.remaining_seconds / 60) + 'm' + (d.remaining_seconds % 60).toString().padStart(2, '0') + 's';
+  } else { live.style.display = 'none'; }
+}
+async function cancelAutoPresent() {
+  const r = await fetch('/api/auto-present/cancel', { method: 'POST' });
+  const d = await r.json();
+  if (d.success) { document.getElementById('ap-live').style.display = 'none'; showResult('op-result', 'Countdown cancelled', true); }
+}
+setInterval(async function() {
+  if (document.getElementById('ap-live').style.display !== 'none') {
+    try { const r = await fetch('/api/auto-present/status'); const d = await r.json(); if (d.success) updateAutoPresentLive(d); } catch (e) {}
+  }
+}, 5000);
+
+// ═══ Health & services (migrated from analytics) ═══
+async function loadSummary() {
+  try {
+    const r = await fetch('/api/analytics/summary');
+    const d = await r.json();
+    if (!d.success) return;
+    const h = d.health || {};
+    const healthy = h.healthy !== false;
+    let html = '';
+    if (h.metrics) {
+      if (h.metrics.cpu_load !== undefined) html += 'CPU: ' + h.metrics.cpu_load.toFixed(1) + '% · ';
+      if (h.metrics.memory) html += 'Mem: ' + h.metrics.memory.used_mb + '/' + h.metrics.memory.total_mb + 'MB (' + h.metrics.memory.percent.toFixed(1) + '%) · ';
+      if (h.metrics.temperature !== undefined) html += 'Temp: ' + h.metrics.temperature.toFixed(1) + 'C · ';
+      if (h.metrics.network !== undefined) html += 'Net: ' + (h.metrics.network ? 'Online' : 'Offline');
+    }
+    if (h.issues && h.issues.length) html += '<br><span style="color:var(--danger)">' + h.issues.join('<br>') + '</span>';
+    if (!html) html = 'System running normally';
+    document.getElementById('health-details').innerHTML = html;
+    document.getElementById('sys-service-status').textContent = healthy ? 'Running' : 'Warning';
+    document.getElementById('sys-service-status').style.color = healthy ? 'var(--success)' : 'var(--danger)';
+    document.getElementById('health-summary').textContent = healthy ? 'Healthy' : 'Issues detected';
+  } catch (e) {}
+}
+
+async function loadPushHealth() {
+  const el = document.getElementById('push-health-list');
+  el.innerHTML = 'Loading...';
+  try {
+    const r = await fetch('/api/analytics/push-health');
+    const d = await r.json();
+    if (!d.success) { el.innerHTML = '<span style="color:var(--text-muted)">WeChat not configured</span>'; return; }
+    const bots = d.bots || {};
+    const entries = Object.entries(bots);
+    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">No bots configured</span>'; return; }
+    el.innerHTML = entries.map(([id, bot]) => {
+      const total = bot.total_pushes || 0, success = bot.success_count || 0, fail = bot.fail_count || 0;
+      const rate = total > 0 ? Math.round(success / total * 100) : 0;
+      const color = rate >= 90 ? 'var(--success)' : rate >= 70 ? 'var(--warning)' : 'var(--danger)';
+      return '<div style="padding:6px 0;border-bottom:0.5px solid var(--border)">' +
+        '<span style="font-weight:500">' + (bot.name || id) + '</span> ' +
+        '<span style="font-size:0.7rem;color:var(--text-muted)">total ' + total + '</span> ' +
+        '<span style="color:' + color + ';font-weight:600">' + rate + '%</span> ' +
+        '<span style="font-size:0.7rem;color:var(--success)">ok ' + success + '</span> ' +
+        '<span style="font-size:0.7rem;color:var(--danger)">fail ' + fail + '</span></div>';
+    }).join('');
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; }
+}
+
+async function loadServices() {
+  const el = document.getElementById('services-list');
+  el.innerHTML = 'Loading...';
+  try {
+    const r = await fetch('/api/analytics/services');
+    const d = await r.json();
+    if (!d.success) { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; return; }
+    const svcs = d.services || {};
+    const entries = Object.entries(svcs);
+    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">No data</span>'; return; }
+    el.innerHTML = entries.map(([name, svc]) => {
+      const ok = svc.active;
+      const timer = svc.timer_next ? ' (next: ' + svc.timer_next + ')' : '';
+      return '<div class="service-row">' +
+        '<span class="sr-name">' + name + '<span class="sr-timer">' + timer + '</span></span>' +
+        '<span style="color:' + (ok ? 'var(--success)' : 'var(--danger)') + '">' + (ok ? 'Running' : 'Stopped') + '</span>' +
+        '</div>';
+    }).join('');
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; }
+}
+
+// ═══ Mount status ═══
+async function loadMountStatus() {
+  const tbody = document.getElementById('mount-table-body');
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">Loading...</td></tr>';
+  try {
+    const r = await fetch('/api/system/mounts');
+    const d = await r.json();
+    if (!d.success || !(d.mounts || []).length) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No data</td></tr>'; return; }
+    let mounted = 0, total = d.mounts.length;
+    tbody.innerHTML = d.mounts.map(m => {
+      const pct = m.percent || 0;
+      const color = !m.mounted ? 'var(--danger)' : pct > 90 ? 'var(--danger)' : pct > 85 ? 'var(--warning)' : 'var(--success)';
+      if (m.mounted) mounted++;
+      return '<tr style="border-bottom:0.5px solid var(--border)">' +
+        '<td style="padding:4px 6px"><code>' + (m.mount_point || '—') + '</code></td>' +
+        '<td style="padding:4px 6px;font-size:0.7rem">' + (m.device || '—') + '</td>' +
+        '<td style="padding:4px 6px;font-size:0.7rem">' + (m.fs_type || '—') + '</td>' +
+        '<td style="padding:4px 6px;text-align:right;font-size:0.7rem">' + (m.total_fmt || '—') + '</td>' +
+        '<td style="padding:4px 6px;text-align:right;font-size:0.7rem">' + (m.used_fmt || '—') + '</td>' +
+        '<td style="padding:4px 6px;text-align:right;color:' + color + ';font-weight:600">' + pct + '%</td>' +
+        '</tr>';
+    }).join('');
+    document.getElementById('storage-summary').textContent = mounted + '/' + total + ' mounted';
+  } catch (e) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--danger)">Failed</td></tr>'; }
+}
+async function formatTeslaCam() {
+  if (!confirm('This will erase all TeslaCam data. Continue?')) return;
+  const output = document.getElementById('format-output');
+  output.style.display = 'block'; output.textContent = 'Formatting...';
+  try {
+    const r = await fetch('/api/system/format-teslacam', { method: 'POST' });
+    const d = await r.json();
+    output.textContent = d.success ? (d.output || 'Done') : (d.error || 'Failed');
+    output.style.color = d.success ? '#16a34a' : '#dc2626';
+    if (d.success) setTimeout(loadMountStatus, 1000);
+  } catch (e) { output.textContent = 'Error: ' + e; output.style.color = '#dc2626'; }
+}
+
+// ═══ Fan curve ═══
+async function loadFanCurve() {
+  try {
+    const r = await fetch('/api/fan/curve');
+    const d = await r.json();
+    if (!d.success) return;
+    const curve = d.data.curve || [];
+    document.getElementById('fan-lowest-pwm').value = d.data.lowest_pwm || 50;
+    document.getElementById('fan-curve-rows').innerHTML = curve.map((e, i) =>
+      '<div class="fan-row">≥<input type="number" value="' + e.temp + '" min="0" max="125">&deg;C → PWM <input type="number" value="' + e.pwm + '" min="0" max="255" onchange="fanCurveChanged()"> <button class="btn btn-sm btn-outline" onclick="this.parentElement.remove();fanCurveChanged()" style="font-size:10px;padding:2px 6px">x</button></div>'
+    ).join('') || '<span style="font-size:0.75rem;color:var(--text-muted)">No curve defined</span>';
+  } catch (e) {}
+}
+function fanCurveChanged() { var s = document.getElementById('fan-curve-status'); s.textContent = 'Unsaved'; s.style.color = 'var(--warning)'; }
+function fanCurveAddRow() {
+  var row = document.createElement('div'); row.className = 'fan-row';
+  row.innerHTML = '≥<input type="number" value="75" min="0" max="125">&deg;C → PWM <input type="number" value="255" min="0" max="255" onchange="fanCurveChanged()"> <button class="btn btn-sm btn-outline" onclick="this.parentElement.remove();fanCurveChanged()" style="font-size:10px;padding:2px 6px">x</button>';
+  document.getElementById('fan-curve-rows').appendChild(row); fanCurveChanged();
+}
+async function saveFanCurve() {
+  var rows = document.getElementById('fan-curve-rows').children, curve = [];
+  for (var r of rows) {
+    var inputs = r.querySelectorAll('input[type="number"]');
+    if (inputs.length >= 2) curve.push({ temp: parseInt(inputs[0].value) || 55, pwm: parseInt(inputs[1].value) || 170 });
+  }
+  var lowest = parseInt(document.getElementById('fan-lowest-pwm').value) || 50;
+  var st = document.getElementById('fan-curve-status');
+  try {
+    var r = await fetch('/api/fan/curve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ curve, lowest_pwm: lowest }) });
+    var d = await r.json();
+    st.textContent = d.success ? 'Saved (active in 15s)' : 'Failed'; st.style.color = d.success ? 'var(--success)' : 'var(--danger)';
+    if (d.success) loadFanCurve();
+  } catch (e) { st.textContent = 'Error'; st.style.color = 'var(--danger)'; }
+}
+
+// ═══ Thumbnail reset ═══
+function loadThumbResetConfig() { document.getElementById('thumb-reset-minutes').value = localStorage.getItem('thumbResetMinutes') || '60'; }
+function saveThumbReset() {
+  var v = Math.max(1, Math.min(1440, parseInt(document.getElementById('thumb-reset-minutes').value) || 60));
+  localStorage.setItem('thumbResetMinutes', v);
+  var el = document.getElementById('thumb-reset-status'); el.textContent = 'Saved (' + v + 'm)'; el.style.color = 'var(--success)';
+  setTimeout(() => el.textContent = '', 3000);
+}
+
+// ═══ Version management ═══
+function checkVersionNow() {
+  var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status'), ce = document.getElementById('ver-changelog');
+  var ctrl = document.getElementById('upgrade-controls'), te = document.getElementById('upgrade-target');
+  le.textContent = 'Querying...'; se.textContent = '—'; ce.textContent = '';
+  ctrl.style.display = 'none'; _upgradeData = null;
+
+  fetch('/api/version/check')
+    .then(r => r.json()).then(d => {
+      if (!d.success || d.error) { le.textContent = d.error || 'Failed'; se.textContent = 'Warning'; se.style.color = 'var(--warning)'; return; }
+      le.textContent = d.latest ? 'v' + d.latest : '—';
+      document.getElementById('ver-current-display').textContent = 'v' + d.current;
+      document.getElementById('ver-summary').textContent = 'v' + d.current;
+      document.getElementById('sys-version-display').textContent = 'v' + d.current;
+      if (d.has_update) {
+        se.textContent = 'Update available'; se.style.color = '#e74c3c';
+        if (d.changelog) ce.textContent = (d.changelog.split('\n').find(l => l.trim()) || '').substring(0, 120);
+        _upgradeData = d; ctrl.style.display = 'block'; te.textContent = 'v' + d.latest;
+      } else if (d.latest) {
+        se.textContent = 'Up to date'; se.style.color = '#27ae60';
+      }
+      loadRollbackInfo();
+    })
+    .catch(() => { le.textContent = 'Unreachable'; se.textContent = 'Warning'; se.style.color = 'var(--warning)'; });
+}
+
+function loadRollbackInfo() {
+  fetch('/api/version/rollback-info').then(r => r.json()).then(d => {
+    var btn = document.getElementById('btn-rollback'), te = document.getElementById('rollback-target');
+    if (d.can_rollback && btn) { btn.style.display = ''; te.textContent = 'v' + d.rollback_info.version; document.getElementById('upgrade-controls').style.display = 'block'; }
+    else if (btn) btn.style.display = 'none';
+  });
+}
+
+let _upgradeData = null;
+function startUpgrade() {
+  if (!_upgradeData || !confirm('Upgrade to v' + _upgradeData.latest + '?\n\nBackup -> Download -> SHA-256 + Ed25519 verify -> Install -> Restart')) return;
+  var btn = document.getElementById('btn-upgrade'), prog = document.getElementById('upgrade-progress'), res = document.getElementById('upgrade-result');
+  btn.disabled = true; prog.style.display = 'block'; prog.textContent = 'Upgrading...\n'; res.style.display = 'none';
+  var body = { version: _upgradeData.latest, asset_url: _upgradeData.asset_url, sha256: _upgradeData.sha256 || '', sig_url: _upgradeData.sig_url || '' };
+  if (!body.sha256) { prog.textContent += '\nMissing SHA-256 in release body. Aborted.'; btn.disabled = false; return; }
+  fetch('/api/version/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => r.json()).then(d => {
+      prog.textContent += (d.message || d.error || '') + '\n'; prog.scrollTop = prog.scrollHeight;
+      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">Upgrade complete! Reloading...</span>'; setTimeout(() => location.reload(), 3000); }
+      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">Failed: ' + (d.error || 'unknown') + '</span>'; }
+      btn.disabled = false;
+    }).catch(e => { prog.textContent += 'Error: ' + e + '\n'; btn.disabled = false; });
+}
+
+function startRollback() {
+  if (!confirm('Rollback to previous version?')) return;
+  var prog = document.getElementById('upgrade-progress');
+  prog.style.display = 'block'; prog.textContent = 'Rollback...\n';
+  fetch('/api/version/rollback', { method: 'POST' }).then(r => r.json()).then(d => {
+    prog.textContent += (d.message || d.error) + '\n';
+    if (d.success) setTimeout(() => location.reload(), 3000);
+  });
+}
+
+// ═══ Manual upgrade upload ═══
+function onFileSelected() {
+  var inp = document.getElementById('upgrade-file'), name = document.getElementById('upload-file-name'), prompt = document.getElementById('upload-prompt');
+  if (inp.files.length) { name.textContent = inp.files[0].name; name.style.display = ''; prompt.style.display = 'none'; document.getElementById('btn-manual-upgrade').disabled = false; }
+  else { name.style.display = 'none'; prompt.style.display = ''; document.getElementById('btn-manual-upgrade').disabled = true; }
+}
+
+// Drag & drop
+var uz = document.getElementById('upload-zone');
+uz.addEventListener('dragover', function(e) { e.preventDefault(); uz.classList.add('drag-over'); });
+uz.addEventListener('dragleave', function() { uz.classList.remove('drag-over'); });
+uz.addEventListener('drop', function(e) { e.preventDefault(); uz.classList.remove('drag-over');
+  document.getElementById('upgrade-file').files = e.dataTransfer.files; onFileSelected(); });
+
+function startManualUpgrade() {
+  var inp = document.getElementById('upgrade-file');
+  if (!inp.files.length) return;
+  if (!confirm('Install ' + inp.files[0].name + '?\n\nBackup -> SHA-256 -> Ed25519 -> Install -> Restart')) return;
+  var btn = document.getElementById('btn-manual-upgrade'), prog = document.getElementById('upgrade-progress'), res = document.getElementById('upgrade-result');
+  btn.disabled = true; prog.style.display = 'block'; prog.textContent = 'Uploading...\n'; res.style.display = 'none';
+  var form = new FormData();
+  form.append('file', inp.files[0]);
+  var sha = document.getElementById('upload-sha256').value.trim();
+  if (sha) form.append('sha256', sha);
+  fetch('/api/version/upgrade-upload', { method: 'POST', body: form })
+    .then(r => r.json()).then(d => {
+      prog.textContent += (d.message || d.error || '') + '\n';
+      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">Upgrade complete! Reloading...</span>'; setTimeout(() => location.reload(), 3000); }
+      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">Failed: ' + (d.error || 'unknown') + '</span>'; }
+      btn.disabled = false;
+    }).catch(e => { prog.textContent += 'Error: ' + e + '\n'; btn.disabled = false; });
+}
+
+// ═══ Beta key ═══
+function loadGithubToken() {
+  fetch('/api/version/token').then(r => r.json()).then(d => {
+    var st = document.getElementById('gh-token-status');
+    st.textContent = d.has_token ? 'Configured (' + (d.token_preview || '***') + ')' : 'Not configured';
+    st.style.color = d.has_token ? '#27ae60' : 'var(--text-muted)';
+  });
+}
+function saveGithubToken() {
+  var inp = document.getElementById('gh-token'), st = document.getElementById('gh-token-status'), token = inp.value.trim();
+  if (!token) return;
+  fetch('/api/version/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+    .then(r => r.json()).then(d => { st.textContent = d.success ? 'Saved' : 'Failed'; st.style.color = d.success ? '#27ae60' : '#e74c3c'; if (d.success) { inp.value = ''; loadGithubToken(); } });
+}
+function clearGithubToken() {
+  fetch('/api/version/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: '' }) })
+    .then(r => r.json()).then(d => {
+      var st = document.getElementById('gh-token-status'); st.textContent = d.success ? 'Cleared' : 'Failed'; st.style.color = d.success ? '#27ae60' : '#e74c3c';
+      if (d.success) loadGithubToken();
+    });
+}
+
+// ═══ Init ═══
+loadSystemInfo(); loadModeDisplay(); loadAutoPresentConfig(); loadMountStatus(); loadSummary();
+loadPushHealth(); loadServices(); loadThumbResetConfig(); loadFanCurve(); loadGithubToken();
+setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500);
+setInterval(function() { loadPushHealth(); loadSummary(); loadServices(); }, 30000);
+setInterval(function() { loadSummary(); }, 15000);
 </script>
 {% endblock %}
