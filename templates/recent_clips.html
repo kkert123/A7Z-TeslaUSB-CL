@@ -1,0 +1,411 @@
+{% extends "base.html" %}
+{% block title %} — 车外监控{% endblock %}
+{% block content %}
+
+<!-- ═══ 页面头部 ═══ -->
+<div class="page-header">
+  <h2>车外监控</h2>
+  <div class="header-actions">
+    <span class="badge" id="thumbnail-count">{{ thumbnail_count }} 张</span>
+    <span class="badge badge-muted" id="refresh-hint">30s 刷新</span>
+  </div>
+</div>
+
+<!-- ═══ 方案 B: GIF 时光机 ═══ -->
+<div class="section" style="margin-bottom:20px">
+  <div class="card" style="padding:14px 18px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-weight:600;font-size:0.9rem">🎞️ GIF 时光机</span>
+        <div class="gif-controls" style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-sm gif-frame-btn" data-frames="5" onclick="switchGif(5)">5帧</button>
+          <button class="btn btn-sm gif-frame-btn active" data-frames="10" onclick="switchGif(10)">10帧</button>
+          <button class="btn btn-sm gif-frame-btn" data-frames="30" onclick="switchGif(30)">30帧</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-outline" id="btn-download-gif" onclick="downloadGif()" disabled>
+          ⬇ 下载 GIF
+        </button>
+        <button class="btn btn-sm btn-outline" id="btn-refresh-gif" onclick="refreshGif()">
+          🔄 刷新
+        </button>
+      </div>
+    </div>
+
+    <div id="gif-container" style="margin-top:14px;text-align:center;min-height:200px;background:var(--bg-card);border-radius:10px;display:flex;align-items:center;justify-content:center">
+      <div id="gif-loading" style="color:var(--text-muted);padding:40px">
+        <div style="font-size:2rem;margin-bottom:8px">🌀</div>
+        <span>生成中...</span>
+      </div>
+      <img id="gif-img" src="" alt="GIF 时光机"
+        style="display:none;max-width:100%;max-height:500px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">
+    </div>
+
+    <div id="gif-status" style="margin-top:8px;text-align:center;font-size:0.75rem;color:var(--text-muted)">
+      当前: 10帧 × 500ms = 5秒循环
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 方案 A: 缩略图时间线画廊 ═══ -->
+<div class="section">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s4)">
+    📷 缩略图时间线 <span style="font-size:var(--text-xs);color:var(--text-muted);font-weight:400">（最新在前）</span>
+  </h3>
+
+  <div id="gallery-grid" class="gallery-grid">
+    {% for t in thumbnails %}
+    <div class="gallery-item" data-event-id="{{ t.event_id }}" onclick="openModal('{{ t.event_id }}', '/thumbnails/{{ t.filename }}')">
+      <div class="gallery-img-wrapper">
+        <img src="/thumbnails/{{ t.filename }}" alt="{{ t.timestamp }}" loading="lazy"
+          onerror="this.parentElement.innerHTML='<div class=\\'gallery-placeholder\\'>📷<br><small>加载失败</small></div>'">
+      </div>
+      <div class="gallery-label">{{ t.timestamp }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if not thumbnails %}
+  <div id="gallery-empty" style="text-align:center;padding:60px 20px;color:var(--text-muted)">
+    <div style="font-size:3rem;margin-bottom:12px">📷</div>
+    <p>暂无 RecentClips 缩略图</p>
+    <p style="font-size:0.8rem">等待 Tesla 写入行车记录 + bg_preview 生成预览</p>
+    <p style="font-size:0.75rem;margin-top:8px">
+      <span id="empty-countdown">页面将在 30s 后自动刷新</span>
+    </p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ═══ 图片放大 Modal ═══ -->
+<div id="img-modal" class="modal-overlay" onclick="closeModal(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <span id="modal-title">—</span>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <img id="modal-img" src="" alt="预览" style="max-width:100%;max-height:70vh;border-radius:6px">
+    </div>
+    <div class="modal-footer">
+      <a id="modal-download" href="#" download class="btn btn-sm btn-outline">⬇ 下载原图</a>
+      <button class="btn btn-sm" onclick="closeModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ══════════════════════════════════════════════════
+// 方案 B: GIF 时光机
+// ══════════════════════════════════════════════════
+var currentGifFrames = 10;
+var currentGifInterval = 500;
+
+function switchGif(frames) {
+  currentGifFrames = frames;
+  // 更新按钮状态
+  document.querySelectorAll('.gif-frame-btn').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.frames) === frames);
+  });
+  refreshGif();
+}
+
+function refreshGif() {
+  var container = document.getElementById('gif-container');
+  var img = document.getElementById('gif-img');
+  var loading = document.getElementById('gif-loading');
+  var status = document.getElementById('gif-status');
+  var downloadBtn = document.getElementById('btn-download-gif');
+
+  // 显示加载状态
+  img.style.display = 'none';
+  loading.style.display = 'block';
+  downloadBtn.disabled = true;
+
+  var url = '/api/camera/gif?frames=' + currentGifFrames + '&interval=' + currentGifInterval + '&t=' + Date.now();
+
+  img.onload = function() {
+    loading.style.display = 'none';
+    img.style.display = 'block';
+    downloadBtn.disabled = false;
+    var cycleTime = (currentGifFrames * currentGifInterval / 1000).toFixed(1);
+    status.textContent = '当前: ' + currentGifFrames + '帧 × ' + currentGifInterval + 'ms = ' + cycleTime + '秒循环';
+  };
+  img.onerror = function() {
+    loading.innerHTML = '<span style="color:var(--warning)">⚠️ GIF 生成失败，缩略图可能不足</span>';
+    loading.style.display = 'block';
+    img.style.display = 'none';
+    downloadBtn.disabled = true;
+  };
+  img.src = url;
+}
+
+function downloadGif() {
+  var url = '/api/camera/gif?frames=' + currentGifFrames + '&interval=' + currentGifInterval + '&download=1&t=' + Date.now();
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'recent_' + currentGifFrames + 'f_' + currentGifInterval + 'ms.gif';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// 页面加载后自动生成默认 GIF
+document.addEventListener('DOMContentLoaded', function() {
+  // 延迟 500ms 避免与页面渲染竞争
+  setTimeout(refreshGif, 500);
+});
+
+
+// ══════════════════════════════════════════════════
+// 方案 A: 画廊自动刷新
+// ══════════════════════════════════════════════════
+var galleryRefreshTimer = null;
+
+function refreshGallery() {
+  fetch('/api/camera/recent-thumbnails?limit=30&t=' + Date.now())
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.success || !d.thumbnails) return;
+
+      var grid = document.getElementById('gallery-grid');
+      var countBadge = document.getElementById('thumbnail-count');
+      var emptyDiv = document.getElementById('gallery-empty');
+
+      if (countBadge) countBadge.textContent = d.count + ' 张';
+
+      if (d.count === 0) {
+        if (emptyDiv) emptyDiv.style.display = '';
+        if (grid) grid.innerHTML = '';
+        return;
+      }
+
+      if (emptyDiv) emptyDiv.style.display = 'none';
+
+      // 智能更新: 只替换新增/变化的项
+      if (grid) {
+        var existingIds = {};
+        grid.querySelectorAll('.gallery-item').forEach(function(item) {
+          existingIds[item.dataset.eventId] = item;
+        });
+
+        var newHtml = '';
+        d.thumbnails.forEach(function(t) {
+          if (existingIds[t.event_id]) {
+            // 已存在，保留 DOM 元素
+            delete existingIds[t.event_id];
+          } else {
+            // 新增项
+            newHtml += '<div class="gallery-item" data-event-id="' + t.event_id + '" ' +
+              'onclick="openModal(\'' + t.event_id + '\', \'' + t.url + '\')">' +
+              '<div class="gallery-img-wrapper">' +
+              '<img src="' + t.url + '" alt="' + t.timestamp + '" loading="lazy" ' +
+              'onerror="this.parentElement.innerHTML=\'<div class=\\\'gallery-placeholder\\\'>📷<br><small>加载失败</small></div>\'">' +
+              '</div>' +
+              '<div class="gallery-label">' + t.timestamp + '</div>' +
+              '</div>';
+          }
+        });
+
+        // 删除已不存在的旧项
+        Object.keys(existingIds).forEach(function(id) {
+          existingIds[id].remove();
+        });
+
+        // 在最前面插入新项
+        if (newHtml) {
+          grid.insertAdjacentHTML('afterbegin', newHtml);
+        }
+      }
+    })
+    .catch(function() {
+      // 静默处理网络错误
+    });
+}
+
+function startGalleryRefresh() {
+  refreshGallery();  // 立即拉一次
+  galleryRefreshTimer = setInterval(refreshGallery, 30000);
+}
+
+
+// ══════════════════════════════════════════════════
+// Modal
+// ══════════════════════════════════════════════════
+function openModal(eventId, imgUrl) {
+  var modal = document.getElementById('img-modal');
+  var title = document.getElementById('modal-title');
+  var img = document.getElementById('modal-img');
+  var download = document.getElementById('modal-download');
+
+  if (title) title.textContent = eventId.replace(/_/g, ' ');
+  if (img) img.src = imgUrl;
+  if (download) {
+    download.href = imgUrl;
+    download.download = eventId + '_grid.jpg';
+  }
+  if (modal) modal.classList.add('show');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('img-modal')) return;
+  var modal = document.getElementById('img-modal');
+  if (modal) modal.classList.remove('show');
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeModal();
+});
+
+
+// ══════════════════════════════════════════════════
+// 启动
+// ══════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', function() {
+  startGalleryRefresh();
+});
+</script>
+
+<!-- ═══ CSS 内联 ═══ -->
+<style>
+/* 画廊网格 */
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+@media (max-width: 600px) {
+  .gallery-grid { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+}
+
+.gallery-item {
+  cursor: pointer;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.gallery-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+}
+
+.gallery-img-wrapper {
+  aspect-ratio: 16/9;
+  overflow: hidden;
+  background: var(--bg-page);
+}
+.gallery-img-wrapper img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.gallery-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 2rem;
+  color: var(--text-muted);
+}
+
+.gallery-label {
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+
+/* GIF 控制按钮 */
+.gif-frame-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* Modal 弹窗 */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.75);
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.show {
+  display: flex;
+}
+
+.modal-content {
+  background: var(--bg-card);
+  border-radius: 12px;
+  max-width: 90vw;
+  max-height: 90vh;
+  overflow: auto;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  line-height: 1;
+  padding: 0 4px;
+}
+.modal-close:hover { color: var(--text); }
+
+.modal-body {
+  padding: 16px;
+  text-align: center;
+}
+
+.modal-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+/* 响应式: GIF 在小屏幕上高度限制 */
+@media (max-width: 500px) {
+  #gif-img { max-height: 300px !important; }
+}
+
+/* 闪烁动画（用于新缩略图） */
+@keyframes galleryFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.gallery-grid .gallery-item:first-child {
+  animation: galleryFadeIn 0.4s ease;
+}
+</style>
+{% endblock %}
