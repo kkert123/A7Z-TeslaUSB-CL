@@ -62,7 +62,7 @@
      ═══════════════════════════════════════════ -->
 <div class="sys-group open" id="grp-system">
   <div class="sys-group-header" onclick="toggleGroup('grp-system')">
-    <span>System info <span class="sg-summary" id="sys-summary-line">Loading...</span></span>
+    <span>系统信息 <span class="sg-summary" id="sys-summary-line">加载中...</span></span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
@@ -73,13 +73,13 @@
       <div class="sys-info-row"><span class="k">CPU</span><span class="v" id="sys-cpu-model">—</span></div>
       <div class="sys-info-row"><span class="k">Uptime</span><span class="v" id="sys-uptime">{% if system_uptime %}{{ system_uptime }}{% else %}—{% endif %}</span></div>
       <div class="sys-info-row"><span class="k">Python</span><span class="v" id="sys-python">—</span></div>
-      <div class="sys-info-row"><span class="k">Version</span><span class="v" id="sys-version-display" style="color:var(--success)">v{{ version }}</span></div>
-      <div class="sys-info-row"><span class="k">Service</span><span class="v" id="sys-service-status" style="color:var(--success)">{% if service.active %}Running{% else %}Stopped{% endif %}</span></div>
+      <div class="sys-info-row"><span class="k">版本</span><span class="v" id="sys-version-display" style="color:var(--success)">v{{ version }}</span></div>
+      <div class="sys-info-row"><span class="k">服务</span><span class="v" id="sys-service-status" style="color:var(--success)">{% if service.active %}运行中{% else %}已停止{% endif %}</span></div>
     </div>
     <div class="btn-row" style="margin-top:10px">
-      <button class="btn btn-sm" onclick="serviceAction('restart')">Restart service</button>
-      <button class="btn btn-sm btn-outline" onclick="serviceAction('stop')">Stop</button>
-      <button class="btn btn-sm btn-outline" onclick="serviceAction('start')">Start</button>
+      <button class="btn btn-sm" onclick="serviceAction('restart')">重启服务</button>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('stop')">停止</button>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('start')">启动</button>
     </div>
   </div>
 </div>
@@ -89,32 +89,32 @@
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-version">
   <div class="sys-group-header" onclick="toggleGroup('grp-version')">
-    <span>Version & upgrade <span class="sg-summary" id="ver-summary">v{{ version }}</span></span>
+    <span>版本管理 <span class="sg-summary" id="ver-summary">v{{ version }}</span></span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
     <!-- 当前/最新版本 -->
     <div class="version-card">
       <div>
-        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Current</div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">当前</div>
         <div class="vc-badge" id="ver-current-display">v{{ version }}</div>
       </div>
       <div style="font-size:0.7rem;color:var(--text-muted)">→</div>
       <div>
-        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Latest</div>
-        <div class="vc-latest" id="ver-latest">Checking...</div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">最新</div>
+        <div class="vc-latest" id="ver-latest">检查中...</div>
       </div>
       <div class="vc-status" id="ver-status">—</div>
     </div>
 
     <!-- 检查 + 升级按钮 -->
     <div class="btn-row" style="margin-bottom:8px">
-      <button class="btn btn-sm btn-primary" onclick="checkVersionNow()">Check update</button>
+      <button class="btn btn-sm btn-primary" onclick="checkVersionNow()">检查更新</button>
       <span id="ver-changelog" style="font-size:0.72rem;color:var(--text-muted)"></span>
     </div>
     <div id="upgrade-controls" style="display:none;padding:10px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px">
       <div class="btn-row">
-        <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()">Upgrade to <span id="upgrade-target"></span></button>
+        <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()">升级到 <span id="upgrade-target"></span></button>
         <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">回退到 <span id="rollback-target"></span></button>
       </div>
       <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
@@ -123,26 +123,26 @@
 
     <!-- 手动上传升级包 -->
     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
-      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Manual upload</div>
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">手动上传</div>
       <div class="upload-zone" id="upload-zone" onclick="document.getElementById('upgrade-file').click()">
         <input type="file" id="upgrade-file" accept=".tar.gz" onchange="onFileSelected()">
-        <div id="upload-prompt">Click or drag .tar.gz here</div>
+        <div id="upload-prompt">点击或拖拽 .tar.gz 文件到此处</div>
         <div id="upload-file-name" style="display:none;font-weight:500;margin-top:4px"></div>
       </div>
       <div class="btn-row" style="margin-top:8px">
         <input type="text" id="upload-sha256" placeholder="SHA256 (optional)" style="flex:1;padding:4px 8px;font-size:0.78rem;font-family:monospace;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
-        <button class="btn btn-primary btn-sm" id="btn-manual-upgrade" onclick="startManualUpgrade()" disabled>Install</button>
+        <button class="btn btn-primary btn-sm" id="btn-manual-upgrade" onclick="startManualUpgrade()" disabled>安装</button>
       </div>
     </div>
 
     <!-- 内测密钥 -->
     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
-      <label style="font-size:0.75rem;font-weight:500">Beta key</label>
+      <label style="font-size:0.75rem;font-weight:500">内测密钥</label>
       <span style="font-size:0.68rem;color:var(--text-muted)">（仅内测版本需要，公开版本留空即可）</span>
       <div style="display:flex;gap:6px;margin-top:4px">
         <input type="password" id="gh-token" placeholder="key..." style="flex:1;font-family:monospace;font-size:0.75rem" autocomplete="off">
-        <button class="btn btn-sm" onclick="saveGithubToken()">Save</button>
-        <button class="btn btn-sm btn-outline" onclick="clearGithubToken()">Clear</button>
+        <button class="btn btn-sm" onclick="saveGithubToken()">保存</button>
+        <button class="btn btn-sm btn-outline" onclick="clearGithubToken()">清除</button>
       </div>
       <span id="gh-token-status" style="font-size:0.68rem;color:var(--text-muted)"></span>
     </div>
@@ -150,84 +150,84 @@
 </div>
 
 <!-- ═══════════════════════════════════════════
-     Group 3: USB mode
+     Group 3: USB 模式
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-usb">
   <div class="sys-group-header" onclick="toggleGroup('grp-usb')">
-    <span>USB mode <span class="sg-summary" id="usb-summary">Loading...</span></span>
+    <span>USB 模式 <span class="sg-summary" id="usb-summary">加载中...</span></span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
       <span style="font-size:1rem;font-weight:700" id="current-mode-display">
-        <span class="status status-ok">Loading...</span>
+        <span class="status status-ok">加载中...</span>
       </span>
-      <button class="btn btn-primary btn-sm" onclick="toggleModeBtn()">Switch</button>
+      <button class="btn btn-primary btn-sm" onclick="toggleModeBtn()">切换</button>
     </div>
-    <p style="font-size:0.68rem;color:var(--text-muted)">Present: USB connected to Tesla · Edit: Samba/Web file management</p>
+    <p style="font-size:0.68rem;color:var(--text-muted)">Present: USB连接Tesla · Edit: 网络管理模式</p>
 
     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
-      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Auto return</div>
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">自动切回</div>
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
         <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;cursor:pointer">
-          <input type="checkbox" id="ap-enabled" onchange="autoPresentChanged()"> Enable
+          <input type="checkbox" id="ap-enabled" onchange="autoPresentChanged()"> 启用
         </label>
-        <span style="font-size:0.8rem">Timeout:</span>
+        <span style="font-size:0.8rem">超时:</span>
         <input type="number" id="ap-timeout" min="1" max="60" value="5" onchange="autoPresentChanged()"
           style="width:60px;padding:4px 6px;font-size:0.8rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
         <span style="font-size:0.8rem;color:var(--text-muted)">min</span>
-        <button id="ap-save-btn" class="btn btn-primary btn-sm" onclick="saveAutoPresent()" disabled>Save</button>
+        <button id="ap-save-btn" class="btn btn-primary btn-sm" onclick="saveAutoPresent()" disabled>保存</button>
         <span id="ap-status" style="font-size:0.75rem;display:none"></span>
       </div>
       <div id="ap-live" style="display:none;padding:8px 12px;margin-top:8px;background:rgba(245,158,11,0.1);border-radius:6px;font-size:0.8rem">
-        Countdown: <strong id="ap-countdown" style="color:var(--warning)">—</strong>
-        <button class="btn btn-sm btn-outline" onclick="cancelAutoPresent()" style="margin-left:10px">Cancel</button>
+        倒计时: <strong id="ap-countdown" style="color:var(--warning)">—</strong>
+        <button class="btn btn-sm btn-outline" onclick="cancelAutoPresent()" style="margin-left:10px">取消</button>
       </div>
     </div>
   </div>
 </div>
 
 <!-- ═══════════════════════════════════════════
-     Group 4: Health & notifications
+     Group 4: 健康与通知
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-health">
   <div class="sys-group-header" onclick="toggleGroup('grp-health')">
-    <span>Health & notifications <span class="sg-summary" id="health-summary">Loading...</span></span>
+    <span>健康与通知 <span class="sg-summary" id="health-summary">加载中...</span></span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
     <!-- 系统健康 -->
     <div style="margin-bottom:14px">
-      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">System health</div>
-      <div id="health-details" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">系统健康</div>
+      <div id="health-details" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
     </div>
 
     <!-- 推送健康 -->
     <div style="margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:0.8rem;font-weight:600">WeChat push health</span>
-        <button class="btn btn-sm btn-outline" onclick="loadPushHealth()">Refresh</button>
+        <span style="font-size:0.8rem;font-weight:600">企业微信推送</span>
+        <button class="btn btn-sm btn-outline" onclick="loadPushHealth()">刷新</button>
       </div>
-      <div id="push-health-list" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+      <div id="push-health-list" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
     </div>
 
     <!-- 服务状态 -->
     <div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:0.8rem;font-weight:600">Service status</span>
-        <button class="btn btn-sm btn-outline" onclick="loadServices()">Refresh</button>
+        <span style="font-size:0.8rem;font-weight:600">服务状态</span>
+        <button class="btn btn-sm btn-outline" onclick="loadServices()">刷新</button>
       </div>
-      <div id="services-list" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+      <div id="services-list" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
     </div>
   </div>
 </div>
 
 <!-- ═══════════════════════════════════════════
-     Group 5: Storage
+     Group 5: 存储
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-storage">
   <div class="sys-group-header" onclick="toggleGroup('grp-storage')">
-    <span>Storage <span class="sg-summary" id="storage-summary">Loading...</span></span>
+    <span>存储 <span class="sg-summary" id="storage-summary">加载中...</span></span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
@@ -235,55 +235,55 @@
       <table style="width:100%;font-size:0.75rem">
         <thead>
           <tr style="color:var(--text-muted);border-bottom:0.5px solid var(--border)">
-            <th style="padding:4px 6px;text-align:left">Mount</th>
-            <th style="padding:4px 6px;text-align:left">Device</th>
+            <th style="padding:4px 6px;text-align:left">挂载点</th>
+            <th style="padding:4px 6px;text-align:left">设备</th>
             <th style="padding:4px 6px;text-align:left">FS</th>
-            <th style="padding:4px 6px;text-align:right">Total</th>
-            <th style="padding:4px 6px;text-align:right">Used</th>
-            <th style="padding:4px 6px">Usage</th>
+            <th style="padding:4px 6px;text-align:right">容量</th>
+            <th style="padding:4px 6px;text-align:right">已用</th>
+            <th style="padding:4px 6px">使用率</th>
           </tr>
         </thead>
         <tbody id="mount-table-body">
-          <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:10px">Loading...</td></tr>
+          <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:10px">加载中...</td></tr>
         </tbody>
       </table>
     </div>
     <div class="btn-row" style="margin-top:8px">
-      <button class="btn btn-sm btn-outline" onclick="loadMountStatus()">Refresh</button>
-      <button class="btn btn-sm btn-danger" onclick="formatTeslaCam()" style="background:#dc2626;color:#fff">Format TeslaCam</button>
+      <button class="btn btn-sm btn-outline" onclick="load挂载点Status()">刷新</button>
+      <button class="btn btn-sm btn-danger" onclick="formatTeslaCam()" style="background:#dc2626;color:#fff">格式化 TeslaCam</button>
     </div>
     <pre id="format-output" style="display:none;margin-top:8px;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:0.7rem;max-height:200px;overflow-y:auto"></pre>
   </div>
 </div>
 
 <!-- ═══════════════════════════════════════════
-     Group 6: Tools
+     Group 6: 工具
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-tools">
   <div class="sys-group-header" onclick="toggleGroup('grp-tools')">
-    <span>Tools <span class="sg-summary">Fan curve · Thumbnail reset</span></span>
+    <span>工具 <span class="sg-summary">风扇曲线 · 缩略图重置</span></span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
     <!-- 风扇 -->
     <div style="margin-bottom:12px">
-      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Fan curve</div>
-      <div id="fan-curve-rows" style="margin-bottom:6px"><span style="color:var(--text-muted);font-size:0.75rem">Loading...</span></div>
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">风扇曲线</div>
+      <div id="fan-curve-rows" style="margin-bottom:6px"><span style="color:var(--text-muted);font-size:0.75rem">加载中...</span></div>
       <div class="btn-row">
-        <button class="btn btn-sm btn-outline" onclick="fanCurveAddRow()">+ Add</button>
-        <button class="btn btn-sm btn-primary" onclick="saveFanCurve()">Save</button>
+        <button class="btn btn-sm btn-outline" onclick="fanCurveAddRow()">+ 添加</button>
+        <button class="btn btn-sm btn-primary" onclick="saveFanCurve()">保存</button>
         <span id="fan-curve-status" style="font-size:0.7rem"></span>
-        <span style="font-size:0.7rem;color:var(--text-muted);margin-left:auto">Base PWM: <input type="number" id="fan-lowest-pwm" min="0" max="255" value="50" style="width:50px;padding:2px 6px;font-size:0.7rem"></span>
+        <span style="font-size:0.7rem;color:var(--text-muted);margin-left:auto">基础 PWM: <input type="number" id="fan-lowest-pwm" min="0" max="255" value="50" style="width:50px;padding:2px 6px;font-size:0.7rem"></span>
       </div>
     </div>
 
     <!-- 缩略图 -->
     <div style="padding-top:10px;border-top:0.5px solid var(--border)">
-      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Thumbnail reset range</div>
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">缩略图重置</div>
       <div class="btn-row">
-        <input type="number" id="thumb-reset-minutes" min="1" max="1440" value="60" style="width:60px;padding:4px 6px;font-size:0.75rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
-        <span style="font-size:0.75rem;color:var(--text-muted)">minutes</span>
-        <button id="thumb-reset-save" class="btn btn-primary btn-sm" onclick="saveThumbReset()">Save</button>
+        <input type="number" id="thumb-reset-分钟" min="1" max="1440" value="60" style="width:60px;padding:4px 6px;font-size:0.75rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
+        <span style="font-size:0.75rem;color:var(--text-muted)">分钟</span>
+        <button id="thumb-reset-save" class="btn btn-primary btn-sm" onclick="saveThumbReset()">保存</button>
         <span id="thumb-reset-status" style="font-size:0.7rem;color:var(--text-muted)"></span>
       </div>
     </div>
@@ -291,19 +291,19 @@
 </div>
 
 <!-- ═══════════════════════════════════════════
-     Group 7: Power
+     Group 7: 电源
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-power">
   <div class="sys-group-header" onclick="toggleGroup('grp-power')">
-    <span style="color:var(--danger)">Power</span>
+    <span style="color:var(--danger)">电源</span>
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
     <div class="btn-row">
-      <button class="btn btn-sm" onclick="systemReboot()" style="color:var(--warning);border-color:var(--warning)">Reboot</button>
-      <button class="btn btn-sm" onclick="systemShutdown()" style="color:var(--danger);border-color:var(--danger)">Shutdown</button>
+      <button class="btn btn-sm" onclick="system重启()" style="color:var(--warning);border-color:var(--warning)">重启</button>
+      <button class="btn btn-sm" onclick="system关机()" style="color:var(--danger);border-color:var(--danger)">关机</button>
     </div>
-    <p style="font-size:0.68rem;color:var(--text-muted);margin-top:6px">Power cycle required after shutdown</p>
+    <p style="font-size:0.68rem;color:var(--text-muted);margin-top:6px">电源 cycle required after shutdown</p>
   </div>
 </div>
 
@@ -321,7 +321,7 @@ function toggleGroup(id) {
 function showResult(id, msg, ok) {
   var el = document.getElementById(id);
   el.textContent = msg;
-  el.className = 'alert ' + (ok ? 'alert-success' : 'alert-danger');
+  el.className = 'alert ' + (成功 ? 'alert-success' : 'alert-danger');
   el.style.display = 'flex';
   setTimeout(function() { el.style.display = 'none'; }, 5000);
 }
@@ -336,16 +336,16 @@ function serviceAction(a) {
   }).then(r => r.json()).then(d => {
     showResult('op-result', d.message, d.success);
     if (d.success) setTimeout(() => location.reload(), 2000);
-  }).catch(() => showResult('op-result', 'Request failed', false));
+  }).catch(() => showResult('op-result', '请求失败', false));
 }
 
-function systemReboot() {
+function system重启() {
   if (!confirm('确定重启系统？')) return;
   fetch('/api/system/reboot', { method: 'POST' })
     .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
 }
 
-function systemShutdown() {
+function system关机() {
   if (!confirm('确定关机？')) return;
   fetch('/api/system/shutdown', { method: 'POST' })
     .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
@@ -368,7 +368,7 @@ async function loadSystemInfo() {
   } catch (e) { console.error('loadSystemInfo:', e); }
 }
 
-// ═══ USB mode ═══
+// ═══ USB 模式 ═══
 async function loadModeDisplay() {
   try {
     const r = await fetch('/api/mode/status');
@@ -391,7 +391,7 @@ function toggleModeBtn() {
     body: JSON.stringify({ mode: newMode })
   }).then(r => r.json()).then(d => {
     if (d.success) { showResult('op-result', d.message, true); setTimeout(() => location.reload(), 2000); }
-    else showResult('op-result', d.error || 'Failed', false);
+    else showResult('op-result', d.error || '失败', false);
   });
 }
 
@@ -404,7 +404,7 @@ async function loadAutoPresentConfig() {
     if (!d.success) return;
     apConfigLoaded = true;
     document.getElementById('ap-enabled').checked = d.enabled;
-    document.getElementById('ap-timeout').value = d.timeout_minutes;
+    document.getElementById('ap-timeout').value = d.timeout_分钟;
     document.getElementById('ap-save-btn').disabled = true;
     updateAutoPresentLive(d);
   } catch (e) {}
@@ -413,31 +413,31 @@ function autoPresentChanged() { if (apConfigLoaded) document.getElementById('ap-
 async function saveAutoPresent() {
   const enabled = document.getElementById('ap-enabled').checked;
   const timeout = parseInt(document.getElementById('ap-timeout').value, 10);
-  if (isNaN(timeout) || timeout < 1 || timeout > 60) { showResult('op-result', 'Timeout must be 1-60', false); return; }
+  if (isNaN(timeout) || timeout < 1 || timeout > 60) { showResult('op-result', '超时必须在 1-60 分钟之间', false); return; }
   const st = document.getElementById('ap-status');
-  st.textContent = 'Saving...'; st.style.display = 'inline'; st.style.color = 'var(--text-muted)';
+  st.textContent = '保存中...'; st.style.display = 'inline'; st.style.color = 'var(--text-muted)';
   try {
     const r = await fetch('/api/auto-present/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, timeout_minutes: timeout })
+      body: JSON.stringify({ enabled, timeout_分钟: timeout })
     });
     const d = await r.json();
-    if (d.success) { st.textContent = 'Saved'; st.style.color = 'var(--success)'; document.getElementById('ap-save-btn').disabled = true; updateAutoPresentLive(d); }
-    else { st.textContent = 'Failed'; st.style.color = 'var(--danger)'; }
+    if (d.success) { st.textContent = '保存d'; st.style.color = 'var(--success)'; document.getElementById('ap-save-btn').disabled = true; updateAutoPresentLive(d); }
+    else { st.textContent = '失败'; st.style.color = 'var(--danger)'; }
     setTimeout(() => st.style.display = 'none', 3000);
-  } catch (e) { st.textContent = 'Error'; st.style.color = 'var(--danger)'; setTimeout(() => st.style.display = 'none', 3000); }
+  } catch (e) { st.textContent = '错误'; st.style.color = 'var(--danger)'; setTimeout(() => st.style.display = 'none', 3000); }
 }
 function updateAutoPresentLive(d) {
   const live = document.getElementById('ap-live'), ct = document.getElementById('ap-countdown');
   if (d.active) {
     live.style.display = 'block';
-    ct.textContent = Math.floor(d.remaining_seconds / 60) + 'm' + (d.remaining_seconds % 60).toString().padStart(2, '0') + 's';
+    ct.textContent = Math.floor(d.remaining_seconds / 60) + '分' + (d.remaining_seconds % 60).toString().padStart(2, '0') + '秒';
   } else { live.style.display = 'none'; }
 }
 async function cancelAutoPresent() {
   const r = await fetch('/api/auto-present/cancel', { method: 'POST' });
   const d = await r.json();
-  if (d.success) { document.getElementById('ap-live').style.display = 'none'; showResult('op-result', 'Countdown cancelled', true); }
+  if (d.success) { document.getElementById('ap-live').style.display = 'none'; showResult('op-result', '倒计时已取消', true); }
 }
 setInterval(async function() {
   if (document.getElementById('ap-live').style.display !== 'none') {
@@ -458,75 +458,75 @@ async function loadSummary() {
       if (h.metrics.cpu_load !== undefined) html += 'CPU: ' + h.metrics.cpu_load.toFixed(1) + '% · ';
       if (h.metrics.memory) html += 'Mem: ' + h.metrics.memory.used_mb + '/' + h.metrics.memory.total_mb + 'MB (' + h.metrics.memory.percent.toFixed(1) + '%) · ';
       if (h.metrics.temperature !== undefined) html += 'Temp: ' + h.metrics.temperature.toFixed(1) + 'C · ';
-      if (h.metrics.network !== undefined) html += 'Net: ' + (h.metrics.network ? 'Online' : 'Offline');
+      if (h.metrics.network !== undefined) html += 'Net: ' + (h.metrics.network ? '在线' : '离线');
     }
     if (h.issues && h.issues.length) html += '<br><span style="color:var(--danger)">' + h.issues.join('<br>') + '</span>';
-    if (!html) html = 'System running normally';
+    if (!html) html = '系统运行正常';
     document.getElementById('health-details').innerHTML = html;
-    document.getElementById('sys-service-status').textContent = healthy ? 'Running' : 'Warning';
+    document.getElementById('sys-service-status').textContent = healthy ? '运行中' : '警告';
     document.getElementById('sys-service-status').style.color = healthy ? 'var(--success)' : 'var(--danger)';
-    document.getElementById('health-summary').textContent = healthy ? 'Healthy' : 'Issues detected';
+    document.getElementById('health-summary').textContent = healthy ? '正常' : '检测到异常';
   } catch (e) {}
 }
 
 async function loadPushHealth() {
   const el = document.getElementById('push-health-list');
-  el.innerHTML = 'Loading...';
+  el.innerHTML = '加载中...';
   try {
     const r = await fetch('/api/analytics/push-health');
     const d = await r.json();
-    if (!d.success) { el.innerHTML = '<span style="color:var(--text-muted)">WeChat not configured</span>'; return; }
+    if (!d.success) { el.innerHTML = '<span style="color:var(--text-muted)">企业微信未配置</span>'; return; }
     const bots = d.bots || {};
     const entries = Object.entries(bots);
-    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">No bots configured</span>'; return; }
+    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">未配置机器人</span>'; return; }
     el.innerHTML = entries.map(([id, bot]) => {
-      const total = bot.total_pushes || 0, success = bot.success_count || 0, fail = bot.fail_count || 0;
-      const rate = total > 0 ? Math.round(success / total * 100) : 0;
+      const 共 = bot.total_pushes || 0, success = bot.success_count || 0, 失败 = bot.fail_count || 0;
+      const rate = 共 > 0 ? Math.round(success / 共 * 100) : 0;
       const color = rate >= 90 ? 'var(--success)' : rate >= 70 ? 'var(--warning)' : 'var(--danger)';
       return '<div style="padding:6px 0;border-bottom:0.5px solid var(--border)">' +
         '<span style="font-weight:500">' + (bot.name || id) + '</span> ' +
-        '<span style="font-size:0.7rem;color:var(--text-muted)">total ' + total + '</span> ' +
+        '<span style="font-size:0.7rem;color:var(--text-muted)">共 ' + 共 + '</span> ' +
         '<span style="color:' + color + ';font-weight:600">' + rate + '%</span> ' +
-        '<span style="font-size:0.7rem;color:var(--success)">ok ' + success + '</span> ' +
-        '<span style="font-size:0.7rem;color:var(--danger)">fail ' + fail + '</span></div>';
+        '<span style="font-size:0.7rem;color:var(--success)">成功 ' + success + '</span> ' +
+        '<span style="font-size:0.7rem;color:var(--danger)">失败 ' + 失败 + '</span></div>';
     }).join('');
-  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; }
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">失败 to load</span>'; }
 }
 
 async function loadServices() {
   const el = document.getElementById('services-list');
-  el.innerHTML = 'Loading...';
+  el.innerHTML = '加载中...';
   try {
     const r = await fetch('/api/analytics/services');
     const d = await r.json();
-    if (!d.success) { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; return; }
+    if (!d.success) { el.innerHTML = '<span style="color:var(--danger)">失败 to load</span>'; return; }
     const svcs = d.services || {};
     const entries = Object.entries(svcs);
-    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">No data</span>'; return; }
+    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">无数据</span>'; return; }
     el.innerHTML = entries.map(([name, svc]) => {
-      const ok = svc.active;
-      const timer = svc.timer_next ? ' (next: ' + svc.timer_next + ')' : '';
+      const 成功 = svc.active;
+      const timer = svc.timer_next ? '（下次: ' + svc.timer_next + ')' : '';
       return '<div class="service-row">' +
         '<span class="sr-name">' + name + '<span class="sr-timer">' + timer + '</span></span>' +
-        '<span style="color:' + (ok ? 'var(--success)' : 'var(--danger)') + '">' + (ok ? 'Running' : 'Stopped') + '</span>' +
+        '<span style="color:' + (成功 ? 'var(--success)' : 'var(--danger)') + '">' + (成功 ? '运行中' : '已停止') + '</span>' +
         '</div>';
     }).join('');
-  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">Failed to load</span>'; }
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">失败 to load</span>'; }
 }
 
-// ═══ Mount status ═══
-async function loadMountStatus() {
+// ═══ 挂载点 status ═══
+async function load挂载点Status() {
   const tbody = document.getElementById('mount-table-body');
-  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">Loading...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">加载中...</td></tr>';
   try {
     const r = await fetch('/api/system/mounts');
     const d = await r.json();
-    if (!d.success || !(d.mounts || []).length) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No data</td></tr>'; return; }
-    let mounted = 0, total = d.mounts.length;
+    if (!d.success || !(d.mounts || []).length) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">无数据</td></tr>'; return; }
+    let 已挂载 = 0, 共 = d.mounts.length;
     tbody.innerHTML = d.mounts.map(m => {
       const pct = m.percent || 0;
-      const color = !m.mounted ? 'var(--danger)' : pct > 90 ? 'var(--danger)' : pct > 85 ? 'var(--warning)' : 'var(--success)';
-      if (m.mounted) mounted++;
+      const color = !m.已挂载 ? 'var(--danger)' : pct > 90 ? 'var(--danger)' : pct > 85 ? 'var(--warning)' : 'var(--success)';
+      if (m.已挂载) 已挂载++;
       return '<tr style="border-bottom:0.5px solid var(--border)">' +
         '<td style="padding:4px 6px"><code>' + (m.mount_point || '—') + '</code></td>' +
         '<td style="padding:4px 6px;font-size:0.7rem">' + (m.device || '—') + '</td>' +
@@ -536,23 +536,23 @@ async function loadMountStatus() {
         '<td style="padding:4px 6px;text-align:right;color:' + color + ';font-weight:600">' + pct + '%</td>' +
         '</tr>';
     }).join('');
-    document.getElementById('storage-summary').textContent = mounted + '/' + total + ' mounted';
-  } catch (e) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--danger)">Failed</td></tr>'; }
+    document.getElementById('storage-summary').textContent = 已挂载 + '/' + 共 + ' 已挂载';
+  } catch (e) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--danger)">失败</td></tr>'; }
 }
 async function formatTeslaCam() {
   if (!confirm('此操作将清除 TeslaCam 分区所有数据，确定继续？')) return;
   const output = document.getElementById('format-output');
-  output.style.display = 'block'; output.textContent = 'Formatting...';
+  output.style.display = 'block'; output.textContent = '格式化中...';
   try {
     const r = await fetch('/api/system/format-teslacam', { method: 'POST' });
     const d = await r.json();
-    output.textContent = d.success ? (d.output || 'Done') : (d.error || 'Failed');
+    output.textContent = d.success ? (d.output || '完成') : (d.error || '失败');
     output.style.color = d.success ? '#16a34a' : '#dc2626';
-    if (d.success) setTimeout(loadMountStatus, 1000);
-  } catch (e) { output.textContent = 'Error: ' + e; output.style.color = '#dc2626'; }
+    if (d.success) setTimeout(load挂载点Status, 1000);
+  } catch (e) { output.textContent = '错误: ' + e; output.style.color = '#dc2626'; }
 }
 
-// ═══ Fan curve ═══
+// ═══ 风扇曲线 ═══
 async function loadFanCurve() {
   try {
     const r = await fetch('/api/fan/curve');
@@ -562,10 +562,10 @@ async function loadFanCurve() {
     document.getElementById('fan-lowest-pwm').value = d.data.lowest_pwm || 50;
     document.getElementById('fan-curve-rows').innerHTML = curve.map((e, i) =>
       '<div class="fan-row">≥<input type="number" value="' + e.temp + '" min="0" max="125">&deg;C → PWM <input type="number" value="' + e.pwm + '" min="0" max="255" onchange="fanCurveChanged()"> <button class="btn btn-sm btn-outline" onclick="this.parentElement.remove();fanCurveChanged()" style="font-size:10px;padding:2px 6px">x</button></div>'
-    ).join('') || '<span style="font-size:0.75rem;color:var(--text-muted)">No curve defined</span>';
+    ).join('') || '<span style="font-size:0.75rem;color:var(--text-muted)">未设置曲线</span>';
   } catch (e) {}
 }
-function fanCurveChanged() { var s = document.getElementById('fan-curve-status'); s.textContent = 'Unsaved'; s.style.color = 'var(--warning)'; }
+function fanCurveChanged() { var s = document.getElementById('fan-curve-status'); s.textContent = '未保存'; s.style.color = 'var(--warning)'; }
 function fanCurveAddRow() {
   var row = document.createElement('div'); row.className = 'fan-row';
   row.innerHTML = '≥<input type="number" value="75" min="0" max="125">&deg;C → PWM <input type="number" value="255" min="0" max="255" onchange="fanCurveChanged()"> <button class="btn btn-sm btn-outline" onclick="this.parentElement.remove();fanCurveChanged()" style="font-size:10px;padding:2px 6px">x</button>';
@@ -582,17 +582,17 @@ async function saveFanCurve() {
   try {
     var r = await fetch('/api/fan/curve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ curve, lowest_pwm: lowest }) });
     var d = await r.json();
-    st.textContent = d.success ? 'Saved (active in 15s)' : 'Failed'; st.style.color = d.success ? 'var(--success)' : 'var(--danger)';
+    st.textContent = d.success ? '保存d (active in 15s)' : '失败'; st.style.color = d.success ? 'var(--success)' : 'var(--danger)';
     if (d.success) loadFanCurve();
-  } catch (e) { st.textContent = 'Error'; st.style.color = 'var(--danger)'; }
+  } catch (e) { st.textContent = '错误'; st.style.color = 'var(--danger)'; }
 }
 
 // ═══ Thumbnail reset ═══
-function loadThumbResetConfig() { document.getElementById('thumb-reset-minutes').value = localStorage.getItem('thumbResetMinutes') || '60'; }
+function loadThumbResetConfig() { document.getElementById('thumb-reset-分钟').value = local存储.getItem('thumbResetMinutes') || '60'; }
 function saveThumbReset() {
-  var v = Math.max(1, Math.min(1440, parseInt(document.getElementById('thumb-reset-minutes').value) || 60));
-  localStorage.setItem('thumbResetMinutes', v);
-  var el = document.getElementById('thumb-reset-status'); el.textContent = 'Saved (' + v + 'm)'; el.style.color = 'var(--success)';
+  var v = Math.max(1, Math.min(1440, parseInt(document.getElementById('thumb-reset-分钟').value) || 60));
+  local存储.setItem('thumbResetMinutes', v);
+  var el = document.getElementById('thumb-reset-status'); el.textContent = '保存d (' + v + 'm)'; el.style.color = 'var(--success)';
   setTimeout(() => el.textContent = '', 3000);
 }
 
@@ -600,26 +600,26 @@ function saveThumbReset() {
 function checkVersionNow() {
   var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status'), ce = document.getElementById('ver-changelog');
   var ctrl = document.getElementById('upgrade-controls'), te = document.getElementById('upgrade-target');
-  le.textContent = 'Querying...'; se.textContent = '—'; ce.textContent = '';
+  le.textContent = '查询中...'; se.textContent = '—'; ce.textContent = '';
   ctrl.style.display = 'none'; _upgradeData = null;
 
   fetch('/api/version/check')
     .then(r => r.json()).then(d => {
-      if (!d.success || d.error) { le.textContent = d.error || 'Failed'; se.textContent = 'Warning'; se.style.color = 'var(--warning)'; return; }
+      if (!d.success || d.error) { le.textContent = d.error || '失败'; se.textContent = '警告'; se.style.color = 'var(--warning)'; return; }
       le.textContent = d.latest ? 'v' + d.latest : '—';
       document.getElementById('ver-current-display').textContent = 'v' + d.current;
       document.getElementById('ver-summary').textContent = 'v' + d.current;
       document.getElementById('sys-version-display').textContent = 'v' + d.current;
       if (d.has_update) {
-        se.textContent = 'Update available'; se.style.color = '#e74c3c';
+        se.textContent = '有新版本'; se.style.color = '#e74c3c';
         if (d.changelog) ce.textContent = (d.changelog.split('\n').find(l => l.trim()) || '').substring(0, 120);
         _upgradeData = d; ctrl.style.display = 'block'; te.textContent = 'v' + d.latest;
       } else if (d.latest) {
-        se.textContent = 'Up to date'; se.style.color = '#27ae60';
+        se.textContent = '已是最新'; se.style.color = '#27ae60';
       }
       loadRollbackInfo();
     })
-    .catch(() => { le.textContent = 'Unreachable'; se.textContent = 'Warning'; se.style.color = 'var(--warning)'; });
+    .catch(() => { le.textContent = '无法连接'; se.textContent = '警告'; se.style.color = 'var(--warning)'; });
 }
 
 function loadRollbackInfo() {
@@ -643,7 +643,7 @@ function startUpgrade() {
       if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>'; setTimeout(() => location.reload(), 3000); }
       else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>'; }
       btn.disabled = false;
-    }).catch(e => { prog.textContent += 'Error: ' + e + '\n'; btn.disabled = false; });
+    }).catch(e => { prog.textContent += '错误: ' + e + '\n'; btn.disabled = false; });
 }
 
 function startRollback() {
@@ -686,14 +686,14 @@ function startManualUpgrade() {
       if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>'; setTimeout(() => location.reload(), 3000); }
       else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>'; }
       btn.disabled = false;
-    }).catch(e => { prog.textContent += 'Error: ' + e + '\n'; btn.disabled = false; });
+    }).catch(e => { prog.textContent += '错误: ' + e + '\n'; btn.disabled = false; });
 }
 
-// ═══ Beta key ═══
+// ═══ 内测密钥 ═══
 function loadGithubToken() {
   fetch('/api/version/token').then(r => r.json()).then(d => {
     var st = document.getElementById('gh-token-status');
-    st.textContent = d.has_token ? 'Configured (' + (d.token_preview || '***') + ')' : 'Not configured';
+    st.textContent = d.has_token ? '已配置（' + (d.token_preview || '***') + ')' : '未配置';
     st.style.color = d.has_token ? '#27ae60' : 'var(--text-muted)';
   });
 }
@@ -701,18 +701,18 @@ function saveGithubToken() {
   var inp = document.getElementById('gh-token'), st = document.getElementById('gh-token-status'), token = inp.value.trim();
   if (!token) return;
   fetch('/api/version/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
-    .then(r => r.json()).then(d => { st.textContent = d.success ? 'Saved' : 'Failed'; st.style.color = d.success ? '#27ae60' : '#e74c3c'; if (d.success) { inp.value = ''; loadGithubToken(); } });
+    .then(r => r.json()).then(d => { st.textContent = d.success ? '保存d' : '失败'; st.style.color = d.success ? '#27ae60' : '#e74c3c'; if (d.success) { inp.value = ''; loadGithubToken(); } });
 }
 function clearGithubToken() {
   fetch('/api/version/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: '' }) })
     .then(r => r.json()).then(d => {
-      var st = document.getElementById('gh-token-status'); st.textContent = d.success ? 'Cleared' : 'Failed'; st.style.color = d.success ? '#27ae60' : '#e74c3c';
+      var st = document.getElementById('gh-token-status'); st.textContent = d.success ? '清除ed' : '失败'; st.style.color = d.success ? '#27ae60' : '#e74c3c';
       if (d.success) loadGithubToken();
     });
 }
 
 // ═══ Init ═══
-loadSystemInfo(); loadModeDisplay(); loadAutoPresentConfig(); loadMountStatus(); loadSummary();
+loadSystemInfo(); loadModeDisplay(); loadAutoPresentConfig(); load挂载点Status(); loadSummary();
 loadPushHealth(); loadServices(); loadThumbResetConfig(); loadFanCurve(); loadGithubToken();
 setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500);
 setInterval(function() { loadPushHealth(); loadSummary(); loadServices(); }, 30000);
