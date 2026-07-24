@@ -120,19 +120,12 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     # ── 7. 记录版本 ──
     _record_version(new_version, sha256_expected, "upgrade")
 
-    # ── 8. 重启服务 ──
-    steps.append("重启服务...")
-    rc, stdout, stderr = _run(["sudo", "systemctl", "restart", "teslausb-web"], timeout=30)
-    if rc == 0:
-        steps[-1] = "服务已重启"
-    else:
-        steps[-1] = f"重启警告: {stderr or 'unknown'}"
-
     _cleanup(tarball, sig_file)
 
     # 清理旧备份（保留最近 2 个）
     _prune_backups(keep=2)
 
+    steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
     return True, "\n".join(steps)
 
 
@@ -163,17 +156,16 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     steps[-1] = "安装完成"
 
     # 切 symlink
-    if os.path.exists(SYMLINK) or os.path.islink(SYMLINK):
+    if os.path.islink(SYMLINK):
         os.unlink(SYMLINK)
+    elif os.path.isdir(SYMLINK):
+        shutil.rmtree(SYMLINK)
     os.symlink(new_dir, SYMLINK)
 
     _record_version(new_version, "", "manual-upload")
     _prune_backups(keep=2)
 
-    # 重启
-    rc, stdout, stderr = _run(["sudo", "systemctl", "restart", "teslausb-web"], timeout=30)
-    steps.append("服务已重启" if rc == 0 else f"重启警告: {stderr or 'unknown'}")
-
+    steps.append("等待重启生效")
     return True, "\n".join(steps)
 
 
@@ -208,8 +200,7 @@ def do_rollback():
 
     _record_version(prev_version, prev.get("sha256", ""), "rollback")
 
-    rc, stdout, stderr = _run(["sudo", "systemctl", "restart", "teslausb-web"], timeout=30)
-    return True, f"已回退到 v{prev_version}" + ("（服务已重启）" if rc == 0 else "（重启失败，请手动重启）")
+    return True, f"已回退到 v{prev_version}（重启后生效）"
 
 
 def get_rollback_info():

@@ -617,9 +617,17 @@ def api_version_token():
     })
 
 
+def _schedule_restart():
+    """延迟 1 秒后重启服务（后台线程，不阻塞 HTTP 响应）"""
+    def _do_restart():
+        time.sleep(1)
+        subprocess.run(["sudo", "systemctl", "restart", "teslausb-web"], timeout=30)
+    threading.Thread(target=_do_restart, daemon=True).start()
+
+
 @system_bp.route('/api/version/upgrade', methods=['POST'])
 def api_version_upgrade():
-    """触发一键升级（同步执行，前端需等待）"""
+    """触发一键升级（同步安装，异步重启）"""
     data = request.get_json(silent=True) or {}
     new_version = (data.get('version') or '').strip()
     asset_url = (data.get('asset_url') or '').strip()
@@ -633,6 +641,8 @@ def api_version_upgrade():
         import upgrade_service
         ok, msg = upgrade_service.do_upgrade(new_version, asset_url, sha256, sig_url or None)
         if ok:
+            # 异步重启，避免杀死当前 HTTP 响应
+            _schedule_restart()
             return jsonify({
                 'success': True,
                 'message': msg,
@@ -693,6 +703,7 @@ def api_version_upgrade_upload():
         os.unlink(tmp.name)
 
         if ok:
+            _schedule_restart()
             return jsonify({
                 'success': True,
                 'message': msg,
@@ -726,6 +737,7 @@ def api_version_rollback():
         import upgrade_service
         ok, msg = upgrade_service.do_rollback()
         if ok:
+            _schedule_restart()
             return jsonify({'success': True, 'message': msg})
         return jsonify({'success': False, 'error': msg}), 500
     except Exception as e:
