@@ -111,8 +111,10 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 
     # ── 6. 切换 symlink ──
     steps.append("切换版本...")
-    if os.path.exists(SYMLINK) or os.path.islink(SYMLINK):
+    if os.path.islink(SYMLINK):
         os.unlink(SYMLINK)
+    elif os.path.isdir(SYMLINK):
+        shutil.rmtree(SYMLINK)
     os.symlink(new_dir, SYMLINK)
 
     # ── 7. 记录版本 ──
@@ -198,8 +200,10 @@ def do_rollback():
             return False, f"版本目录不存在: {prev_dir}"
 
     # 切 symlink
-    if os.path.exists(SYMLINK) or os.path.islink(SYMLINK):
+    if os.path.islink(SYMLINK):
         os.unlink(SYMLINK)
+    elif os.path.isdir(SYMLINK):
+        shutil.rmtree(SYMLINK)
     os.symlink(prev_dir, SYMLINK)
 
     _record_version(prev_version, prev.get("sha256", ""), "rollback")
