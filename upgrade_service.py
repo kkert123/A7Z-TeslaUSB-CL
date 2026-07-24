@@ -313,7 +313,7 @@ def _backup_current():
 def _extract_and_setup(tarball, target_dir):
     os.makedirs(target_dir, exist_ok=True)
     rc, stdout, stderr = _run(
-        ["tar", "xzf", tarball, "-C", target_dir, "--strip-components=1"],
+        ["tar", "xzf", tarball, "-C", target_dir],
         timeout=120
     )
     if rc != 0:
