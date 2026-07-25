@@ -7,7 +7,6 @@ TeslaUSB Neo - 硬件看门狗模块
 2. 监控关键服务健康
 3. 触发硬件看门狗喂狗
 4. 系统异常时自动重启
-5. 🆕 风扇温控曲线自动调节
 
 设计原理：
 - Linux 标准硬件看门狗定时器
@@ -29,62 +28,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-
-# ─────────────── 风扇温控 ───────────────
-
-def apply_fan_curve():
-    """读取风扇曲线配置并应用到硬件 PWM"""
-    try:
-        # 找 PWM 控制通道
-        pwm_path = None
-        for hwmon in range(0, 15):
-            path = f'/sys/class/hwmon/hwmon{hwmon}/pwm1'
-            if os.path.exists(path):
-                pwm_path = path
-                break
-        if not pwm_path:
-            return
-
-        # 读当前温度
-        temp_paths = [
-            '/sys/class/thermal/thermal_zone0/temp',
-            '/sys/class/hwmon/hwmon0/temp1_input',
-        ]
-        cpu_temp = None
-        for tp in temp_paths:
-            try:
-                with open(tp, 'r') as f:
-                    val = int(f.read().strip())
-                cpu_temp = val / 1000.0  # 毫度 → 度
-                break
-            except (IOError, ValueError):
-                continue
-        if cpu_temp is None:
-            return
-
-        # 读风扇曲线配置文件
-        curve_config = {'curve': [], 'lowest_pwm': 50}
-        curve_file = '/opt/radxa_data/teslausb/data/fan_curve.json'
-        try:
-            with open(curve_file, 'r') as f:
-                saved = json.load(f)
-            if saved.get('curve'):
-                curve_config = saved
-        except (IOError, json.JSONDecodeError):
-            pass
-
-        # 按温度匹配 PWM（取第一个 >= 当前温度的档位）
-        target_pwm = curve_config.get('lowest_pwm', 50)
-        for entry in sorted(curve_config.get('curve', []), key=lambda e: e['temp']):
-            if cpu_temp >= entry['temp']:
-                target_pwm = entry['pwm']
-
-        # 写入 PWM
-        with open(pwm_path, 'w') as f:
-            f.write(str(target_pwm))
-    except Exception:
-        pass
 
 # ═══════════════════════════════════════════════════════════
 # 看门狗配置
@@ -448,12 +391,6 @@ class HardwareWatchdog:
                     # 喂狗（确保看门狗在健康检查前已被喂过）
                     if watchdog_active:
                         self.pet_watchdog()
-
-                    # 🆕 温控风扇调速
-                    try:
-                        apply_fan_curve()
-                    except Exception:
-                        pass
 
                     status = self.run_health_check()
 
