@@ -4,6 +4,8 @@
 
 拿 [TeslaUSB](https://github.com/mphacker/TeslaUSB) 的方案做底，重新写了 Web 管理后台、企业微信通知和云备份那几块。GPL-3.0 开源。
 
+**目前核心功能Gadget处于稳定运行状态，但是前端web页面处于预览版阶段存在非常多的BUG，所以更新版本非常快。**
+
 ## 装
 
 ```bash
