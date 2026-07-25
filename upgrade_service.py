@@ -40,6 +40,39 @@ def get_current_version_dir():
 # 升级流程
 # ═══════════════════════════════════════════════════════════════
 
+def _save_user_data(base_dir):
+    """保存 config/ 和 data/ 目录（升级时保留用户配置）"""
+    import tempfile
+    tmpd = tempfile.mkdtemp(prefix='upgrade-keep-')
+    saved_cfg = None
+    saved_data = None
+    try:
+        old_cfg = os.path.join(base_dir, 'config')
+        old_data = os.path.join(base_dir, 'data')
+        if os.path.isdir(old_cfg):
+            saved_cfg = os.path.join(tmpd, 'config')
+            shutil.copytree(old_cfg, saved_cfg, symlinks=True)
+        if os.path.isdir(old_data):
+            saved_data = os.path.join(tmpd, 'data')
+            shutil.copytree(old_data, saved_data, symlinks=True)
+    except Exception:
+        pass
+    return saved_cfg, saved_data
+
+
+def _restore_user_data(target_dir, saved_cfg, saved_data):
+    """恢复之前保存的 config/ 和 data/ 目录"""
+    if saved_cfg and os.path.isdir(saved_cfg):
+        dest = os.path.join(target_dir, 'config')
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(saved_cfg, dest, symlinks=True)
+    if saved_data and os.path.isdir(saved_data):
+        dest = os.path.join(target_dir, 'data')
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(saved_data, dest, symlinks=True)
+
 def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     """一键升级。返回 (success, message)
 
@@ -100,14 +133,21 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     else:
         steps[-1] = f"已备份到 {msg}"
 
-    # ── 5. 解压并安装 ──
+    # ── 5. 保存旧版本数据（升级后恢复，避免 config/wecom.json 等丢失）──
+    steps.append("保存配置...")
+    saved_cfg, saved_data = _save_user_data(current_dir)
+
+    # ── 6. 解压并安装 ──
     steps.append("解压安装...")
     ok, msg = _extract_and_setup(tarball, new_dir)
     if not ok:
         _cleanup(tarball, sig_file)
-        shutil.rmtree(new_dir, ignore_errors=True)  # 清理残留，便于重试
+        shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"安装失败: {msg}"
     steps[-1] = "安装完成"
+
+    # ── 恢复旧版本配置 ──
+    _restore_user_data(new_dir, saved_cfg, saved_data)
 
     # ── 6. 切换 symlink ──
     steps.append("切换版本...")
@@ -147,6 +187,9 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     ok, msg = _backup_current()
     steps[-1] = f"已备份到 {msg}" if ok else f"备份警告: {msg}（继续升级）"
 
+    # 保存旧版本 config/data
+    saved_cfg, saved_data = _save_user_data(current_dir)
+
     # 解压安装
     steps.append("解压安装...")
     ok, msg = _extract_and_setup(tarball_path, new_dir)
@@ -154,6 +197,9 @@ def do_upgrade_from_tarball(tarball_path, new_version):
         shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"安装失败: {msg}"
     steps[-1] = "安装完成"
+
+    # 恢复用户数据
+    _restore_user_data(new_dir, saved_cfg, saved_data)
 
     # 切 symlink
     if os.path.islink(SYMLINK):
@@ -204,8 +250,26 @@ def do_rollback():
 
 
 def get_rollback_info():
-    """返回可回退的版本信息"""
+    """返回可回退的版本信息（含备份检测）"""
     history = _read_version_history()
+
+    # 初始化版本历史（首次安装）
+    if not history:
+        current_ver = getattr(config, 'APP_VERSION', '0')
+        if current_ver and current_ver != '0':
+            _record_version(current_ver, '', 'init')
+        return None
+
+    # 检查备份目录中是否有可回退版本
+    if len(history) < 2 and os.path.isdir(BACKUP_DIR):
+        backups = sorted(
+            [d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))],
+            reverse=True
+        )
+        if backups:
+            ver = backups[0].replace('teslausb-v', '')
+            return {"version": ver, "installed_at": "", "from_backup": True}
+
     if len(history) < 2:
         return None
     prev = history[-2]
