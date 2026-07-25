@@ -7,9 +7,10 @@ TeslaUSB Neo - 硬件看门狗模块
 2. 监控关键服务健康
 3. 触发硬件看门狗喂狗
 4. 系统异常时自动重启
+5. 🆕 风扇温控曲线自动调节
 
 设计原理：
-- 树莓派内置硬件看门狗定时器
+- Linux 标准硬件看门狗定时器
 - 需要在 /boot/config.txt 启用: dtparam=watchdog=on
 - systemd 可以配置 WatchdogSec 参数实现服务看门狗
 - 本模块提供更细粒度的健康检查
@@ -29,6 +30,62 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────── 风扇温控 ───────────────
+
+def apply_fan_curve():
+    """读取风扇曲线配置并应用到硬件 PWM"""
+    try:
+        # 找 PWM 控制通道
+        pwm_path = None
+        for hwmon in range(0, 15):
+            path = f'/sys/class/hwmon/hwmon{hwmon}/pwm1'
+            if os.path.exists(path):
+                pwm_path = path
+                break
+        if not pwm_path:
+            return
+
+        # 读当前温度
+        temp_paths = [
+            '/sys/class/thermal/thermal_zone0/temp',
+            '/sys/class/hwmon/hwmon0/temp1_input',
+        ]
+        cpu_temp = None
+        for tp in temp_paths:
+            try:
+                with open(tp, 'r') as f:
+                    val = int(f.read().strip())
+                cpu_temp = val / 1000.0  # 毫度 → 度
+                break
+            except (IOError, ValueError):
+                continue
+        if cpu_temp is None:
+            return
+
+        # 读风扇曲线配置文件
+        curve_config = {'curve': [], 'lowest_pwm': 50}
+        curve_file = '/opt/radxa_data/teslausb/data/fan_curve.json'
+        try:
+            with open(curve_file, 'r') as f:
+                saved = json.load(f)
+            if saved.get('curve'):
+                curve_config = saved
+        except (IOError, json.JSONDecodeError):
+            pass
+
+        # 按温度匹配 PWM（取第一个 >= 当前温度的档位）
+        target_pwm = curve_config.get('lowest_pwm', 50)
+        for entry in sorted(curve_config.get('curve', []), key=lambda e: e['temp']):
+            if cpu_temp >= entry['temp']:
+                target_pwm = entry['pwm']
+
+        # 写入 PWM
+        with open(pwm_path, 'w') as f:
+            f.write(str(target_pwm))
+    except Exception:
+        pass
+
 # ═══════════════════════════════════════════════════════════
 # 看门狗配置
 # ═══════════════════════════════════════════════════════════
@@ -37,16 +94,17 @@ logger = logging.getLogger(__name__)
 CPU_LOAD_THRESHOLD = 80      # CPU 负载百分比阈值
 MEMORY_THRESHOLD = 85        # 内存使用百分比阈值
 DISK_THRESHOLD = 95          # 磁盘使用百分比阈值
-RESPONSE_TIMEOUT = 10        # 服务响应超时（秒）
+RESPONSE_TIMEOUT = 3        # 服务响应超时（秒），缩短避免阻塞
 
 # 关键服务列表（需监控）
+# 注意：只列入常驻服务，teslausb-gadget 仅在 USB 连接 Tesla 时运行，不列入
 CRITICAL_SERVICES = [
     "teslausb-web",
     "teslausb-sentry",
 ]
 
 # 状态文件
-HEALTH_STATUS_FILE = "/opt/teslausb-web/data/health_status.json"
+HEALTH_STATUS_FILE = "/opt/radxa_data/teslausb/data/health_status.json"
 LOG_FILE = "/var/log/teslausb-watchdog.log"
 
 
@@ -55,6 +113,7 @@ class HardwareWatchdog:
 
     def __init__(self):
         self.watchdog_dev = "/dev/watchdog"
+        self.watchdog_fd = None   # 保持打开的看门狗文件描述符
         self.status = {
             "healthy": True,
             "last_check": None,
@@ -63,29 +122,54 @@ class HardwareWatchdog:
         }
 
     def is_watchdog_available(self) -> bool:
-        """检查硬件看门狗设备是否可用"""
+        """检查硬件看门狗设备是否可用（不打开设备）"""
         if os.path.exists(self.watchdog_dev):
-            try:
-                # 尝试打开看门狗设备
-                with open(self.watchdog_dev, "w") as wd:
-                    # 写入 magic close 字符 'V' 以关闭看门狗（不触发重启）
-                    wd.write("V")
-                logger.info("硬件看门狗设备可用")
-                return True
-            except Exception as e:
-                logger.warning(f"看门狗设备打开失败: {e}")
-        return False
-
-    def pet_watchdog(self):
-        """喂狗（写入看门狗设备）"""
-        if not os.path.exists(self.watchdog_dev):
+            logger.info("硬件看门狗设备存在: %s", self.watchdog_dev)
+            return True
+        else:
+            logger.warning("硬件看门狗设备不存在: %s", self.watchdog_dev)
             return False
+
+    def start_watchdog(self) -> bool:
+        """打开看门狗设备，启动硬件定时器（保持 fd 打开）"""
+        if self.watchdog_fd is not None:
+            logger.debug("看门狗已经启动")
+            return True
         try:
-            with open(self.watchdog_dev, "w") as wd:
-                wd.write("\n")  # 写入任意数据即可
+            self.watchdog_fd = os.open(self.watchdog_dev, os.O_WRONLY)
+            logger.info("硬件看门狗已启动，超时=16秒")
             return True
         except Exception as e:
-            logger.error(f"喂狗失败: {e}")
+            logger.error("打开看门狗失败: %s", e)
+            self.watchdog_fd = None
+            return False
+
+    def stop_watchdog(self):
+        """安全关闭看门狗（写入 magic char 'V' 后 close）"""
+        if self.watchdog_fd is not None:
+            try:
+                os.write(self.watchdog_fd, b"V")
+                os.close(self.watchdog_fd)
+                logger.info("硬件看门狗已安全关闭（magic close）")
+            except Exception as e:
+                logger.error("关闭看门狗失败: %s", e)
+                try:
+                    os.close(self.watchdog_fd)
+                except Exception:
+                    pass
+            finally:
+                self.watchdog_fd = None
+
+    def pet_watchdog(self) -> bool:
+        """喂狗（向已打开的 fd 写入数据，重启定时器）"""
+        if self.watchdog_fd is None:
+            logger.warning("看门狗未启动，无法喂狗")
+            return False
+        try:
+            os.write(self.watchdog_fd, b"\n")
+            return True
+        except Exception as e:
+            logger.error("喂狗失败: %s", e)
             return False
 
     def get_cpu_load(self) -> float:
@@ -100,7 +184,7 @@ class HardwareWatchdog:
                 return (load / cores) * 100
             return load * 100
         except Exception as e:
-            logger.error(f"获取 CPU 负载失败: {e}")
+            logger.error("获取 CPU 负载失败: %s", e)
             return 0.0
 
     def get_memory_usage(self) -> Dict:
@@ -127,7 +211,7 @@ class HardwareWatchdog:
                 "percent": percent,
             }
         except Exception as e:
-            logger.error(f"获取内存使用率失败: {e}")
+            logger.error("获取内存使用率失败: %s", e)
             return {"total_mb": 0, "used_mb": 0, "available_mb": 0, "percent": 0}
 
     def get_disk_usage(self, path: str = "/") -> Optional[Dict]:
@@ -144,7 +228,7 @@ class HardwareWatchdog:
                 "percent": int((stat.f_blocks - stat.f_bfree) * 100 / stat.f_blocks),
             }
         except Exception as e:
-            logger.error(f"获取磁盘使用率失败: {e}")
+            logger.error("获取磁盘使用率失败: %s", e)
             return None
 
     def get_temperature(self) -> Optional[float]:
@@ -197,7 +281,7 @@ class HardwareWatchdog:
         except subprocess.TimeoutExpired:
             return {"active": False, "status": "timeout", "details": {}}
         except Exception as e:
-            logger.error(f"检查服务 {service_name} 失败: {e}")
+            logger.error("检查服务 %s 失败: %s", service_name, e)
             return {"active": False, "status": "error", "error": str(e), "details": {}}
 
     def check_network_connectivity(self) -> bool:
@@ -206,9 +290,9 @@ class HardwareWatchdog:
         for host in test_hosts:
             try:
                 result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "3", host],
+                    ["ping", "-c", "1", "-W", "2", host],
                     capture_output=True,
-                    timeout=5,
+                    timeout=3,
                 )
                 if result.returncode == 0:
                     return True
@@ -221,7 +305,7 @@ class HardwareWatchdog:
         try:
             result = subprocess.run(
                 ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                 f"http://localhost:{port}/", "--connect-timeout", "5"],
+                 f"http://localhost:{port}/", "--connect-timeout", "3", "--max-time", "3"],
                 capture_output=True,
                 text=True,
                 timeout=RESPONSE_TIMEOUT,
@@ -229,7 +313,7 @@ class HardwareWatchdog:
             code = result.stdout.strip()
             return code.startswith("2") or code.startswith("3")
         except Exception as e:
-            logger.error(f"检查 Web 服务失败: {e}")
+            logger.error("检查 Web 服务失败: %s", e)
             return False
 
     def run_health_check(self) -> Dict:
@@ -267,9 +351,13 @@ class HardwareWatchdog:
             self.status["metrics"]["disk_root"] = disk
             if disk["percent"] > DISK_THRESHOLD:
                 self.status["issues"].append(f"根分区磁盘使用过高: {disk['percent']}%")
-        # 检查 cam 分区
-        from config import PARTITIONS
-        cam_path = PARTITIONS.get("cam", "/media/cnlvan/cam")
+        # 检查 cam 分区（从容错配置读取，失败使用默认值）
+        cam_path = "/mnt/teslacam"
+        try:
+            from config import PARTITIONS
+            cam_path = PARTITIONS.get("cam", cam_path)
+        except Exception:
+            pass
         if os.path.ismount(cam_path):
             disk_cam = self.get_disk_usage(cam_path)
             if disk_cam:
@@ -284,11 +372,15 @@ class HardwareWatchdog:
 
         # 5. 关键服务检查
         self.status["metrics"]["services"] = {}
+        service_all_ok = True
         for service in CRITICAL_SERVICES:
             svc_status = self.check_service_status(service)
             self.status["metrics"]["services"][service] = svc_status
             if not svc_status.get("active"):
-                self.status["issues"].append(f"服务 {service} 未运行")
+                self.status["issues"].append("服务 %s 未运行" % service)
+                service_all_ok = False
+        if not service_all_ok:
+            self.status["healthy"] = False
 
         # 6. 网络检查
         network = self.check_network_connectivity()
@@ -314,55 +406,111 @@ class HardwareWatchdog:
             with open(HEALTH_STATUS_FILE, "w") as f:
                 json.dump(self.status, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error(f"保存健康状态失败: {e}")
+            logger.error("保存健康状态失败: %s", e)
 
-    def run_daemon(self, interval: int = 60):
+    def run_daemon(self, interval: int = 60) -> None:
         """
         以守护进程方式运行看门狗
 
         Args:
-            interval: 健康检查间隔（秒）
+            interval: 健康检查间隔（秒），必须 < 16秒（看门狗超时）
         """
-        logger.info(f"看门狗守护进程启动，检查间隔: {interval}s")
+        if interval >= 16:
+            logger.warning("健康检查间隔(%ds) 超过看门狗超时(16s)，强制改为5s", interval)
+            interval = 5
 
-        watchdog_available = self.is_watchdog_available()
-        if not watchdog_available:
+        # 启动前等待系统完全启动（避免系统启动阶段超时）
+        logger.info("等待系统完成启动（30秒）...")
+        time.sleep(30)
+
+        logger.info("看门狗守护进程启动，检查间隔: %ds", interval)
+
+        # 启动看门狗（打开 fd，启动定时器）
+        watchdog_active = self.start_watchdog()
+        if not watchdog_active:
             logger.warning("硬件看门狗不可用，仅进行健康监控")
 
         consecutive_failures = 0
         max_failures = 3
+        want_reboot = False
 
-        while True:
-            try:
-                status = self.run_health_check()
+        try:
+            while True:
+                try:
+                    # 已决定重启，不再喂狗，等待硬件看门狗超时
+                    if want_reboot:
+                        logger.info("已触发重启条件，等待硬件看门狗超时复位（16秒）...")
+                        time.sleep(20)  # 等待超过16秒，让硬件复位
+                        logger.warning("硬件看门狗未触发，执行软重启")
+                        subprocess.run(["reboot"], check=False)
+                        break
 
-                if status["healthy"]:
-                    consecutive_failures = 0
-                    logger.debug(f"健康检查通过，CPU: {status['metrics'].get('cpu_load', 0):.1f}%, "
-                                  f"内存: {status['metrics'].get('memory', {}).get('percent', 0):.1f}%")
-                    # 喂狗
-                    if watchdog_available:
+                    # 喂狗（确保看门狗在健康检查前已被喂过）
+                    if watchdog_active:
                         self.pet_watchdog()
-                else:
+
+                    # 🆕 温控风扇调速
+                    try:
+                        apply_fan_curve()
+                    except Exception:
+                        pass
+
+                    status = self.run_health_check()
+
+                    if status["healthy"]:
+                        consecutive_failures = 0
+                        logger.info(
+                            "健康检查通过，CPU: %.1f%%, 内存: %.1f%%",
+                            status["metrics"].get("cpu_load", 0),
+                            status["metrics"].get("memory", {}).get("percent", 0),
+                        )
+                    else:
+                        consecutive_failures += 1
+                        logger.warning(
+                            "健康检查失败 (%d/%d): %s",
+                            consecutive_failures,
+                            max_failures,
+                            ", ".join(status["issues"]),
+                        )
+
+                        if consecutive_failures >= max_failures:
+                            logger.critical(
+                                "连续 %d 次健康检查失败，准备触发硬件重启...",
+                                max_failures,
+                            )
+                            # 不喂狗、不关闭看门狗，让硬件看门狗超时触发重启
+                            want_reboot = True
+
+                    time.sleep(interval)
+
+                except Exception as e:
                     consecutive_failures += 1
-                    logger.warning(f"健康检查失败 ({consecutive_failures}/{max_failures}): "
-                                    f"{', '.join(status['issues'])}")
+                    logger.error(
+                        "看门狗运行异常(#%d/%d): %s",
+                        consecutive_failures,
+                        max_failures,
+                        e,
+                    )
 
                     if consecutive_failures >= max_failures:
-                        logger.critical(f"连续 {max_failures} 次健康检查失败，准备重启...")
-                        # 不喂狗，让硬件看门狗触发重启
-                        time.sleep(60)  # 等待看门狗超时
-                        # 如果到这里还没重启，执行软重启
-                        subprocess.run(["reboot"], check=False)
+                        logger.critical(
+                            "连续 %d 次异常，准备触发硬件重启...",
+                            max_failures,
+                        )
+                        want_reboot = True
 
-                time.sleep(interval)
+                    # 如果还没触发重启，等待下次检查
+                    if not want_reboot:
+                        time.sleep(interval)
 
-            except KeyboardInterrupt:
-                logger.info("收到退出信号，停止看门狗")
-                break
-            except Exception as e:
-                logger.error(f"看门狗运行异常: {e}")
-                time.sleep(interval)
+        except KeyboardInterrupt:
+            logger.info("收到退出信号，停止看门狗")
+        finally:
+            # 只有正常退出时才关闭看门狗
+            # 如果 want_reboot=True（触发重启），不关闭看门狗，让硬件超时复位
+            if not want_reboot:
+                logger.info("看门狗守护进程退出，安全关闭看门狗")
+                self.stop_watchdog()
 
 
 def main():
