@@ -20,19 +20,24 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Tuple, List, Dict, Optional
-from PIL import Image
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    Image = None
+    PIL_AVAILABLE = False
 import struct
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('media_service')
 
-# 分区挂载点配置
+# 分区挂载点配置（A7Z 实际挂载点）
 PARTITIONS = {
-    "cam": "/media/cnlvan/cam",
-    "music": "/media/cnlvan/music",
-    "lightshow": "/media/cnlvan/lightshow",
-    "boombox": "/media/cnlvan/boombox",
+    "cam": "/mnt/teslacam",
+    "music": "/mnt/music",
+    "lightshow": "/mnt/lightshow",
+    "boombox": "/mnt/boombox",
 }
 
 # 允许的音频格式
@@ -58,8 +63,8 @@ class BoomboxService:
     
     @staticmethod
     def get_music_root() -> Path:
-        """获取音乐根目录"""
-        return Path(PARTITIONS["music"]) / "Music"
+        """获取音乐根目录（直接返回分区挂载点，无 Music 子目录）"""
+        return Path(PARTITIONS["music"])
     
     @staticmethod
     def validate_audio_file(filename: str) -> Tuple[bool, Optional[str]]:
@@ -165,8 +170,20 @@ class BoomboxService:
             files = []
             for item in target_dir.iterdir():
                 if item.is_file() and item.suffix.lower() in ALLOWED_AUDIO_EXTS:
+                    # exFAT 文件名编码处理（A7Z 可能是 GBK 或 UTF-16）
+                    raw_name = item.name
+                    try:
+                        # 尝试 Latin-1 → UTF-8（surrogateescape 修复）
+                        display_name = raw_name.encode('latin-1', errors='surrogateescape').decode('utf-8')
+                    except:
+                        try:
+                            # 尝试 GBK
+                            display_name = raw_name.encode('latin-1', errors='surrogateescape').decode('gbk', errors='replace')
+                        except:
+                            display_name = raw_name
+                    
                     files.append({
-                        'name': item.name,
+                        'name': display_name,
                         'size': item.stat().st_size,
                         'path': str(item.relative_to(music_root)),
                         'modified': item.stat().st_mtime
@@ -375,7 +392,7 @@ class WrapsService:
     
     @staticmethod
     def get_wraps_root() -> Path:
-        """获取 Wraps 根目录"""
+        """获取 Wraps 根目录（在 lightshow 分区下）"""
         return Path(PARTITIONS["lightshow"]) / "Wraps"
     
     @staticmethod

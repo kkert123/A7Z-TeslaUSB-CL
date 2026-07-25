@@ -19,6 +19,7 @@ import json
 import argparse
 import logging
 import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional, Dict
@@ -84,7 +85,7 @@ class SentryService:
         'wecom_webhook_url': '',
         
         # 位置检测
-        'teslamate_url': 'http://100.111.252.121:7777',
+        'teslamate_url': 'http://100.64.0.11:7777',
         'home_location': '家',
         'home_wifi_ssids': [],
         'hotspot_ssids': [],
@@ -118,6 +119,8 @@ class SentryService:
         self.preview_generator: Optional[VideoPreviewGenerator] = None
         self.location_detector = None
         self.wifi_switcher = None
+        self.upload_scheduler = None
+        self.sei_client = None
         
         # 运行状态
         self._running = False
@@ -131,7 +134,7 @@ class SentryService:
         # 用 config.PARTITIONS 动态覆盖默认路径，避免用户名硬编码
         try:
             from config import PARTITIONS as _PARTITIONS
-            cam_root = _PARTITIONS.get("cam", "/media/cnlvan/cam")
+            cam_root = _PARTITIONS["cam"]
             config["sentry_clips_path"] = os.path.join(cam_root, "TeslaCam", "SentryClips")
         except Exception:
             pass  # 导入失败时保持 DEFAULT_CONFIG 中的默认值
@@ -197,6 +200,7 @@ class SentryService:
                 'home_wifi_ssids': self.config.get('home_wifi_ssids', []),
                 'hotspot_ssids': self.config.get('hotspot_ssids', []),
                 'wifi_interface': self.config.get('wifi_interface', 'wlan0'),
+                'teslamate_password': self.config.get('teslamate_password'),
             })
             logger.info("位置检测组件已初始化")
         except Exception as e:
@@ -222,12 +226,32 @@ class SentryService:
             'preview_enabled': self.config.get('preview_enabled', True),
             'watermark_enabled': self.config.get('watermark_enabled', True),
             'nas_base_path': self.config.get('nas_base_path'),
+            'upload_enabled': self.config.get('upload_enabled', True),
         }
+        
+        # 初始化上传调度器（通过单例获取/创建）
+        try:
+            from upload_scheduler import get_upload_scheduler
+            self.upload_scheduler = get_upload_scheduler()
+            logger.info("上传调度器已获取")
+        except Exception as e:
+            logger.error(f"获取上传调度器失败: {e}")
+        
+        # 初始化 SEI 决策客户端
+        try:
+            from sei_service import get_sei_client
+            self.sei_client = get_sei_client()
+            logger.info("SEI 决策客户端已获取")
+        except Exception as e:
+            logger.warning(f"获取 SEI 客户端失败: {e}")
+            self.sei_client = None
         
         self.watchdog = init_watchdog(
             config=watchdog_config,
             location_detector=self.location_detector,
-            wifi_switcher=self.wifi_switcher
+            wifi_switcher=self.wifi_switcher,
+            upload_scheduler=self.upload_scheduler,
+            sei_client=self.sei_client
         )
         
         # 设置回调
@@ -298,13 +322,23 @@ class SentryService:
 
     def _on_new_event(self, event):
 
-        """新事件回调 - 生成预览 + 推送微信通知"""
+        """新事件回调 - 生成预览 + 推送微信通知
+        
+        注意：外出模式(away)事件的通知由 _on_confirm_request 回调专门负责发送，
+        因为外出事件需要包含 6 位确认码；本回调仅处理在家模式(home)事件的通知。
+        但预览图生成对两种模式都需要执行。
+        """
         logger.info(f"【新事件】{event.id} @ {event.location_status}")
+
+        # 空事件过滤：跳过无视频的事件（Tesla 可能创建空事件后立即取消）
+        if event.file_count == 0:
+            logger.info(f"跳过空事件（无视频文件）: {event.id}")
+            return
 
         # 读取 event.json 获取真实位置信息
         real_location, event_reason, event_coords = self._read_event_location(event)
 
-        # 生成四宫格预览图（使用真实位置信息）
+        # 生成四宫格预览图（使用真实位置信息）—— 所有模式都需要
         preview_path = None
         if self.preview_generator:
             try:
@@ -336,11 +370,17 @@ class SentryService:
             except Exception as e:
                 logger.error(f"预览生成失败: {e}")
 
-        # 推送微信通知（哨兵事件机器人，使用真实位置信息）
+        # 外出模式(away)：跳过通知，_on_confirm_request 将发送含确认码的通知
+        # 此时预览图已生成，_on_confirm_request 会复用 event.preview_path
+        if event.location_status != "home":
+            logger.info(f"外出事件 {event.id} 跳过基础通知，等待确认码生成后由 _on_confirm_request 推送")
+            return
+
+        # 在家模式(home)：直接推送通知（无需确认码）
         notifier = self.sentry_notifier or self.notifier
         if notifier:
             try:
-                notifier.send_sentry_detected(
+                success = notifier.send_sentry_detected(
                     event_id=event.id,
                     location=real_location,
                     file_count=event.file_count,
@@ -348,8 +388,18 @@ class SentryService:
                     coordinates=event_coords,
                     preview_path=preview_path
                 )
+                if success:
+                    # 推送成功 → 标记已通知（供对账补发去重，避免重复补发）
+                    self._mark_notified(event.id)
+                else:
+                    # 发送失败 → 加入重试队列
+                    self._enqueue_notification(event, real_location, event_reason,
+                                               event_coords, preview_path, None)
+
             except Exception as e:
                 logger.error(f"哨兵事件通知失败: {e}")
+                self._enqueue_notification(event, real_location, event_reason,
+                                           event_coords, preview_path, None)
 
     def _on_upload_start(self, event):
         """上传开始回调"""
@@ -398,6 +448,11 @@ class SentryService:
         """确认请求回调"""
         logger.info(f"【确认请求】{event.id}, 码: {confirmation_code}")
 
+        # 空事件过滤：跳过无视频的确认请求
+        if event.file_count == 0:
+            logger.info(f"跳过空事件确认请求（无视频文件）: {event.id}")
+            return
+
         # 读取真实位置信息
         real_location, event_reason, event_coords = self._read_event_location(event)
 
@@ -408,7 +463,7 @@ class SentryService:
         notifier = self.sentry_notifier or self.notifier
         if notifier:
             try:
-                notifier.send_sentry_detected(
+                success = notifier.send_sentry_detected(
                     event_id=event.id,
                     location=real_location,
                     file_count=event.file_count,
@@ -417,14 +472,89 @@ class SentryService:
                     preview_path=preview_path,
                     confirmation_code=confirmation_code
                 )
+                if success:
+                    self._mark_notified(event.id)
+                else:
+                    self._enqueue_notification(event, real_location, event_reason,
+                                               event_coords, preview_path, confirmation_code)
+
             except Exception as e:
                 logger.error(f"确认请求通知失败: {e}")
+                self._enqueue_notification(event, real_location, event_reason,
+                                           event_coords, preview_path, confirmation_code)
+
+    def _enqueue_notification(self, event, real_location, event_reason, event_coords,
+                              preview_path, confirmation_code):
+        """将失败的通知加入重试队列"""
+        try:
+            from sentry_notify_queue import SentryNotifyQueue
+            queue = SentryNotifyQueue()
+            queue.enqueue(
+                event_id=event.id,
+                location=real_location,
+                file_count=event.file_count,
+                confirmation_code=confirmation_code,
+                reason=event_reason,
+                coordinates=event_coords,
+                preview_path=preview_path
+            )
+            logger.info(f"通知已加入重试队列: {event.id}")
+        except Exception as e:
+            logger.error(f"加入通知队列失败: {e}")
+
+    def _mark_notified(self, event_id):
+        """标记事件已成功通知（供对账补发去重，避免重复补发已通知的事件）"""
+        try:
+            from sentry_notify_queue import SentryNotifyQueue
+            SentryNotifyQueue().mark_notified(event_id)
+        except Exception as e:
+            logger.warning(f"标记已通知失败: {e}")
+
+    def _is_tesla_wifi(self) -> bool:
+        """
+        检查当前是否连接到 Tesla 车机 WiFi
+
+        Returns:
+            True 如果 SSID 以 TESLA_SSID_PREFIX 开头，或配置了 disable_ssid_check
+        """
+        # 紧急关断开关：配置文件设置了 disable_ssid_check
+        if self.config.get("disable_ssid_check", False):
+            logger.info("SSID 检查已通过配置禁用 (disable_ssid_check=True)")
+            return True
+
+        try:
+            from config import TESLA_SSID_PREFIX
+            output = subprocess.check_output(
+                ['iwgetid', '-r'], stderr=subprocess.DEVNULL, text=True
+            ).strip()
+            if not output:
+                logger.warning("未连接到任何 WiFi")
+                return False
+            is_tesla = output.lower().startswith(TESLA_SSID_PREFIX.lower())
+            if not is_tesla:
+                logger.info(f"当前 SSID='{output}' 不匹配前缀 '{TESLA_SSID_PREFIX}'")
+            return is_tesla
+        except FileNotFoundError:
+            # iwgetid 不可用（非 Linux 或开发环境），默认放行
+            logger.debug("iwgetid 不可用，默认放行 SSID 检查")
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"获取 SSID 失败: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"SSID 检查异常: {e}，默认放行")
+            return True
 
     def start(self):
         """启动服务"""
         if self._running:
             logger.warning("服务已在运行")
             return
+        
+        # ── SSID 门控：仅 Tesla WiFi 下启动哨兵监控 ──
+        if not self._is_tesla_wifi():
+            logger.info("未连接到 Tesla WiFi，跳过哨兵监控启动")
+            return False
         
         logger.info("="*60)
         logger.info("启动 TeslaUSB-Neo 哨兵服务")
@@ -500,7 +630,7 @@ class SentryService:
 def main():
     parser = argparse.ArgumentParser(description='TeslaUSB-Neo 哨兵服务')
     parser.add_argument('--config', '-c', type=Path, 
-                       default=Path('/opt/teslausb-web/config/sentry.json'),
+                       default=Path('/opt/radxa_data/teslausb/config/sentry.json'),
                        help='配置文件路径')
     parser.add_argument('--command', type=str, choices=['start', 'stop', 'status', 'test'],
                        default='start', help='命令')

@@ -254,17 +254,28 @@ def get_wifi_info() -> Dict:
                             info["ssid"] = ssid
                             break
             
-            # 获取信号强度
+            # 获取信号强度（尝试多种 nmcli 输出格式）
             if info["connected"]:
                 result2 = subprocess.run(
-                    ["nmcli", "-t", "-f", "active,signal", "dev", "wifi"],
+                    ["nmcli", "-t", "-f", "IN-USE,SIGNAL,SSID", "dev", "wifi"],
                     capture_output=True, text=True, timeout=10
                 )
                 for line in result2.stdout.split('\n'):
-                    if line.startswith('yes:'):
-                        sig = line.split(':')[-1].strip()
-                        if sig.isdigit():
-                            info["signal_pct"] = int(sig)
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
+                    parts = line.split(':')
+                    # 格式: *:42:MyWiFi 或 yes:MyWiFi:42 (旧格式回退)
+                    # 新格式 IN-USE,SIGNAL,SSID → *:42:MyWiFi
+                    if parts[0] in ('*', 'yes'):
+                        for p in parts[1:]:
+                            p = p.strip()
+                            if p.isdigit():
+                                sig = int(p)
+                                if 1 <= sig <= 100:  # 有效信号范围
+                                    info["signal_pct"] = sig
+                                    break
+                        if info["signal_pct"] > 0:
                             break
             
             if info["connected"] and info["signal_pct"] > 0:
@@ -280,13 +291,15 @@ def get_wifi_info() -> Dict:
         try:
             with open("/proc/net/wireless", "r") as f:
                 lines = f.readlines()
-            if len(lines) >= 3:
-                # 第三行是 wlan0 数据: "wlan0: 0000   69.  -41.  -256"
-                parts = lines[2].split()
-                if len(parts) >= 4:
-                    # link quality 是百分比形式如 "69." 
-                    link_qual = float(parts[2].replace('.', ''))
-                    info["signal_pct"] = int(min(100, max(0, link_qual)))
+            # 找到 wlan0 行
+            for line in lines:
+                if 'wlan0' in line:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        # link quality 是百分比形式如 "69." 
+                        link_qual = float(parts[2].replace('.', ''))
+                        info["signal_pct"] = int(min(100, max(0, link_qual)))
+                    break
         except Exception:
             pass
     
@@ -406,8 +419,7 @@ def main():
 
     logger.info("开机通知服务启动")
 
-    # 收集系统信息
-    boot_time = get_boot_time_str()
+    # 收集系统信息（先收集不依赖时间的静态信息）
     cpu_info = get_cpu_info()
     nvme_temp = get_nvme_temp()
     memory_info = get_memory_info()
@@ -425,6 +437,9 @@ def main():
     # 服务状态
     services = get_service_status()
 
+    # 启动耗时 — 必须在所有等待完成后才读取，反映真实的启动耗时
+    boot_time = get_boot_time_str()
+
     # 初始化通知器
     try:
         from weixin_notifier import WeixinNotifier
@@ -439,12 +454,14 @@ def main():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    key = cfg.get("wecom_status_webhook_key") or cfg.get("wecom_webhook_key", "")
+    key = (cfg.get("wecom_boot_webhook_key") or
+           cfg.get("wecom_status_webhook_key") or
+           cfg.get("wecom_webhook_key", ""))
     if not key:
-        logger.error("未配置状态机器人 webhook key")
+        logger.error("未配置启动通知机器人 webhook key (wecom_boot_webhook_key 或 wecom_status_webhook_key)")
         sys.exit(1)
 
-    notifier = WeixinNotifier(webhook_key=key, bot_name="系统通知")
+    notifier = WeixinNotifier(webhook_key=key, bot_name="启动通知")
 
     # 发送开机通知
     success = notifier.send_boot_notification(

@@ -18,8 +18,7 @@ import os
 import time
 import json
 import logging
-import hashlib
-import shutil
+
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -31,6 +30,7 @@ import queue
 
 # 导入项目模块
 try:
+    from config import SENTRY_CLIPS_PATH
     from location_detector import LocationDetector, get_location_detector, LocationState
     from wifi_switcher import WifiSwitcher
     from upload_scheduler import UploadScheduler
@@ -39,6 +39,7 @@ except ImportError as e:
     LocationDetector = None
     WiFiSwitcher = None
     UploadScheduler = None
+    SENTRY_CLIPS_PATH = "/mnt/teslacam/TeslaCam/SentryClips"  # fallback
 
 
 # 配置日志
@@ -145,7 +146,7 @@ class SentryWatchdog:
     
     # 默认配置
     DEFAULT_CONFIG = {
-        'sentry_clips_path': '/media/cnlvan/cam/TeslaCam/SentryClips',
+        'sentry_clips_path': SENTRY_CLIPS_PATH,
         'state_file': '/opt/teslausb-web/data/sentry_events.json',
         'home_delay_minutes': 30,           # 在家延迟上传时间
         'away_confirm_timeout_minutes': 30,  # 外出确认超时时间
@@ -188,6 +189,7 @@ class SentryWatchdog:
         self.location_detector: Optional[LocationDetector] = None
         self.wifi_switcher: Optional[WiFiSwitcher] = None
         self.upload_scheduler: Optional[UploadScheduler] = None
+        self.sei_client = None  # SEI 遥测决策客户端
         
         # 运行状态
         self._running = False
@@ -200,14 +202,19 @@ class SentryWatchdog:
         # 加载历史状态
         self._load_state()
         
+        # v88: 状态丢失时基线初始化，防止历史事件重放推送
+        if not self._processed_ids:
+            self._do_baseline_init()
+        
         logger.info("哨兵监控守护进程初始化完成")
     
     def set_modules(self, location_detector=None, wifi_switcher=None, 
-                    upload_scheduler=None):
+                    upload_scheduler=None, sei_client=None):
         """设置功能模块"""
         self.location_detector = location_detector
         self.wifi_switcher = wifi_switcher
         self.upload_scheduler = upload_scheduler
+        self.sei_client = sei_client
         logger.info("功能模块已设置")
     
     def _load_state(self):
@@ -225,30 +232,80 @@ class SentryWatchdog:
                     except Exception as e:
                         logger.warning(f"加载事件失败: {e}")
                 
-                logger.info(f"已加载 {len(self.events)} 个历史事件")
+                # v88+: 从状态文件恢复 processed_ids（防止状态丢失导致历史事件重放）
+                pids = data.get('processed_ids', [])
+                if pids:
+                    self._processed_ids.update(pids)
+                
+                logger.info(f"已加载 {len(self.events)} 个历史事件, {len(self._processed_ids)} 个已处理ID")
             except Exception as e:
                 logger.error(f"加载状态文件失败: {e}")
     
     def _save_state(self):
-        """保存事件状态到文件"""
+        """保存事件状态到文件（原子写入，防止断电损坏）"""
         try:
             with self._events_lock:
                 data = {
                     'updated_at': datetime.now().isoformat(),
-                    'events': [e.to_dict() for e in self.events.values()]
+                    'events': [e.to_dict() for e in self.events.values()],
+                    'processed_ids': sorted(list(self._processed_ids)),
                 }
             
-            with open(self.state_file, 'w', encoding='utf-8') as f:
+            # 原子写入：先写临时文件，再 os.replace（POSIX 原子操作）
+            tmp = str(self.state_file) + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(self.state_file))
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
     
+    def _do_baseline_init(self):
+        """状态文件丢失/首次运行时的基线初始化。
+        
+        当 _processed_ids 为空时（状态文件不存在/损坏/首次运行），
+        扫描 SentryClips 目录并标记所有现有事件为"已处理"，
+        防止将历史事件当作新事件重放推送通知。
+        
+        此方法仅在 _processed_ids 为空时调用一次。
+        """
+        sentry_path = Path(self.config['sentry_clips_path'])
+        if not sentry_path.exists():
+            logger.info("SentryClips 目录不存在，跳过基线初始化")
+            return
+        
+        count = 0
+        try:
+            for event_folder in sentry_path.iterdir():
+                if not event_folder.is_dir():
+                    continue
+                # 只标记包含视频文件的事件（跳过空事件/无视频目录）
+                has_video = any(
+                    f.is_file() and f.suffix.lower() == '.mp4'
+                    for f in event_folder.iterdir()
+                )
+                if has_video:
+                    self._processed_ids.add(event_folder.name)
+                    count += 1
+        except Exception as e:
+            logger.error(f"基线初始化扫描失败: {e}")
+            return
+        
+        if count > 0:
+            logger.warning(
+                f"⚠ 状态文件丢失/首次运行，基线初始化："
+                f"标记 {count} 个现有事件为已处理（不推送通知）"
+            )
+        else:
+            logger.info("基线初始化：未发现现有事件")
+        
+        # 立即持久化 processed_ids，防止下次重启再次触发基线
+        self._save_state()
+    
     def _generate_event_id(self, folder_path: Path) -> str:
-        """生成事件唯一ID"""
-        # 使用文件夹修改时间和路径哈希
-        stat = folder_path.stat()
-        content = f"{folder_path}_{stat.st_mtime}_{stat.st_ctime}"
-        return hashlib.md5(content.encode()).hexdigest()[:12]
+        """生成事件唯一ID — 使用 Tesla 文件夹时间戳，不依赖变化的 mtime/ctime"""
+        # Tesla 事件文件夹命名格式: 2026-06-01_12-26-01
+        # 此名称全局唯一且不随文件增减而变化，比 mtime 哈希稳定
+        return folder_path.name
     
     def _generate_confirmation_code(self) -> str:
         """生成6位确认码"""
@@ -282,8 +339,15 @@ class SentryWatchdog:
                 if event_id in self._processed_ids:
                     continue
                 
-                # 统计文件
-                file_count = sum(1 for f in event_folder.rglob('*') if f.is_file())
+                # 统计视频文件（仅 .mp4，排除 event.json / thumbnails 等）
+                file_count = sum(1 for f in event_folder.rglob('*')
+                                if f.is_file() and f.suffix.lower() == '.mp4')
+                
+                # 跳过空事件文件夹（Tesla 某些事件创建后立即取消，无视频）
+                if file_count == 0:
+                    logger.debug(f"跳过空事件: {event_id} (0 个视频文件)")
+                    self._processed_ids.add(event_id)
+                    continue
                 
                 # 获取当前位置状态
                 location_status = self._get_current_location_status()
@@ -316,8 +380,8 @@ class SentryWatchdog:
         """获取当前位置状态"""
         if self.location_detector:
             try:
-                result = self.location_detector.detect_location()
-                return result.status.value
+                result = self.location_detector.check_location()
+                return result.state.value
             except Exception as e:
                 logger.warning(f"位置检测失败: {e}")
         
@@ -341,10 +405,14 @@ class SentryWatchdog:
                 logger.error(f"新事件回调失败: {e}")
         
         # 根据位置状态决定处理策略
+        # 注：即使 upload_enabled=False，也要处理 away 事件（生成确认码+发送通知），仅跳过自动上传
         if event.location_status == "home":
-            self._process_home_event(event)
+            if self.config.get('upload_enabled', True):
+                self._process_home_event(event)
+            else:
+                logger.info(f"上传已禁用，事件 {event.id} 跳过自动上传（home）")
         else:
-            self._process_away_event(event)
+            self._process_away_event(event)  # 离开事件始终需要确认码通知
         
         # 保存状态
         self._save_state()
@@ -464,6 +532,11 @@ class SentryWatchdog:
         Returns:
             上传是否成功
         """
+        # 上传开关检查
+        if not self.config.get('upload_enabled', True):
+            logger.info(f"上传已禁用，跳过事件 {event_id}")
+            return False
+        
         with self._events_lock:
             event = self.events.get(event_id)
             if not event:
@@ -527,36 +600,81 @@ class SentryWatchdog:
             return False
     
     def _do_upload(self, event: SentryEvent) -> bool:
-        """实际执行上传逻辑"""
+        """实际执行上传逻辑。
+        
+        优先使用 cloud_archive_service（支持 S3/SMB/GDrive 等 rclone 后端），
+        未配置云服务商时回退到 upload_scheduler（仅支持 NAS rsync）。
+        """
+        event_path = str(event.folder_path)
+        event_id = event.id
+        
+        # ── SEI 遥测决策：咨询 sei_service 是否应上传 ──
+        if self.sei_client is not None:
+            try:
+                decision = self.sei_client.decide_upload(event_path, event_id)
+                if not decision.get("should_upload", True):
+                    logger.info(
+                        f"sei: skip upload for {event_id}, "
+                        f"reason={decision.get('reason')}"
+                    )
+                    return False
+            except Exception as e:
+                logger.warning(f"sei: 决策调用异常，默认放行: {e}")
+        
         try:
+            # ── 优先云上传（rclone 支持 S3/SMB/GDrive 等） ──
+            cloud_ok = False
+            try:
+                import cloud_archive_service
+                cfg = cloud_archive_service.load_cloud_config()
+                provider = cfg.get('provider', '')
+                if provider and provider != 'none':
+                    logger.info(f"云上传: event={event_id}, provider={provider}")
+                    result = cloud_archive_service.upload_event_to_cloud(
+                        'SentryClips', event_id)
+                    cloud_ok = result.get('success', False)
+                    if cloud_ok:
+                        logger.info(f"云上传成功: event={event_id}")
+                        self._notify_upload_result(event_id, True)
+                        return True
+                    else:
+                        logger.warning(
+                            f"云上传失败: event={event_id}, "
+                            f"msg={result.get('message')}, 回退到 NAS")
+            except Exception as e:
+                logger.warning(f"云上传异常: event={event_id}, err={e}, 回退到 NAS")
+            
+            # ── 回退 NAS（upload_scheduler） ──
             if self.upload_scheduler:
-                # 使用上传调度器
                 success = self.upload_scheduler.upload_sentry_event(
-                    str(event.folder_path),
-                    event.id
-                )
+                    event_path, event_id)
+                self._notify_upload_result(event_id, success)
                 return success
             else:
-                # 简单的复制上传
-                nas_path = Path(self.config['nas_base_path']) / event.id
-                nas_path.mkdir(parents=True, exist_ok=True)
-                
-                # 复制所有文件
-                for src_file in event.folder_path.rglob('*'):
-                    if src_file.is_file():
-                        rel_path = src_file.relative_to(event.folder_path)
-                        dst_file = nas_path / rel_path
-                        dst_file.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src_file, dst_file)
-                        event.upload_progress += 1
-                
-                event.nas_path = str(nas_path)
-                return True
+                if not cloud_ok:
+                    logger.error(f"上传调度器不可用且云未配置，无法上传事件 {event_id}")
+                return False
         
         except Exception as e:
             event.error_message = str(e)
             logger.error(f"上传失败: {e}")
             return False
+    
+    def _notify_upload_result(self, event_id: str, success: bool):
+        """微信通知上传结果（失败不阻塞主流程）"""
+        try:
+            from weixin_notifier import WeixinNotifier
+            notifier = WeixinNotifier(bot_name="哨兵")
+            if success:
+                notifier.send_text(
+                    f"✅ 哨兵事件上传成功\n事件: {event_id}",
+                    mentioned_list=None)
+            else:
+                notifier.send_text(
+                    f"❌ 哨兵事件上传失败\n事件: {event_id}",
+                    mentioned_list=None)
+        except Exception:
+            pass
     
     def _worker_loop(self):
         """工作线程循环"""
@@ -610,7 +728,10 @@ class SentryWatchdog:
                 
                 # 检查超时事件（外出模式）
                 self._check_expired_events()
-                
+
+                # 承接 web /sentry 页面写入的确认（修复页面孤立流程）
+                self._reconcile_external_confirmations()
+
                 # 定期保存状态
                 self._save_state()
                 
@@ -630,6 +751,36 @@ class SentryWatchdog:
                     if event.confirm_deadline and datetime.now() > event.confirm_deadline:
                         logger.info(f"事件 {event.id} 确认超时，标记为过期")
                         event.status = SentryEventStatus.EXPIRED
+
+    def _reconcile_external_confirmations(self):
+        """承接 web /sentry 页面写入的确认（状态文件 status==confirmed）。
+
+        web 与 watchdog 分属不同进程：web 的 /api/sentry/confirm 将状态写入共享
+        状态文件。若 web 已触发云上传（web_upload_handled=true），则跳过；
+        否则由 watchdog 接管上传。
+        """
+        try:
+            if not self.state_file.exists():
+                return
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # 筛选：已确认 且 web 未处理 的事件
+            pending = []
+            for ev in data.get('events', []):
+                if ev.get('status') == 'confirmed' and not ev.get('web_upload_handled'):
+                    pending.append(ev.get('id'))
+            if not pending:
+                return
+            with self._events_lock:
+                for event in self.events.values():
+                    if (event.status == SentryEventStatus.PENDING_CONFIRM
+                            and event.id in pending):
+                        logger.info(f"事件 {event.id} 已被 web 页面确认（web未触发上传），watchdog 接管上传")
+                        event.status = SentryEventStatus.CONFIRMED
+                        event.confirmed_by = f"web:{event.confirmation_code}"
+                        self.event_queue.put(('upload', event.id))
+        except Exception as e:
+            logger.warning(f"确认 reconciliation 失败: {e}")
     
     def start(self):
         """启动守护进程"""
@@ -705,7 +856,7 @@ def get_watchdog(config: Optional[Dict] = None) -> SentryWatchdog:
 
 
 def init_watchdog(config: Dict, location_detector=None, wifi_switcher=None, 
-                  upload_scheduler=None) -> SentryWatchdog:
+                  upload_scheduler=None, sei_client=None) -> SentryWatchdog:
     """
     初始化哨兵监控
     
@@ -714,13 +865,14 @@ def init_watchdog(config: Dict, location_detector=None, wifi_switcher=None,
         location_detector: 位置检测器
         wifi_switcher: WiFi 切换器
         upload_scheduler: 上传调度器
+        sei_client: SEI 遥测决策客户端
         
     Returns:
         SentryWatchdog 实例
     """
     global _watchdog
     _watchdog = SentryWatchdog(config)
-    _watchdog.set_modules(location_detector, wifi_switcher, upload_scheduler)
+    _watchdog.set_modules(location_detector, wifi_switcher, upload_scheduler, sei_client)
     return _watchdog
 
 

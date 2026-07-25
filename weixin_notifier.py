@@ -192,22 +192,24 @@ class WeixinNotifier:
         key_display = f"...{key[-6:]}" if key and len(key) >= 6 else ("(空)" if not key else key)
         logger.info(f"企业微信通知器初始化完成 (bot_name={bot_name}, key_suffix={key_display})")
 
-    def _send_request(self, data: dict) -> Tuple[bool, str]:
+    def _send_request(self, data: dict, timeout: int = 30) -> Tuple[bool, str]:
         """
         发送请求到企业微信
 
         Args:
             data: 消息数据
+            timeout: 超时秒数（同时用作 connect 和 read 超时）
 
         Returns:
             (成功, 错误信息)
         """
         try:
             url = self.config.get_webhook_url()
+            # 使用 (connect_timeout, read_timeout) 元组，防止 DNS/TCP 连接卡死
             response = self.session.post(
                 url,
                 json=data,
-                timeout=30
+                timeout=(10, timeout)  # connect=10s, read=timeout
             )
 
             if response.status_code != 200:
@@ -315,7 +317,7 @@ class WeixinNotifier:
 
     def send_image(self, image_path: str) -> bool:
         """
-        发送图片消息
+        发送图片消息（含自动重试）
 
         Args:
             image_path: 图片路径
@@ -346,10 +348,17 @@ class WeixinNotifier:
                 }
             }
 
-            success, error = self._send_request(data)
-            if not success:
-                logger.warning(f"发送图片消息失败: {error}")
-            return success
+            # 最多重试 2 次（网络不稳定时很关键）
+            for attempt in range(3):
+                success, error = self._send_request(data, timeout=120)
+                if success:
+                    return True
+                if attempt < 2:
+                    logger.warning(f"发送图片失败 (第{attempt+1}次): {error}, 2秒后重试...")
+                    import time
+                    time.sleep(2)
+            logger.warning(f"发送图片消息失败(已重试3次): {error}")
+            return False
 
         except FileNotFoundError:
             logger.error(f"图片文件不存在: {image_path}")
@@ -425,7 +434,8 @@ class WeixinNotifier:
                            coordinates: str = None,
                            temperature: float = None,
                            locked: bool = None,
-                           preview_path: str = None) -> bool:
+                           preview_path: str = None,
+                           is_reconciled: bool = False) -> bool:
         """
         发送哨兵事件检测通知（文本格式，兼容所有微信客户端）
 
@@ -439,15 +449,23 @@ class WeixinNotifier:
             temperature: 温度
             locked: 车辆锁定状态
             preview_path: 预览图路径
+            is_reconciled: 是否为对账补发（reconcile 兜底补发的遗漏事件）
 
         Returns:
             是否发送成功
         """
         # 构建消息内容（纯文本格式）
-        lines = [
-            "🚨 哨兵事件检测",
-            ""
-        ]
+        if is_reconciled:
+            lines = [
+                "🔄 哨兵事件检测【补发】",
+                "👇 以下为网络中断/断网遗留的遗漏事件",
+                ""
+            ]
+        else:
+            lines = [
+                "🚨 哨兵事件检测",
+                ""
+            ]
 
         # 地点
         lines.append(f"📍 地点: {location}")
@@ -487,9 +505,21 @@ class WeixinNotifier:
             lines.append(f"⚠️ 确认码: {confirmation_code}")
             lines.append("回复确认码以允许上传")
 
-        # 时间
-        lines.append("")
-        lines.append(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # 时间 — 从 event_id 解析事件触发时间（而非 datetime.now()）
+        # event_id 格式: "2026-06-29_11-25-20"，日期和时间的分隔符不同
+        try:
+            parts = event_id.split('_')
+            if len(parts) == 2:
+                date_str = parts[0]                     # "2026-06-29"
+                time_str = parts[1].replace('-', ':')   # "11:25:20"
+                ts_str = f"{date_str} {time_str}"
+                dt = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        except (ValueError, Exception):
+            time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        lines.append(f"时间: {time_str}")
 
         content = "\n".join(lines)
 
@@ -586,73 +616,104 @@ class WeixinNotifier:
     def send_boot_notification(self, boot_time: str, cpu_info: dict,
                               memory_info: dict, disk_info: list,
                               wifi_info: dict = None, tailscale_ip: str = None,
-                              services: dict = None) -> bool:
+                              services: dict = None,
+                              nvme_temp: float = None,
+                              local_ip: str = None) -> bool:
         """
-        发送开机通知
+        发送开机通知（增强版格式：NVMe 温度 / SWAP / 磁盘状态图标 / 本地 IP）
 
         Args:
-            boot_time: 启动时间
-            cpu_info: CPU 信息 (model, freq_mhz, usage_pct, temp_c)
-            memory_info: 内存信息 (total_mb, used_mb, pct)
-            disk_info: 磁盘信息列表
-            wifi_info: WiFi 信息 (ssid, signal_pct, freq_ghz)
+            boot_time: 启动时间字符串（如 "05-18 18:01（启动耗时 45s）"）
+            cpu_info: CPU 信息 (model, freq_mhz, temp_c)
+            memory_info: 内存信息 (total_mb, used_mb, pct, swap_total_mb, swap_used_mb, swap_pct)
+            disk_info: 磁盘信息列表 (name, total_gb, used_gb, percent, mounted)
+            wifi_info: WiFi 信息 (ssid, signal_pct)
             tailscale_ip: Tailscale IP
             services: 服务状态
+            nvme_temp: NVMe SSD 温度
+            local_ip: 本地网络 IP
 
         Returns:
             是否发送成功
         """
         lines = [
-            "🚀 系统启动通知",
+            "🚀 TeslaUSB A7Z 已启动",
             "",
-            f"⏰ 启动时间: {boot_time}",
+            f"⏰ {boot_time}",
             ""
         ]
 
-        # CPU 信息
+        # CPU 信息（紧凑一行）
         if cpu_info:
             model = cpu_info.get('model', 'Unknown')
             freq = cpu_info.get('freq_mhz', 0)
             temp = cpu_info.get('temp_c', 0)
-            lines.append(f"🖥️ CPU: {model}")
-            lines.append(f"   频率: {freq} MHz | 温度: {temp}°C")
+            parts = [model]
+            if freq > 0:
+                parts.append(f"{freq}MHz")
+            if temp > 0:
+                parts.append(f"{temp}°C")
+            lines.append(f"🖥️ {' · '.join(parts)}")
+
+        # NVMe 温度
+        if nvme_temp is not None and nvme_temp > 0:
+            lines.append(f"🌡️ NVMe {nvme_temp}°C")
 
         # 内存信息
         if memory_info:
             total = memory_info.get('total_mb', 0)
             used = memory_info.get('used_mb', 0)
             pct = memory_info.get('pct', 0)
-            lines.append(f"💾 内存: {used}/{total} MB ({pct:.1f}%)")
+            lines.append(f"💾 内存 {used}/{total}MB ({pct}%)")
 
-        # 磁盘信息
+            # SWAP
+            swap_total = memory_info.get('swap_total_mb', 0)
+            swap_used = memory_info.get('swap_used_mb', 0)
+            swap_pct = memory_info.get('swap_pct', 0)
+            if swap_total > 0:
+                lines.append(f"📀 SWAP {swap_used}/{swap_total}MB ({swap_pct}%)")
+
+        # 磁盘信息（带状态图标）
         if disk_info:
-            lines.append("📁 磁盘:")
+            lines.append("💿 磁盘")
             for disk in disk_info:
                 name = disk.get('name', 'Unknown')
-                used = disk.get('used_gb', 0)
-                total = disk.get('total_gb', 0)
-                pct = disk.get('percent', 0)
-                lines.append(f"   {name}: {used}/{total} GB ({pct}%)")
+                if disk.get('mounted'):
+                    used = disk.get('used_gb', 0)
+                    total = disk.get('total_gb', 0)
+                    pct = disk.get('percent', 0)
+                    icon = "🟢" if pct < 70 else ("🟡" if pct < 90 else "🔴")
+                    lines.append(f"  {name} {used}/{total}GB ({pct}%) {icon}")
+                else:
+                    lines.append(f"  {name} 未挂载 ⚠️")
 
         # WiFi 信息
         if wifi_info:
-            ssid = wifi_info.get('ssid', 'Unknown')
+            connected = wifi_info.get('connected', False)
+            ssid = wifi_info.get('ssid', '')
             signal = wifi_info.get('signal_pct', 0)
-            freq = wifi_info.get('freq_ghz', 0)
-            lines.append(f"📶 WiFi: {ssid} ({signal}%, {freq} GHz)")
+            if connected and ssid:
+                lines.append(f"📶 WiFi {ssid} ({signal}%)")
+            elif ssid:
+                lines.append(f"📶 WiFi {ssid} (未连接)")
+            else:
+                lines.append("📶 WiFi 未连接")
+
+        # 本地 IP
+        if local_ip and local_ip != "N/A":
+            lines.append(f"🏠 本地IP {local_ip}")
 
         # Tailscale IP
-        if tailscale_ip:
-            lines.append(f"🌐 Tailscale: {tailscale_ip}")
+        if tailscale_ip and tailscale_ip != "N/A":
+            lines.append(f"🌐 Tailscale {tailscale_ip}")
 
         # 服务状态
         if services:
-            lines.append("⚙️ 服务:")
+            lines.append("⚙️ 服务")
             for name, status in services.items():
                 status_icon = "✅" if status else "❌"
-                lines.append(f"   {name}: {status_icon}")
+                lines.append(f"  {name} {status_icon}")
 
-        lines.append("")
         lines.append(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         content = "\n".join(lines)

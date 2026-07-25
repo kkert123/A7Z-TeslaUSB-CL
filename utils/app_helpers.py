@@ -626,7 +626,6 @@ def _stats_broadcaster():
     import gc
     _last_disk_write = 0  # 磁盘缓存写入间隔（每 30s 一次）
     _last_gc = 0
-    _last_version_check = 0  # 版本检查间隔（每 5 分钟一次，复用 1h 内存缓存）
     while True:
         time.sleep(5)
         # 每 5 分钟 GC 一次，避免内存碎片累积
@@ -732,18 +731,6 @@ def _stats_broadcaster():
                 stats['thumbnail_health'] = get_thumbnail_health()
             except Exception:
                 pass
-
-            # 版本信息 — 每次采集都检查，check_latest_release 内部有 1h 缓存
-            # 仪表盘服务卡片实时显示当前/最新版本
-            try:
-                import version_service
-                stats['version_info'] = version_service.check_latest_release()
-            except Exception as e:
-                stats['version_info'] = {
-                    'current': getattr(config, 'APP_VERSION', '0'),
-                    'latest': None, 'has_update': False,
-                    'error': f'版本检查异常: {e}',
-                }
 
             with state.stats_subscribers_lock:
                 dead = []

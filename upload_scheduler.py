@@ -30,8 +30,10 @@ from location_detector import LocationInfo, LocationState, get_location_detector
 
 logger = logging.getLogger(__name__)
 
+from config import SENTRY_CLIPS_PATH
+
 DEFAULT_QUEUE_DB = "/data/sentry_queue.db"
-DEFAULT_SENTRY_PATH = "/media/cnlvan/cam/TeslaCam/SentryClips"
+DEFAULT_SENTRY_PATH = SENTRY_CLIPS_PATH
 
 
 class UploadStatus(Enum):
@@ -422,6 +424,42 @@ class UploadScheduler:
         
         return self._row_to_task(row) if row else None
     
+    def get_all_tasks(self) -> list[UploadTask]:
+        """获取所有非终端状态的任务（含 uploading / pending / failed / done）"""
+        conn = self._get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM upload_tasks "
+            "WHERE status NOT IN (?, ?, ?) "
+            "ORDER BY created_at",
+            (UploadStatus.EXPIRED.value,
+             UploadStatus.CANCELLED.value,
+             UploadStatus.DONE.value),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [self._row_to_task(row) for row in rows]
+    
+    def upload_sentry_event(self, event_path, event_id: str) -> bool:
+        """
+        上传哨兵事件
+        
+        通过调度器创建任务并执行上传，支持断点续传和队列管理。
+        
+        Args:
+            event_path: 事件文件夹路径
+            event_id: 事件ID
+            
+        Returns:
+            上传是否成功
+        """
+        try:
+            task = self.create_task(event_path, at_home=True)
+            return self._execute_upload(task)
+        except UploadSchedulerError as e:
+            logger.error(f"创建上传任务失败 {event_id}: {e}")
+            return False
+    
     def schedule_delete(self, file_path: str, delay_seconds: int, upload_verified: bool = True) -> None:
         """
         安排延迟删除
@@ -571,6 +609,16 @@ class UploadScheduler:
                 self._on_upload_complete(task)
                 
             logger.info(f"上传完成: {task.event_name}")
+            
+            # ── 微信通知：队列清空检查 ──
+            remaining = len(self.get_pending_tasks())
+            if remaining == 0:
+                try:
+                    from weixin_notifier import WeixinNotifier
+                    notifier = WeixinNotifier(bot_name="哨兵")
+                    notifier.send_text("📤 上传队列已全部清空，所有哨兵事件处理完毕")
+                except Exception:
+                    pass
         else:
             task.status = UploadStatus.FAILED
             task.error_message = f"已重试 {config.upload.max_retries} 次: {final_error}"

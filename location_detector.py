@@ -409,7 +409,7 @@ class LocationDetector:
     
     def __init__(
         self,
-        teslamate_url: str = "http://100.111.252.121:7777/",
+        teslamate_url: str = "http://100.64.0.11:7777/",
         home_location: str = "家",
         home_wifi_ssids: Optional[list[str]] = None,
         hotspot_ssids: Optional[list[str]] = None,
@@ -490,7 +490,7 @@ class LocationDetector:
                     
                     # 检查登录是否成功（页面重定向到主页或没有登录表单）
                     if response.status_code == 200:
-                        if "密码" not in response.text and "password" not in response.text.lower():
+                        if self._is_authenticated(response.text):
                             logger.info("TeslaMate 表单认证成功")
                         else:
                             # 尝试 JSON API 认证
@@ -512,40 +512,80 @@ class LocationDetector:
         return self._session
     
     def _is_authenticated(self, response_text: str) -> bool:
-        """检查响应是否表示已认证（没有登录页面）"""
-        auth_indicators = ["密码", "password", "signin", "登录", "Login"]
-        return not any(indicator in response_text for indicator in auth_indicators)
+        """检查响应是否表示已认证（没有登录表单，而非简单关键词匹配）。
+        
+        仅检测登录表单/页面特征，避免把页面中正常的 CSS/JS 含 "password" 
+        字样误判为未认证。
+        """
+        # 明确的登录表单特征（不是泛关键词）
+        login_form_indicators = [
+            '<form action="/signin"',
+            '<form action="/login"',
+            'name="password"',
+            'id="password"',
+            'placeholder="密码"',
+            'placeholder="Password"',
+        ]
+        for indicator in login_form_indicators:
+            if indicator.lower() in response_text.lower():
+                return False
+        return True
     
     def fetch_location_from_teslamate(self) -> str:
         """
         从 TeslaMate 获取位置信息
         
-        优先使用自定义 API（/login + /states），失败时降级到 HTML 解析。
-        TeslaMate 为主，WiFi 为辅。
+        策略顺序：
+        1. Custom API（/login + /msg）
+        2. 无认证直连（页面可能不需要密码）
+        3. 表单认证 + HTML 解析
+        4. 全部失败 → 返回 "unknown"，WiFi 接管
         
         Returns:
-            位置文本（如"家"、"公司"等）
-            如果解析失败返回 "unknown"
-            
-        Raises:
-            TeslaMateConnectionError: 连接 TeslaMate 失败
+            位置文本或 "unknown"
         """
-        # 策略 1: 使用自定义 API（推荐）- 通过 /msg 端点获取位置
+        # ── 策略 1: Custom API ──
         if self.use_custom_api and self._custom_api:
             try:
                 location = self._custom_api.get_location()
                 if location:
                     logger.info(f"TeslaMate API 位置: '{location}'")
                     return location
-                else:
-                    logger.debug("TeslaMate API 未返回位置信息")
+                logger.debug("TeslaMate API 未返回位置")
             except Exception as e:
-                logger.warning(f"TeslaMate API 失败: {e}，尝试 HTML 解析")
+                logger.info(f"TeslaMate API 不可用: {e}，尝试其他方式")
         
-        # 策略 2: 传统 HTML 解析（降级方案）
+        # ── 策略 2: 无认证直连（很多 TeslaMate 实例不需要密码） ──
         try:
-            # 使用带认证的 session
+            session = requests.Session()
+            response = session.get(
+                self.teslamate_url,
+                timeout=self.DEFAULT_TIMEOUT,
+                headers={"Accept": "text/html"},
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            html_text = response.text
+            
+            # 如果页面不需要登录，直接解析位置
+            if self._is_authenticated(html_text):
+                location = self._parse_location_html(html_text)
+                if location:
+                    logger.info(f"TeslaMate 无认证直连成功: '{location}'")
+                    return location
+            
+            # 需要登录 → 尝试认证
+            logger.info("TeslaMate 需要登录认证，尝试认证...")
+        except requests.RequestException as e:
+            logger.info(f"TeslaMate 直连失败: {e}，尝试认证...")
+        
+        # ── 策略 3: 表单认证 + HTML 解析 ──
+        try:
             session = self._get_session()
+            if session is None:
+                logger.warning("无法创建 TeslaMate 认证 session")
+                return "unknown"
+            
             response = session.get(
                 self.teslamate_url,
                 timeout=self.DEFAULT_TIMEOUT,
@@ -554,78 +594,59 @@ class LocationDetector:
             response.raise_for_status()
             html_text = response.text
             
-            # 检查是否需要登录
-            if not self._is_authenticated(html_text):
-                logger.warning("TeslaMate 需要登录认证")
-                if self.auth_password:
-                    # 尝试重新认证
-                    self._session = None  # 重置 session
-                    session = self._get_session()
-                    response = session.get(
-                        self.teslamate_url,
-                        timeout=self.DEFAULT_TIMEOUT,
-                        headers={"Accept": "text/html"},
-                    )
-                    html_text = response.text
-                    if not self._is_authenticated(html_text):
-                        raise TeslaMateConnectionError("TeslaMate 认证失败，请检查密码")
-                else:
-                    raise TeslaMateConnectionError("TeslaMate 需要认证但未配置密码")
+            if self._is_authenticated(html_text):
+                location = self._parse_location_html(html_text)
+                if location:
+                    logger.info(f"TeslaMate 认证后位置: '{location}'")
+                    return location
+                logger.warning("TeslaMate 认证成功但未找到位置信息")
+                return "unknown"
             
-            # 策略 1: 正则匹配 "停放位置：xxx" 格式（最可靠）
-            # 匹配 "停放位置" 后面跟着中文冒号或英文冒号，然后是位置文本
-            match = re.search(r"停放位置[：:]\s*([^<\n,]+)", html_text, re.U)
-            if match:
-                location = match.group(1).strip()
-                logger.debug(f"TeslaMate 位置解析成功(正则): '{location}'")
-                return location
+            # 如果有密码，再试一次重认证
+            if self.auth_password:
+                self._session = None
+                session = self._get_session()
+                response = session.get(
+                    self.teslamate_url,
+                    timeout=self.DEFAULT_TIMEOUT,
+                    headers={"Accept": "text/html"},
+                )
+                html_text = response.text
+                if self._is_authenticated(html_text):
+                    location = self._parse_location_html(html_text)
+                    if location:
+                        logger.info(f"TeslaMate 重认证后位置: '{location}'")
+                        return location
             
-            # 策略 2: 使用 BeautifulSoup 解析 HTML 结构
+            logger.warning("TeslaMate 认证失败，将使用 WiFi 定位")
+        except requests.RequestException as e:
+            logger.warning(f"TeslaMate 认证请求失败: {e}")
+        except Exception as e:
+            logger.error(f"TeslaMate 认证异常: {e}")
+        
+        return "unknown"
+    
+    def _parse_location_html(self, html_text: str) -> Optional[str]:
+        """从 TeslaMate HTML 页面解析位置文本"""
+        # 正则匹配 "停放位置：xxx"
+        match = re.search(r"停放位置[：:]\s*([^<\n,]+)", html_text, re.U)
+        if match:
+            return match.group(1).strip()
+        
+        # BeautifulSoup 解析
+        try:
             soup = BeautifulSoup(html_text, "html.parser")
-            
-            # 查找包含 "停放位置" 文本的元素
             for elem in soup.find_all(string=re.compile("停放位置")):
                 parent = elem.parent
                 if parent:
-                    # 获取父元素的完整文本
-                    full_text = parent.get_text(strip=True)
-                    # 提取 "停放位置" 后面的内容
-                    if "：" in full_text or ":" in full_text:
-                        parts = re.split(r"[：:]\s*", full_text, 1)
-                        if len(parts) > 1 and parts[1]:
-                            location = parts[1].strip()
-                            logger.debug(f"TeslaMate 位置解析成功(分割): '{location}'")
-                            return location
-                    
-                    # 尝试查找相邻的 value 元素
-                    next_elem = parent.find_next_sibling()
-                    if next_elem:
-                        location = next_elem.get_text(strip=True)
-                        if location:
-                            logger.debug(f"TeslaMate 位置解析成功(相邻): '{location}'")
-                            return location
-            
-            # 策略 3: 查找常见的位置显示元素
-            location_elem = (
-                soup.find("span", class_=re.compile("location|geo")) or
-                soup.find("div", {"data-field": "location"}) or
-                soup.find("td", string=re.compile("家|公司|停车场|乐清"))
-            )
-            
-            if location_elem:
-                location_text = location_elem.get_text(strip=True)
-                logger.debug(f"TeslaMate 位置解析成功(元素): '{location_text}'")
-                return location_text
-            
-            logger.warning("TeslaMate 页面中未找到位置元素")
-            return "unknown"
-            
-        except requests.RequestException as e:
-            logger.error(f"连接 TeslaMate 失败: {e}")
-            raise TeslaMateConnectionError(f"无法连接 TeslaMate: {e}")
-        except Exception as e:
-            logger.error(f"解析 TeslaMate 页面失败: {e}", exc_info=True)
-            return "unknown"
+                    text = parent.get_text(strip=True)
+                    m = re.search(r"停放位置[：:]\s*(.+)", text)
+                    if m:
+                        return m.group(1).strip()[:50]
+        except Exception:
+            pass
+        
+        return None
     
     def get_current_wifi(self) -> str:
         """
@@ -735,8 +756,12 @@ class LocationDetector:
         
         # 优先判断：TeslaMate 位置包含家关键词
         if teslamate_available:
-            # 检查是否包含家的关键词
-            home_keywords = ["家", "乐清", "象阳", "高园村", self.home_location]
+            # 从配置的 home_location 中拆分多关键词（逗号分隔）；保留硬编码作为兜底
+            config_keywords = [kw.strip() for kw in self.home_location.split(",") if kw.strip()]
+            home_keywords = config_keywords + ["家", "乐清", "象阳", "高园村"]
+            # 去重保序
+            seen = set()
+            home_keywords = [kw for kw in home_keywords if not (kw in seen or seen.add(kw))]
             if any(kw in raw_location for kw in home_keywords if kw):
                 is_home = True
                 confidence = 0.9
@@ -866,7 +891,7 @@ def init_location_detector(config: dict) -> "LocationDetector":
     """
     global _location_detector
     _location_detector = LocationDetector(
-        teslamate_url=config.get("teslamate_url", "http://100.111.252.121:7777/"),
+        teslamate_url=config.get("teslamate_url", "http://100.64.0.11:7777/"),
         home_location=config.get("home_location", "家"),
         home_wifi_ssids=config.get("home_wifi_ssids", []),
         hotspot_ssids=config.get("hotspot_ssids", []),

@@ -619,15 +619,17 @@ def api_version_token():
 
 def _schedule_restart():
     """延迟 1 秒后重启服务（后台线程，不阻塞 HTTP 响应）"""
+    import threading, time as _time
     def _do_restart():
-        time.sleep(1)
+        _time.sleep(1)
+        import subprocess
         subprocess.run(["sudo", "systemctl", "restart", "teslausb-web"], timeout=30)
     threading.Thread(target=_do_restart, daemon=True).start()
 
 
 @system_bp.route('/api/version/upgrade', methods=['POST'])
 def api_version_upgrade():
-    """触发一键升级（同步安装，异步重启）"""
+    """触发一键升级（同步执行，前端需等待）"""
     data = request.get_json(silent=True) or {}
     new_version = (data.get('version') or '').strip()
     asset_url = (data.get('asset_url') or '').strip()
@@ -640,68 +642,6 @@ def api_version_upgrade():
     try:
         import upgrade_service
         ok, msg = upgrade_service.do_upgrade(new_version, asset_url, sha256, sig_url or None)
-        if ok:
-            # 异步重启，避免杀死当前 HTTP 响应
-            _schedule_restart()
-            return jsonify({
-                'success': True,
-                'message': msg,
-                'version': new_version,
-                'need_restart': True,
-            })
-        return jsonify({'success': False, 'error': msg}), 500
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@system_bp.route('/api/version/upgrade-upload', methods=['POST'])
-def api_version_upgrade_upload():
-    """手动上传 tar.gz 升级包 + 验签 + 安装"""
-    try:
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'error': '未选择文件'}), 400
-        file = request.files['file']
-        if not file.filename or not file.filename.endswith('.tar.gz'):
-            return jsonify({'success': False, 'error': '仅支持 .tar.gz 文件'}), 400
-
-        import tempfile, os, upgrade_service
-
-        # 保存到临时文件
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.tar.gz')
-        file.save(tmp)
-        tmp.close()
-
-        # SHA-256 校验（从表单取或让用户输入）
-        sha256_expected = (request.form.get('sha256') or '').strip()
-        if sha256_expected:
-            ok, msg = upgrade_service._verify_sha256(tmp.name, sha256_expected)
-            if not ok:
-                os.unlink(tmp.name)
-                return jsonify({'success': False, 'error': f'SHA-256 校验失败: {msg}'}), 400
-
-        # 验签（可选）
-        sig_file = request.files.get('sig')
-        if sig_file and sig_file.filename:
-            sig_tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.sig')
-            sig_file.save(sig_tmp)
-            sig_tmp.close()
-            ok, msg = upgrade_service._verify_ed25519(tmp.name, sig_tmp.name)
-            os.unlink(sig_tmp.name)
-            if not ok:
-                os.unlink(tmp.name)
-                return jsonify({'success': False, 'error': f'签名验证失败: {msg}'}), 400
-
-        # 获取版本号（从文件名猜测或手动输入）
-        new_version = (request.form.get('version') or '').strip()
-        if not new_version:
-            import re
-            m = re.search(r'v?(\d+\.\d+\.\d+)', file.filename)
-            new_version = m.group(1) if m else 'manual'
-
-        # 执行升级
-        ok, msg = upgrade_service.do_upgrade_from_tarball(tmp.name, new_version)
-        os.unlink(tmp.name)
-
         if ok:
             _schedule_restart()
             return jsonify({
@@ -737,7 +677,6 @@ def api_version_rollback():
         import upgrade_service
         ok, msg = upgrade_service.do_rollback()
         if ok:
-            _schedule_restart()
             return jsonify({'success': True, 'message': msg})
         return jsonify({'success': False, 'error': msg}), 500
     except Exception as e:

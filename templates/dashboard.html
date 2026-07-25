@@ -3,6 +3,7 @@
 {% block content %}
 <div class="page-header">
   <h2>仪表盘</h2>
+  <span class="badge" id="versionBadge" title="点击检查更新" style="cursor:pointer" onclick="checkVersion()">v{{ version }}</span>
   <span class="badge" id="lastUpdate">{{ now }}</span>
 </div>
 
@@ -64,14 +65,6 @@
         <span>服务 <span id="svc-uptime-hero">{{ service.uptime }}</span></span>
         <span class="hero-sep">|</span>
         <span>系统 <span id="sys-uptime-hero">{{ sys_stats.system_uptime }}</span></span>
-      </div>
-      <!-- 🆕 版本号整合：当前版本 / 最新版本 -->
-      <div class="hero-detail-row" id="svc-version-row" style="margin-top:4px">
-        <span style="color:var(--text-muted)">当前版本</span>
-        <span id="svc-version-current" style="font-weight:600;color:var(--text)">v{{ version }}</span>
-        <span class="hero-sep">|</span>
-        <span style="color:var(--text-muted)">最新版本</span>
-        <span id="svc-version-latest" style="font-weight:600" title="点击检查更新">v{{ version }}</span>
       </div>
       <div id="preview-hero" style="margin-top:4px;font-size:0.78rem">
         {% if preview_status.state == 'generating' %}
@@ -404,36 +397,6 @@ function updateDashboard(d) {
     th.style.color = h.damaged > 0 ? 'var(--danger)' : 'var(--text-muted)';
   }
 
-  // 🆕 版本号整合：服务卡片实时显示当前/最新版本
-  if (d.version_info) {
-    const v = d.version_info;
-    const vc = document.getElementById('svc-version-current');
-    const vl = document.getElementById('svc-version-latest');
-    if (vc && v.current) vc.textContent = 'v' + v.current;
-    if (vl) {
-      if (v.error) {
-        vl.textContent = '—';
-        vl.style.color = 'var(--text-muted)';
-        vl.title = v.error + '（点击重试）';
-        vl.onclick = checkVersion;
-        vl.style.cursor = 'pointer';
-      } else if (v.has_update && v.latest) {
-        vl.textContent = 'v' + v.latest;
-        vl.style.color = '#e74c3c';
-        vl.style.fontWeight = '700';
-        vl.title = '有新版本！点击前往系统页升级';
-        vl.onclick = () => location.href = '/system';
-        vl.style.cursor = 'pointer';
-      } else if (v.latest) {
-        vl.textContent = 'v' + v.latest;
-        vl.style.color = 'var(--success)';
-        vl.title = '已是最新（点击检查）';
-        vl.onclick = checkVersion;
-        vl.style.cursor = 'pointer';
-      }
-    }
-  }
-
   // ── Hero 哨兵 ──
   const sc = document.getElementById('sentry-count'), sd = document.getElementById('sentry-detail');
   if (sc && d.sentry_events !== undefined) {
@@ -749,10 +712,36 @@ startStatsStream();
 // ── 版本检查 ──
 let _versionChecked = false;
 function checkVersion() {
-  // 版本号已整合到 TeslaUSB 服务卡片（svc-version-current / svc-version-latest）
-  // 顶部 versionBadge 已移除，无需独立检查
-  // 此函数保留以兼容 service 卡片内点击事件
+  const badge = document.getElementById('versionBadge');
+  if (!badge) return;
+  badge.textContent = 'v{{ version }} ···';
+  fetch('/api/version/check')
+    .then(r => r.json())
+    .then(data => {
+      _versionChecked = true;
+      if (!data.success || data.error) {
+        badge.textContent = 'v' + (data.current || '{{ version }}');
+        badge.title = data.error || '检查失败';
+        badge.style.background = 'var(--text-muted)';
+        return;
+      }
+      badge.textContent = 'v' + data.current;
+      if (data.has_update) {
+        badge.style.background = '#e74c3c';
+        badge.title = '有新版本: v' + data.latest + ' — 点击前往系统页查看';
+        badge.onclick = () => location.href = '/system';
+      } else {
+        badge.style.background = '#27ae60';
+        badge.title = '已是最新版本';
+      }
+    })
+    .catch(() => {
+      badge.textContent = 'v{{ version }}';
+      badge.title = '网络不可达';
+      badge.style.background = 'var(--text-muted)';
+    });
 }
-// 页面加载 2 秒后静默检查已禁用（版本在 SSE 中 5 分钟更新一次）
+// 页面加载 2 秒后静默检查
+setTimeout(checkVersion, 2000);
 </script>
 {% endblock %}
