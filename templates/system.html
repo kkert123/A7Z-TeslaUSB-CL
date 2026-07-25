@@ -2,6 +2,151 @@
 
 {% block title %} — 系统控制{% endblock %}
 {% block content %}
+<style>
+/* ═══ 折叠面板样式 ═══ */
+    Group 1: System info
+     ═══════════════════════════════════════════ -->
+<div class="sys-group open" id="grp-system">
+  <div class="sys-group-header" onclick="toggleGroup('grp-system')">
+    <span>System info <span class="sg-summary" id="sys-summary-line">Loading...</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <div class="sys-info-grid" id="sys-info-grid">
+      <div class="sys-info-row"><span class="k">OS</span><span class="v" id="sys-distro">—</span></div>
+      <div class="sys-info-row"><span class="k">Kernel</span><span class="v" id="sys-kernel">—</span></div>
+      <div class="sys-info-row"><span class="k">Arch</span><span class="v" id="sys-arch">—</span></div>
+      <div class="sys-info-row"><span class="k">CPU</span><span class="v" id="sys-cpu-model">—</span></div>
+      <div class="sys-info-row"><span class="k">Uptime</span><span class="v" id="sys-uptime">{% if system_uptime %}{{ system_uptime }}{% else %}—{% endif %}</span></div>
+      <div class="sys-info-row"><span class="k">Python</span><span class="v" id="sys-python">—</span></div>
+      <div class="sys-info-row"><span class="k">Version</span><span class="v" id="sys-version-display" style="color:var(--success)">v{{ version }}</span></div>
+      <div class="sys-info-row"><span class="k">Service</span><span class="v" id="sys-service-status" style="color:var(--success)">{% if service.active %}Running{% else %}Stopped{% endif %}</span></div>
+    </div>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn btn-sm" onclick="serviceAction('restart')">Restart service</button>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('stop')">Stop</button>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('start')">Start</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     Group 2: Version & upgrade
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-version">
+  <div class="sys-group-header" onclick="toggleGroup('grp-version')">
+    <span>Version & upgrade <span class="sg-summary" id="ver-summary">v{{ version }}</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <!-- 当前/最新版本 -->
+    <div class="version-card">
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Current</div>
+        <div class="vc-badge" id="ver-current-display">v{{ version }}</div>
+      </div>
+      <div style="font-size:0.7rem;color:var(--text-muted)">→</div>
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Latest</div>
+        <div class="vc-latest" id="ver-latest">Checking...</div>
+      </div>
+      <div class="vc-status" id="ver-status">—</div>
+    </div>
+
+    <!-- 检查 + 升级按钮 -->
+    <div class="btn-row" style="margin-bottom:8px">
+      <button class="btn btn-sm btn-primary" onclick="checkVersionNow()">Check update</button>
+      <span id="ver-changelog" style="font-size:0.72rem;color:var(--text-muted)"></span>
+    </div>
+    <div id="upgrade-controls" style="display:none;padding:10px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px">
+      <div class="btn-row">
+        <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()">Upgrade to <span id="upgrade-target"></span></button>
+        <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">Rollback to <span id="rollback-target"></span></button>
+      </div>
+      <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
+      <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
+    </div>
+
+    <!-- 手动上传升级包 -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">Manual upload</div>
+      <div class="upload-zone" id="upload-zone" onclick="document.getElementById('upgrade-file').click()">
+        <input type="file" id="upgrade-file" accept=".tar.gz" onchange="onFileSelected()">
+        <div id="upload-prompt">Click or drag .tar.gz here</div>
+        <div id="upload-file-name" style="display:none;font-weight:500;margin-top:4px"></div>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <input type="text" id="upload-sha256" placeholder="SHA256 (optional)" style="flex:1;padding:4px 8px;font-size:0.78rem;font-family:monospace;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
+        <button class="btn btn-primary btn-sm" id="btn-manual-upgrade" onclick="startManualUpgrade()" disabled>Install</button>
+      </div>
+    </div>
+
+    <!-- 内测密钥 -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <label style="font-size:0.75rem;font-weight:500">Beta key</label>
+      <span style="font-size:0.68rem;color:var(--text-muted)">（仅内测版本需要，公开版本留空即可）</span>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <input type="password" id="gh-token" placeholder="key..." style="flex:1;font-family:monospace;font-size:0.75rem" autocomplete="off">
+        <button class="btn btn-sm" onclick="saveGithubToken()">Save</button>
+        <button class="btn btn-sm btn-outline" onclick="clearGithubToken()">Clear</button>
+      </div>
+      <span id="gh-token-status" style="font-size:0.68rem;color:var(--text-muted)"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+ 
+
+.sys-group { margin-bottom: 6px; border-radius: var(--r-md); overflow: hidden; border: 0.5px solid var(--border); }
+.sys-group-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; cursor: pointer; user-select: none;
+  background: var(--bg-card); font-size: 0.85rem; font-weight: 600;
+  transition: background 0.15s;
+}
+.sys-group-header:hover { background: var(--bg-hover); }
+.sys-group-header .sg-summary { font-size: 0.7rem; color: var(--text-muted); font-weight: 400; margin-left: 10px; }
+.sys-group-header .sg-chevron { font-size: 0.7rem; color: var(--text-muted); transition: transform 0.2s; }
+.sys-group.open .sys-group-header .sg-chevron { transform: rotate(90deg); }
+.sys-group-body { display: none; padding: 14px 16px; background: var(--bg-page); }
+.sys-group.open .sys-group-body { display: block; }
+
+/* 系统信息表格 */
+.sys-info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 16px; }
+.sys-info-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.8rem; border-bottom: 0.5px solid var(--border); }
+.sys-info-row .k { color: var(--text-muted); }
+.sys-info-row .v { font-weight: 500; }
+
+/* 版本卡 */
+.version-card { display: flex; align-items: center; gap: 16px; padding: 10px 14px; background: var(--bg-card); border-radius: var(--r-md); margin-bottom: 10px; }
+.version-card .vc-badge { font-size: 1.1rem; font-weight: 700; }
+.version-card .vc-status { font-size: 0.75rem; }
+.version-card .vc-latest { font-size: 0.85rem; color: var(--text-muted); }
+
+/* 服务列表 */
+.service-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 0.5px solid var(--border); font-size: 0.8rem; }
+.service-row:last-child { border-bottom: none; }
+.service-row .sr-name { font-weight: 500; }
+.service-row .sr-timer { font-size: 0.68rem; color: var(--text-muted); }
+
+/* 按钮组 */
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* 上传区 */
+.upload-zone { border: 1.5px dashed var(--border); border-radius: var(--r-md); padding: 16px; text-align: center; margin-top: 10px; }
+.upload-zone input[type="file"] { display: none; }
+.upload-zone.drag-over { border-color: var(--accent); background: rgba(59,130,246,0.05); }
+
+/* 调温控曲线行 */
+.fan-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.fan-row input[type="number"] { width: 55px; padding: 2px 6px; font-size: 0.75rem; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); }
+
+@media (max-width: 600px) {
+  .sys-info-grid { grid-template-columns: 1fr; }
+  .version-card { flex-direction: column; align-items: flex-start; }
+}
+</style>
 <div class="page-header"><h2>⚙️ 系统控制</h2></div>
 
 <!-- 🆕 系统信息卡片 -->
