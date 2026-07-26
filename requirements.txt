@@ -1,0 +1,9 @@
+# A7Z TeslaUSB 哨兵云端备份系统 - Python 依赖
+# 由源码 import 推断生成，部署前请按需锁定版本。
+flask
+requests
+paramiko
+Pillow
+beautifulsoup4
+psutil
+protobuf

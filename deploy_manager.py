@@ -166,6 +166,11 @@ class Config:
         "gadget_health.py",
         # requirements (2026-07-26 v0.3.0 — 升级包必须包含，否则新 venv 无依赖)
         "requirements.txt",
+        # boombox + lightshow + wrap + license_plate (2026-07-26 — app_helpers.py 依赖)
+        "boombox_service.py",
+        "lightshow_service.py",
+        "wrap_service.py",
+        "license_plate_service.py",
     ]
 
     # 部署后需要重启的服务
