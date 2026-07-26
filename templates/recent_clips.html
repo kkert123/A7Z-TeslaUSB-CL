@@ -157,7 +157,7 @@ function downloadGif() {
 // 页面加载后自动生成默认 GIF
 document.addEventListener('DOMContentLoaded', function() {
   // 延迟 500ms 避免与页面渲染竞争
-  setTimeout(refreshGif, 500);
+  setTimeout(refreshGif, 1500);
 });
 
 
@@ -228,7 +228,8 @@ function refreshGallery() {
 }
 
 function startGalleryRefresh() {
-  refreshGallery();  // 立即拉一次
+  // 延迟 500ms 再加载，避免阻塞页面渲染
+  setTimeout(function() { refreshGallery(); }, 500);
   galleryRefreshTimer = setInterval(refreshGallery, 30000);
 }
 

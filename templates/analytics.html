@@ -25,13 +25,6 @@
     </div>
   </div>
   <div class="info-card">
-    <div class="info-card-icon">💾</div>
-    <div class="info-card-body">
-      <div class="info-card-label">磁盘健康</div>
-      <div class="info-card-value" id="stat-disk">—</div>
-    </div>
-  </div>
-  <div class="info-card">
     <div class="info-card-icon">🖥️</div>
     <div class="info-card-body">
       <div class="info-card-label">系统健康</div>
@@ -85,109 +78,129 @@
   </div>
 </div>
 
-<!-- 磁盘使用 -->
-<div class="card" style="margin-bottom:var(--s4)">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">💾 磁盘使用</h3>
-  <div id="disk-list"></div>
-</div>
-
-<!-- 系统健康 -->
-<div class="card" style="margin-bottom:var(--s4)">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">🖥️ 系统状态</h3>
-  <div id="health-details" style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
-</div>
-
 <!-- 服务状态 -->
 <div class="card" style="margin-bottom:var(--s4)">
   <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">⚙️ 服务状态</h3>
   <div id="services-list"></div>
 </div>
 
-<!-- ═══════════════════════════════════════════ -->
-<!-- 清理管理（增强版）                          -->
-<!-- ═══════════════════════════════════════════ -->
-<div class="card" style="margin-bottom:var(--s4)">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s3)">
-    <h3 style="font-size:var(--text-base);font-weight:600">🧹 清理管理</h3>
-    <div style="display:flex;gap:8px">
-      <button class="btn btn-sm" onclick="loadCleanupPolicies()">🔄 刷新</button>
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- 清理管理（增强版）                          -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s3)">
+      <h3 style="font-size:var(--text-base);font-weight:600">🧹 清理管理</h3>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm" id="btn-save-policy" onclick="saveCleanupPolicy()" style="background:var(--success);color:#fff;border-color:var(--success)">💾 保存策略</button>
+        <button class="btn btn-sm" onclick="loadCleanupPolicies()">🔄 刷新</button>
+      </div>
+      <span id="policy-save-msg" style="display:none;font-size:var(--text-xs);padding:4px 8px;border-radius:4px"></span>
     </div>
-  </div>
 
-  <!-- 分区磁盘状态（带阈值指示） -->
-  <div style="margin-bottom:var(--s4)">
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📊 分区状态</div>
-    <div id="cleanup-partitions">
-      <div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
+    <!-- ═══════ 全局阈值设置 ═══════ -->
+    <div style="margin-bottom:var(--s3)">
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">⚙️ 全局阈值</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--s2)" id="global-settings-grid">
+        <label style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+          <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘警告阈值 (%)</div>
+          <input type="number" id="inp-warn" min="1" max="100" class="policy-input" onchange="onPolicyChanged()">
+        </label>
+        <label style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+          <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘严重阈值 (%)</div>
+          <input type="number" id="inp-crit" min="1" max="100" class="policy-input" onchange="onPolicyChanged()">
+        </label>
+        <label style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+          <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘紧急阈值 (%)</div>
+          <input type="number" id="inp-emerg" min="1" max="100" class="policy-input" onchange="onPolicyChanged()">
+        </label>
+        <label style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+          <div style="font-size:var(--text-xs);color:var(--text-muted)">预览图保留 (天)</div>
+          <input type="number" id="inp-preview-days" min="1" max="365" class="policy-input" onchange="onPolicyChanged()">
+        </label>
+        <label style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+          <div style="font-size:var(--text-xs);color:var(--text-muted)">临时文件保留 (天)</div>
+          <input type="number" id="inp-temp-days" min="1" max="30" class="policy-input" onchange="onPolicyChanged()">
+        </label>
+        <label style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
+          <div style="font-size:var(--text-xs);color:var(--text-muted)">日志保留 (天)</div>
+          <input type="number" id="inp-log-days" min="1" max="120" class="policy-input" onchange="onPolicyChanged()">
+        </label>
+      </div>
     </div>
-  </div>
 
-  <!-- 清理策略展示 -->
-  <div style="margin-bottom:var(--s4)">
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📋 清理策略</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--s2)" id="cleanup-policy-grid">
-      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
-        <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘警告阈值</div>
-        <div style="font-size:var(--text-lg);font-weight:700;color:var(--warning)" id="policy-warn">85%</div>
+    <!-- ═══════ 每个文件夹的策略 ═══════ -->
+    <div style="margin-bottom:var(--s3)">
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📁 文件夹策略</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;font-size:var(--text-xs);border-collapse:collapse" id="policy-table">
+          <thead>
+            <tr style="text-align:left;color:var(--text-muted);border-bottom:1px solid var(--border)">
+              <th style="padding:6px 4px;width:18%">文件夹</th>
+              <th style="padding:6px 4px;width:10%;text-align:center">启用</th>
+              <th style="padding:6px 4px;width:17%">保留天数</th>
+              <th style="padding:6px 4px;width:17%">最大 GB</th>
+              <th style="padding:6px 4px;width:17%">最多文件数</th>
+              <th style="padding:6px 4px;width:21%;text-align:center">保护未同步</th>
+            </tr>
+          </thead>
+          <tbody id="policy-table-body">
+            <tr><td colspan="6" style="padding:12px;color:var(--text-muted);text-align:center">加载中...</td></tr>
+          </tbody>
+        </table>
       </div>
-      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
-        <div style="font-size:var(--text-xs);color:var(--text-muted)">磁盘严重阈值</div>
-        <div style="font-size:var(--text-lg);font-weight:700;color:var(--danger)" id="policy-crit">90%</div>
-      </div>
-      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
-        <div style="font-size:var(--text-xs);color:var(--text-muted)">预览图保留天数</div>
-        <div style="font-size:var(--text-lg);font-weight:700" id="policy-preview-days">7天</div>
-      </div>
-      <div style="background:var(--bg-secondary);border-radius:8px;padding:var(--s3)">
-        <div style="font-size:var(--text-xs);color:var(--text-muted)">日志保留天数</div>
-        <div style="font-size:var(--text-lg);font-weight:700" id="policy-log-days">30天</div>
+    </div>
+
+    <!-- 分区磁盘状态 -->
+    <div style="margin-bottom:var(--s4)">
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📊 分区状态</div>
+      <div id="cleanup-partitions">
+        <div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
       </div>
     </div>
 
     <!-- 清理顺序 -->
-    <div style="margin-top:var(--s2);font-size:var(--text-xs);color:var(--text-muted)">
+    <div style="margin-bottom:var(--s4);font-size:var(--text-xs);color:var(--text-muted)">
       <strong>清理顺序：</strong>
       <ol style="margin:4px 0 0 16px;padding:0" id="cleanup-order-list">
         <li>已上传成功的哨兵视频（最旧优先）</li>
-        <li>过期预览图（&gt;7天）</li>
-        <li>过期临时文件（&gt;1天）</li>
-        <li>旧日志文件（&gt;30天）</li>
+        <li>过期预览图</li>
+        <li>过期临时文件</li>
+        <li>旧日志文件</li>
         <li>未上传的旧哨兵视频（仅严重/紧急模式）</li>
       </ol>
     </div>
-  </div>
 
-  <!-- 手动操作区 -->
-  <div style="margin-bottom:var(--s4)">
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">🔧 手动操作</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-sm" id="btn-preview" onclick="runCleanupPreview()">
-        🔍 预览清理（dry-run）
-      </button>
-      <button class="btn btn-sm btn-danger" id="btn-execute" onclick="runCleanupExecute()">
-        ⚡ 立即执行清理
-      </button>
-    </div>
-    <!-- 操作输出区 -->
-    <div id="cleanup-output" style="display:none;margin-top:var(--s3)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-        <span style="font-size:var(--text-xs);font-weight:600;color:var(--text-secondary)" id="cleanup-output-title">输出</span>
-        <button style="background:none;border:none;cursor:pointer;font-size:var(--text-xs);color:var(--text-muted)" onclick="document.getElementById('cleanup-output').style.display='none'">✕ 关闭</button>
+    <!-- 手动操作区 -->
+    <div style="margin-bottom:var(--s4)">
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">🔧 手动操作</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" id="btn-preview" onclick="runCleanupPreview()">
+          🔍 预览清理（dry-run）
+        </button>
+        <button class="btn btn-sm btn-danger" id="btn-execute" onclick="runCleanupExecute()">
+          ⚡ 立即执行清理
+        </button>
       </div>
-      <pre id="cleanup-output-text" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:var(--s3);font-size:11px;overflow-x:auto;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary)"></pre>
+      <!-- 操作输出区 -->
+      <div id="cleanup-output" style="display:none;margin-top:var(--s3)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-size:var(--text-xs);font-weight:600;color:var(--text-secondary)" id="cleanup-output-title">输出</span>
+          <button style="background:none;border:none;cursor:pointer;font-size:var(--text-xs);color:var(--text-muted)" onclick="document.getElementById('cleanup-output').style.display='none'">✕ 关闭</button>
+        </div>
+        <pre id="cleanup-output-text" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:var(--s3);font-size:11px;overflow-x:auto;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:var(--text-primary)"></pre>
+      </div>
+    </div>
+
+    <!-- 清理历史记录 -->
+    <div>
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📜 清理历史</div>
+      <div id="cleanup-history-list" style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:0 var(--s3)">
+        <div style="font-size:var(--text-sm);color:var(--text-muted);padding:var(--s2) 0">加载中...</div>
+      </div>
     </div>
   </div>
 
-  <!-- 清理历史记录 -->
-  <div>
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2);color:var(--text-secondary)">📜 清理历史</div>
-    <div id="cleanup-history-list">
-      <div style="font-size:var(--text-sm);color:var(--text-muted)">加载中...</div>
-    </div>
-  </div>
-</div>
-
-<script>
+  <script>
 function fmtBytes(b){
   if(!b||b===0)return '0 B';
   const u=['B','KB','MB','GB','TB'];
@@ -257,7 +270,7 @@ async function loadPushHealth(){
         <div style="display:flex;gap:16px;margin-top:4px;font-size:var(--text-xs)">
           <span style="color:var(--success)">✅ 成功 ${success}</span>
           <span style="color:var(--danger)">❌ 失败 ${fail}</span>
-          <span style="color:var(--text-muted)">最近成功: ${bot.last_success_time?(bot.last_success_time?new Date(bot.last_success_time*1000).toLocaleString('zh-CN',{hour12:false}):'—')('zh-CN',{hour12:false}):'—'}</span>
+          <span style="color:var(--text-muted)">最近成功: ${bot.last_success_time ? new Date(bot.last_success_time*1000).toLocaleString('zh-CN',{hour12:false}) : '—'}</span>
         </div>
         ${recentFails.length?`<div style="margin-top:4px;font-size:var(--text-xs);color:var(--danger)">
           最近失败: ${recentFails.slice(-2).map(f=>`<span style="margin-right:8px">${new Date(f.time*1000).toLocaleTimeString('zh-CN',{hour12:false})} ${f.error||''}</span>`).join('')}
@@ -311,7 +324,7 @@ async function loadSummary(){
     }
     if(h.issues&&h.issues.length) healthHtml+=`<div style="color:var(--danger);margin-top:8px">⚠️ ${h.issues.join('<br>⚠️ ')}</div>`;
     if(!healthHtml) healthHtml='<span style="color:var(--text-muted)">系统运行正常，无异常指标</span>';
-    document.getElementById('health-details').innerHTML=healthHtml;
+    // Note: 系统状态已迁移至 /system 页面的"健康与通知"模块
 
     document.getElementById('lastUpdate').textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false});
   }catch(e){
@@ -319,59 +332,6 @@ async function loadSummary(){
     document.getElementById('stat-events').textContent='—';
     document.getElementById('stat-rate').textContent='—';
     document.getElementById('stat-health').textContent='—';
-    document.getElementById('health-details').innerHTML=`
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s2) 0">
-        <span style="font-size:var(--text-sm);color:var(--danger)">⚠️ 统计数据加载失败</span>
-        <button class="btn btn-sm" onclick="loadSummary()">🔄 重试</button>
-      </div>`;
-  }
-}
-
-// ── 磁盘使用 ──────────────────────────────────────────────────
-
-async function loadDisk(){
-  try{
-    const r=await fetch('/api/analytics/disk');
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const d=await r.json();
-    if(!d.success){throw new Error(d.error||'API 返回失败');}
-    const disks=d.disks||{};
-    const entries=Object.entries(disks);
-    if(!entries.length){
-      renderEmpty('disk-list','磁盘数据不可用','分区可能未挂载，请检查 /mnt/teslacam 等挂载点');
-      document.getElementById('stat-disk').textContent='—';
-      return;
-    }
-    const mountedDisks = Object.values(disks).filter(dk=>dk.mounted);
-    const allHealthy = mountedDisks.length > 0 && mountedDisks.every(dk=>dk.percent<90);
-    document.getElementById('stat-disk').textContent=allHealthy?'✅ 正常':'⚠️ 紧张';
-
-    document.getElementById('disk-list').innerHTML=entries.map(([name,dk])=>{
-      if(!dk.mounted){
-        const hasCache = dk.total > 0;
-        return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <strong>${name}</strong>
-          <span style="font-size:var(--text-xs);color:${hasCache?'var(--warning)':'var(--text-muted)'}">${hasCache?fmtBytes(dk.total)+' · 缓存':'未挂载'}</span>
-        </div>
-        <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">挂载点: ${dk.mount||'未知'}</div>
-      </div>`;
-      }
-      const pct=dk.percent||0;
-      const cls=pct>90?'danger':pct>80?'warn':'';
-      return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <strong>${name}</strong>
-          <span style="font-size:var(--text-xs);color:var(--text-muted)">${fmtBytes(dk.used)} / ${fmtBytes(dk.total)}</span>
-        </div>
-        <div class="progress-bar" style="margin-top:4px"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>
-        <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px">${pct}% 使用 · ${fmtBytes(dk.free)} 可用</div>
-      </div>`;
-    }).join('');
-  }catch(e){
-    console.error('loadDisk error:',e);
-    renderError('disk-list', loadDisk, '磁盘数据加载失败');
-    document.getElementById('stat-disk').textContent='—';
   }
 }
 
@@ -415,27 +375,41 @@ async function loadCleanupPolicies(){
     if(!d.success) throw new Error(d.error||'API 返回失败');
     const p=d.policies||{};
 
-    // 更新策略数值
-    const thr=p.disk_thresholds||{};
-    document.getElementById('policy-warn').textContent=(thr.warning||85)+'%';
-    document.getElementById('policy-crit').textContent=(thr.critical||90)+'%';
-    const ret=p.retention||{};
-    document.getElementById('policy-preview-days').textContent=(ret.previews_days||7)+'天';
-    document.getElementById('policy-log-days').textContent=(ret.logs_days||30)+'天';
+    // ── 全局阈值 → 填入输入框 ──
+    const thr=d.disk_thresholds||{};
+    document.getElementById('inp-warn').value=thr.warning||85;
+    document.getElementById('inp-crit').value=thr.critical||90;
+    document.getElementById('inp-emerg').value=thr.emergency||95;
+    const ret=d.retention||{};
+    document.getElementById('inp-preview-days').value=ret.previews_days||7;
+    document.getElementById('inp-temp-days').value=ret.temp_days||1;
+    document.getElementById('inp-log-days').value=ret.logs_days||30;
+    // 隐藏保存提示
+    document.getElementById('policy-save-msg').style.display='none';
 
-    // 渲染清理顺序
-    const order=p.cleanup_order||[];
-    if(order.length){
-      document.getElementById('cleanup-order-list').innerHTML=order.map(o=>`<li>${o}</li>`).join('');
-    }
+    // ── 每个文件夹的策略表 ──
+    const folderOrder=['SentryClips','SavedClips','RecentClips'];
+    const knownPolicies=p||{};
+    document.getElementById('policy-table-body').innerHTML=folderOrder.map(name=>{
+      const fp=knownPolicies[name]||{};
+      const enabled=fp.enabled!==undefined?fp.enabled:false;
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px 4px;font-weight:600">${name}</td>
+        <td style="padding:8px 4px;text-align:center"><input type="checkbox" id="pol-${name}-enabled" data-folder="${name}" data-field="enabled" ${enabled?'checked':''} onchange="onPolicyChanged()"></td>
+        <td style="padding:8px 4px"><input type="number" id="pol-${name}-age" data-folder="${name}" data-field="age_days" min="1" max="3650" value="${fp.age_days||90}" class="policy-input" onchange="onPolicyChanged()"></td>
+        <td style="padding:8px 4px"><input type="number" id="pol-${name}-gb" data-folder="${name}" data-field="max_gb" min="0.1" max="1000" step="0.5" value="${fp.max_gb||100}" class="policy-input" onchange="onPolicyChanged()"></td>
+        <td style="padding:8px 4px"><input type="number" id="pol-${name}-cnt" data-folder="${name}" data-field="max_count" min="10" max="10000" step="100" value="${fp.max_count||1000}" class="policy-input" onchange="onPolicyChanged()"></td>
+        <td style="padding:8px 4px;text-align:center"><input type="checkbox" id="pol-${name}-protect" data-folder="${name}" data-field="protect_unsynced" ${fp.protect_unsynced!==undefined?fp.protect_unsynced?'checked':'':'checked'} onchange="onPolicyChanged()"></td>
+      </tr>`;
+    }).join('');
 
-    // 渲染分区状态
-    const parts=p.partitions||{};
+    // 渲染分区状态（partitions 在 API 顶层 d.partitions，不是 d.policies.partitions）
+    const parts=d.partitions||{};
     const partEntries=Object.entries(parts);
     if(!partEntries.length){
       document.getElementById('cleanup-partitions').innerHTML='<div style="font-size:var(--text-sm);color:var(--text-muted);padding:var(--s2) 0">无分区数据 — 磁盘可能未挂载</div>';
-      return;
-    }
+      // 注意：不要提前 return！清理历史需要在任何情况下都加载
+    } else {
     document.getElementById('cleanup-partitions').innerHTML=partEntries.map(([name,pt])=>{
       if(pt.status==='未挂载'){
         const cachedInfo = pt.total_fmt ? `${pt.total_fmt} · 缓存` : (pt.total_gb ? `${pt.total_gb}GB · 缓存` : '未挂载');
@@ -463,7 +437,7 @@ async function loadCleanupPolicies(){
         </div>
       </div>`;
     }).join('');
-
+    }  // end else (分区数据存在时渲染)
     // 同时刷新清理历史
     loadCleanupHistory();
   }catch(e){
@@ -473,6 +447,72 @@ async function loadCleanupPolicies(){
         <span style="font-size:var(--text-sm);color:var(--danger)">⚠️ 清理策略加载失败</span>
         <button class="btn btn-sm" onclick="loadCleanupPolicies()">🔄 重试</button>
       </div>`;
+  }
+}
+
+let _policyChanged=false;
+
+function onPolicyChanged(){
+  _policyChanged=true;
+  document.getElementById('btn-save-policy').style.outline='2px solid var(--warning)';
+}
+
+async function saveCleanupPolicy(){
+  const btn=document.getElementById('btn-save-policy');
+  const msg=document.getElementById('policy-save-msg');
+  btn.disabled=true; btn.textContent='⏳ 保存中...';
+
+  try{
+    // 收集全局阈值
+    const global_settings={
+      disk_threshold_warning: parseInt(document.getElementById('inp-warn').value)||85,
+      disk_threshold_critical: parseInt(document.getElementById('inp-crit').value)||90,
+      disk_threshold_emergency: parseInt(document.getElementById('inp-emerg').value)||95,
+      preview_max_age_days: parseInt(document.getElementById('inp-preview-days').value)||7,
+      temp_max_age_days: parseInt(document.getElementById('inp-temp-days').value)||1,
+      log_max_age_days: parseInt(document.getElementById('inp-log-days').value)||30,
+    };
+
+    // 收集每个文件夹的策略
+    const policies={};
+    ['SentryClips','SavedClips','RecentClips'].forEach(name=>{
+      policies[name]={
+        enabled: document.getElementById('pol-'+name+'-enabled').checked,
+        age_days: parseInt(document.getElementById('pol-'+name+'-age').value)||90,
+        max_gb: parseFloat(document.getElementById('pol-'+name+'-gb').value)||100,
+        max_count: parseInt(document.getElementById('pol-'+name+'-cnt').value)||1000,
+        protect_unsynced: document.getElementById('pol-'+name+'-protect').checked,
+      };
+    });
+
+    const r=await fetch('/api/cleanup/policy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({policies, global_settings}),
+    });
+    const d=await r.json();
+
+    if(d.success){
+      msg.style.display='inline-block';
+      msg.style.background='var(--success-soft)';
+      msg.style.color='var(--success)';
+      msg.textContent='✅ 策略已保存';
+      _policyChanged=false;
+      btn.style.outline='none';
+    }else{
+      msg.style.display='inline-block';
+      msg.style.background='var(--danger-soft)';
+      msg.style.color='var(--danger)';
+      msg.textContent='❌ '+(d.error||'保存失败');
+    }
+  }catch(e){
+    msg.style.display='inline-block';
+    msg.style.background='var(--danger-soft)';
+    msg.style.color='var(--danger)';
+    msg.textContent='❌ 网络错误: '+e.message;
+  }finally{
+    btn.disabled=false; btn.textContent='💾 保存策略';
+    if(msg.style.display!=='none') setTimeout(()=>{msg.style.display='none';},4000);
   }
 }
 
@@ -489,10 +529,19 @@ async function loadCleanupHistory(){
       return;
     }
     el.innerHTML=hist.map(c=>{
-      const ts=c.timestamp?new Date(c.timestamp).toLocaleString('zh-CN',{hour12:false}):'—';
+      // 修复：截断微秒，避免 new Date() 解析失败
+      let ts='—';
+      if(c.timestamp){
+        try{
+          const t = c.timestamp.includes('.') ? c.timestamp.substring(0, c.timestamp.lastIndexOf('.')) : c.timestamp;
+          ts = new Date(t).toLocaleString('zh-CN',{hour12:false});
+        }catch(ex){ ts='—'; }
+      }
       const freed=c.freed_bytes?fmtBytes(c.freed_bytes):'0 B';
-      const deleted=c.deleted_files||0;
-      const mode=c.mode||'';
+      // 兼容 deleted_files（新格式）和 deleted_count（旧格式）
+      const deleted=c.deleted_files||c.deleted_count||0;
+      // mode 字段可能缺失，根据 force_all 推断
+      const mode=c.mode||(c.force_all?'emergency':'normal');
       const modeColor=mode==='emergency'?'var(--danger)':mode==='critical'?'var(--warning)':mode==='warning'?'var(--warning)':'var(--success)';
       const modeLabel=mode==='emergency'?'🔴 紧急':mode==='critical'?'🟠 严重':mode==='warning'?'🟡 警告':'🟢 常规';
       const actions=c.actions||[];
@@ -589,17 +638,24 @@ async function runCleanupExecute(){
 // 初始加载
 loadPushHealth();
 loadSummary();
-loadDisk();
 loadServices();
 loadCleanupPolicies();
 
-// 每 30 秒刷新
-setInterval(()=>{loadPushHealth();loadSummary();loadDisk();loadServices();loadCleanupPolicies();},30000);
+// 每 30 秒全局刷新
+setInterval(()=>{loadPushHealth();loadSummary();loadServices();loadCleanupPolicies();},30000);
+// 事件统计每 15 秒单独刷新一次（更及时反映上传状态）
+setInterval(()=>{loadSummary();},15000);
 </script>
 
 <style>
 /* btn-danger 样式补充 */
 .btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
 .btn-danger:hover{opacity:0.85}
+/* 策略输入框样式 */
+.policy-input{width:5em;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);font-size:var(--text-xs);text-align:center}
+.policy-input:focus{border-color:var(--primary);outline:none;box-shadow:0 0 0 2px rgba(99,102,241,0.15)}
+#policy-table td input[type=number]{width:4.5em}
+#policy-table td input[type=checkbox]{width:1em;height:1em;cursor:pointer}
+#policy-table tbody tr:hover{background:var(--bg-secondary)}
 </style>
 {% endblock %}

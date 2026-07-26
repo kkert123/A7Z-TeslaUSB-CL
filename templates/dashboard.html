@@ -614,7 +614,7 @@ function updateDashboard(d) {
     var cc = document.getElementById('camera-count');
     if (d.camera_latest.available && d.camera_latest.latest) {
       if (ct) ct.textContent = d.camera_latest.latest.timestamp || '—';
-      if (ci) { ci.src = d.camera_latest.latest.url; ci.style.display = 'block'; }
+      if (ci) { ci.src = d.camera_latest.latest.url + '?t=' + Date.now(); ci.style.display = 'block'; }
       if (ce) ce.style.display = 'none';
     } else {
       if (ct) ct.textContent = '暂无数据';

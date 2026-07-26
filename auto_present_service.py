@@ -63,9 +63,10 @@ def _save_config(config: dict) -> bool:
 def get_config() -> dict:
     """获取当前配置（含缓存）"""
     global _config_cache
-    if _config_cache is None:
-        _config_cache = _load_config()
-    return dict(_config_cache)
+    with _timer_lock:
+        if _config_cache is None:
+            _config_cache = _load_config()
+        return dict(_config_cache)
 
 
 def update_config(enabled: bool = None, timeout_minutes: int = None) -> dict:
@@ -88,7 +89,8 @@ def update_config(enabled: bool = None, timeout_minutes: int = None) -> dict:
 def get_remaining_seconds() -> int:
     """获取当前倒计时剩余秒数（用于前端显示）"""
     global _countdown_end
-    remaining = int(_countdown_end - time.time())
+    with _timer_lock:
+        remaining = int(_countdown_end - time.time())
     return max(0, remaining)
 
 

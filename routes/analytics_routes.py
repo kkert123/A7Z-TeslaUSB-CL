@@ -61,9 +61,8 @@ def api_analytics_push_health():
             # 跳过空 key_suffix 的旧记录（已知 bug：key_suffix 为空导致推送失败）
             if bot_id == 'unknown' and bot.get('total_pushes', 0) <= 1:
                 continue
-                display_name = bot_meta.get(bot_id, '哨兵事件' if bot.get('name') == 'sentry' else bot_id)
-            else:
-                display_name = bot['name']
+
+            display_name = bot.get('name') or bot_meta.get(bot_id, bot_id)
 
             # 转换时间格式
             last_success = 0

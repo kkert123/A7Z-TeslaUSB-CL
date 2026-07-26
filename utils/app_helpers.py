@@ -7,7 +7,7 @@ import os, json, subprocess, threading, time, struct, io, queue, select, logging
 from datetime import datetime
 from pathlib import Path
 from functools import wraps
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, session
 
 import config
 from app_state import state
@@ -199,7 +199,7 @@ def get_queue_status():
             "failed": failed,
         }
     except Exception as e:
-        app.logger.warning(f"获取上传队列状态失败: {e}")
+        logging.getLogger(__name__).warning(f"获取上传队列状态失败: {e}")
         return {"tasks": [], "active": [], "pending": [], "completed": [], "failed": [], "error": str(e)}
 
 def get_queue_counts():

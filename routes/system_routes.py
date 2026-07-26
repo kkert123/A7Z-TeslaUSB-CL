@@ -380,9 +380,9 @@ def api_system_wecom_test():
 
 
 
-@system_bp.route('/api/system/wecom-config', methods=['POST'])
+@system_bp.route('/api/system/wecom-config', methods=['GET', 'POST'])
 def api_system_wecom_config():
-    """修改企业微信机器人配置（KEY / 启用开关）
+    """读取/修改企业微信机器人配置（KEY / 启用开关）
 
     enabled=False 时把 key 从主字段 {base} 挪到 {base}_disabled，使所有
     cfg.get(base) 的推送点自动失效（禁用真正生效）；enabled=True 写回主字段。
@@ -390,6 +390,32 @@ def api_system_wecom_config():
     """
     import re
     import tempfile
+    
+    if request.method == 'GET':
+        # 返回当前配置状态
+        cfg = {}
+        if os.path.exists(WECOM_CONFIG_PATH):
+            try:
+                with open(WECOM_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        bots_status = []
+        for b in WECOM_BOTS:
+            base = b['config_key']
+            active_key = cfg.get(base) or ''
+            disabled_key = cfg.get(base + '_disabled') or ''
+            has_key = bool(active_key or disabled_key)
+            bots_status.append({
+                'bot_key': b['bot_key'],
+                'name': b['name'],
+                'has_key': has_key,
+                'enabled': bool(active_key),
+                'key_preview': ('***' + (active_key or disabled_key)[-6:]) if (active_key or disabled_key) else '',
+            })
+        return jsonify({'success': True, 'bots': bots_status})
+
+    # POST: 修改配置
     try:
         data = request.get_json(silent=True) or {}
         bot_key = data.get('bot')
@@ -679,6 +705,63 @@ def api_version_rollback():
         if ok:
             return jsonify({'success': True, 'message': msg})
         return jsonify({'success': False, 'error': msg}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/version/upgrade-upload', methods=['POST'])
+def api_version_upgrade_upload():
+    """手动上传 .tar.gz 升级包并安装"""
+    import tempfile, shutil, hashlib
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': '未选择文件'}), 400
+        
+        file = request.files['file']
+        if not file.filename or not file.filename.endswith('.tar.gz'):
+            return jsonify({'success': False, 'error': '仅支持 .tar.gz 格式'}), 400
+        
+        expected_sha = (request.form.get('sha256') or '').strip().lower()
+        
+        # 保存到临时文件
+        fd, tmp_path = tempfile.mkstemp(suffix='.tar.gz')
+        try:
+            with os.fdopen(fd, 'wb') as tmp:
+                file.save(tmp)
+            
+            # SHA-256 校验（可选）
+            if expected_sha:
+                sha = hashlib.sha256()
+                with open(tmp_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(8192)
+                        if not chunk: break
+                        sha.update(chunk)
+                actual_sha = sha.hexdigest()
+                if actual_sha != expected_sha:
+                    os.unlink(tmp_path)
+                    return jsonify({
+                        'success': False,
+                        'error': f'SHA-256 校验失败\n期望: {expected_sha}\n实际: {actual_sha}'
+                    }), 400
+            
+            import upgrade_service
+            ok, msg = upgrade_service.do_upgrade_from_tarball(tmp_path, 'manual-upload')
+            if ok:
+                _schedule_restart()
+                return jsonify({
+                    'success': True,
+                    'message': msg,
+                    'need_restart': True,
+                })
+            return jsonify({'success': False, 'error': msg}), 500
+        finally:
+            # 清理临时文件
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

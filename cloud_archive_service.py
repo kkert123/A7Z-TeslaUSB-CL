@@ -794,7 +794,11 @@ def list_cloud_files(path: str = "") -> dict:
     if not remote_path.endswith('/'):
         remote_path += '/'
 
-    ok, files = list_remote_files(remote, remote_path)
+    try:
+        ok, files = list_remote_files(remote, remote_path)
+    except Exception as e:
+        logger.error(f"list_cloud_files 调用 list_remote_files 失败: {e}")
+        return {"success": False, "files": [], "message": f"云端列举失败: {e}"}
     return {
         "success": ok,
         "files": files,
