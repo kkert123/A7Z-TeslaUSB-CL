@@ -41,27 +41,32 @@ def get_current_version_dir():
 # ═══════════════════════════════════════════════════════════════
 
 def _save_user_data(base_dir):
-    """保存 config/ 和 data/ 目录（升级时保留用户配置）"""
+    """保存 config/、data/ 和 static/thumbnails/ 目录（升级时保留用户配置和缩略图）"""
     import tempfile
     tmpd = tempfile.mkdtemp(prefix='upgrade-keep-')
     saved_cfg = None
     saved_data = None
+    saved_thumbs = None
     try:
         old_cfg = os.path.join(base_dir, 'config')
         old_data = os.path.join(base_dir, 'data')
+        old_thumbs = os.path.join(base_dir, 'static', 'thumbnails')
         if os.path.isdir(old_cfg):
             saved_cfg = os.path.join(tmpd, 'config')
             shutil.copytree(old_cfg, saved_cfg, symlinks=True)
         if os.path.isdir(old_data):
             saved_data = os.path.join(tmpd, 'data')
             shutil.copytree(old_data, saved_data, symlinks=True)
+        if os.path.isdir(old_thumbs):
+            saved_thumbs = os.path.join(tmpd, 'thumbnails')
+            shutil.copytree(old_thumbs, saved_thumbs, symlinks=True)
     except Exception:
         pass
-    return saved_cfg, saved_data
+    return saved_cfg, saved_data, saved_thumbs
 
 
-def _restore_user_data(target_dir, saved_cfg, saved_data):
-    """恢复之前保存的 config/ 和 data/ 目录"""
+def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
+    """恢复之前保存的 config/、data/ 和 static/thumbnails/ 目录"""
     if saved_cfg and os.path.isdir(saved_cfg):
         dest = os.path.join(target_dir, 'config')
         if os.path.exists(dest):
@@ -72,6 +77,11 @@ def _restore_user_data(target_dir, saved_cfg, saved_data):
         if os.path.exists(dest):
             shutil.rmtree(dest)
         shutil.copytree(saved_data, dest, symlinks=True)
+    if saved_thumbs and os.path.isdir(saved_thumbs):
+        dest = os.path.join(target_dir, 'static', 'thumbnails')
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(saved_thumbs, dest, symlinks=True)
 
 def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     """一键升级。返回 (success, message)
@@ -135,7 +145,7 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 
     # ── 5. 保存旧版本数据（升级后恢复，避免 config/wecom.json 等丢失）──
     steps.append("保存配置...")
-    saved_cfg, saved_data = _save_user_data(current_dir)
+    saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
 
     # ── 6. 解压并安装 ──
     steps.append("解压安装...")
@@ -147,7 +157,7 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     steps[-1] = "安装完成"
 
     # ── 恢复旧版本配置 ──
-    _restore_user_data(new_dir, saved_cfg, saved_data)
+    _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
 
     # ── 6. 切换 symlink ──
     steps.append("切换版本...")
@@ -188,7 +198,7 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     steps[-1] = f"已备份到 {msg}" if ok else f"备份警告: {msg}（继续升级）"
 
     # 保存旧版本 config/data
-    saved_cfg, saved_data = _save_user_data(current_dir)
+    saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
 
     # 解压安装
     steps.append("解压安装...")
@@ -199,7 +209,7 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     steps[-1] = "安装完成"
 
     # 恢复用户数据
-    _restore_user_data(new_dir, saved_cfg, saved_data)
+    _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
 
     # 切 symlink
     if os.path.islink(SYMLINK):

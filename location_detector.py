@@ -733,15 +733,21 @@ class LocationDetector:
             LocationInfo 位置信息对象
         """
         # 获取 TeslaMate 位置（主检测）
-        try:
-            raw_location = self.fetch_location_from_teslamate()
-            teslamate_available = raw_location != "unknown"
-            location_source = "teslamate" if teslamate_available else "unknown"
-        except TeslaMateConnectionError:
-            raw_location = "unknown"
-            teslamate_available = False
-            location_source = "unknown"
-            logger.warning("TeslaMate 不可用，降级到 WiFi 检测")
+        raw_location = "unknown"
+        teslamate_available = False
+        location_source = "unknown"
+        
+        # 仅当 TeslaMate URL 已配置且非默认地址时才尝试
+        if self.teslamate_url and self.teslamate_url.startswith('http'):
+            try:
+                raw_location = self.fetch_location_from_teslamate()
+                teslamate_available = raw_location != "unknown"
+                location_source = "teslamate" if teslamate_available else "unknown"
+            except TeslaMateConnectionError:
+                raw_location = "unknown"
+                teslamate_available = False
+                location_source = "unknown"
+                logger.warning("TeslaMate 不可用，降级到 WiFi 检测")
         
         # 获取当前 WiFi（辅助验证）
         try:

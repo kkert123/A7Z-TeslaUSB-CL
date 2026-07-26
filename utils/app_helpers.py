@@ -263,7 +263,7 @@ def _get_location_status():
             with open(config_path, 'r', encoding='utf-8') as f:
                 cfg = _json.load(f)
             init_location_detector({
-                'teslamate_url': cfg.get('teslamate_url', 'http://100.111.252.121:7777'),
+                'teslamate_url': cfg.get('teslamate_url', ''),
                 'home_location': cfg.get('home_location', '家'),
                 'home_wifi_ssids': cfg.get('home_wifi_ssids', []),
                 'hotspot_ssids': cfg.get('hotspot_ssids', []),
@@ -648,6 +648,7 @@ def _stats_broadcaster():
                 'preview_status': _get_preview_status(),
                 'teslacam_health': _get_teslacam_health(),
                 'location_status': _get_location_status(),
+                'version_info': {'current': config.APP_VERSION},
             }
             # SSE 顶层兼容 JS updateDashboard 直接访问 d.nvme_total_disk 等
             stats['nvme_total_disk'] = sys_stats.get('nvme_total_disk')

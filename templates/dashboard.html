@@ -3,7 +3,6 @@
 {% block content %}
 <div class="page-header">
   <h2>仪表盘</h2>
-  <span class="badge" id="versionBadge" title="点击检查更新" style="cursor:pointer" onclick="checkVersion()">v{{ version }}</span>
   <span class="badge" id="lastUpdate">{{ now }}</span>
 </div>
 
@@ -65,6 +64,12 @@
         <span>服务 <span id="svc-uptime-hero">{{ service.uptime }}</span></span>
         <span class="hero-sep">|</span>
         <span>系统 <span id="sys-uptime-hero">{{ sys_stats.system_uptime }}</span></span>
+      </div>
+      <div id="svc-version-row" style="margin-top:2px;font-size:0.7rem">
+        <span style="color:var(--text-muted)">版本</span>
+        <span id="svc-version-current" style="font-weight:600">v{{ version }}</span>
+        <span id="svc-version-latest" style="color:var(--text-muted);margin-left:4px"></span>
+        <span id="svc-version-status" style="font-size:0.65rem;margin-left:4px"></span>
       </div>
       <div id="preview-hero" style="margin-top:4px;font-size:0.78rem">
         {% if preview_status.state == 'generating' %}
@@ -366,6 +371,19 @@ function updateDashboard(d) {
   if (suh && s && s.uptime) suh.textContent = s.uptime;
   const syh = document.getElementById('sys-uptime-hero');
   if (syh && y && y.system_uptime) syh.textContent = y.system_uptime;
+
+  // ── 版本信息 ──
+  if (d.version_info) {
+    const vc = document.getElementById('svc-version-current');
+    const vl = document.getElementById('svc-version-latest');
+    const vs = document.getElementById('svc-version-status');
+    if (vc) vc.textContent = 'v' + d.version_info.current;
+    if (vl && d.version_info.latest && d.version_info.latest !== d.version_info.current) {
+      vl.textContent = '\u2192 v' + d.version_info.latest;
+      vl.style.color = '#e74c3c';
+      if (vs) { vs.textContent = '\u26a0 \u6709\u65b0\u7248\u672c'; vs.style.color = '#e74c3c'; }
+    }
+  }
 
   // 后台预览
   const ph = document.getElementById('preview-hero');
