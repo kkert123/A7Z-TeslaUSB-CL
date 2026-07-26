@@ -398,9 +398,17 @@ def _extract_and_setup(tarball, target_dir):
         # 无旧 venv → 跳过，所有 service 用 /usr/bin/python3 直接运行
 
     pip = os.path.join(venv_dir, "bin", "pip") if os.path.isdir(venv_dir) else None
+    python3 = os.path.join(venv_dir, "bin", "python3") if os.path.isdir(venv_dir) else None
     req = os.path.join(target_dir, "requirements.txt")
-    if pip and os.path.exists(req):
-        rc, stdout, stderr = _run([pip, "install", "-r", req], timeout=300)
+    if os.path.exists(req):
+        if pip and os.path.isfile(pip):
+            rc, stdout, stderr = _run([pip, "install", "-r", req], timeout=300)
+        elif python3 and os.path.isfile(python3):
+            # pip 二进制可能不存在（Debian 最小安装 venv 不含 pip），用 python3 -m pip 回退
+            rc, stdout, stderr = _run([python3, "-m", "pip", "install", "-r", req], timeout=300)
+        else:
+            # venv 无 pip/python3 → 跳过依赖安装，服务用系统 python3 直接运行
+            return True, target_dir
         if rc != 0:
             return False, f"依赖安装失败: {stderr}"
 
