@@ -41,7 +41,12 @@ def get_current_version_dir():
 # ═══════════════════════════════════════════════════════════════
 
 def _save_user_data(base_dir):
-    """保存 config/、data/ 和 static/thumbnails/ 目录（升级时保留用户配置和缩略图）"""
+    """保存 config/、data/ 和 static/thumbnails/ 目录（升级时保留用户配置和缩略图）
+
+    永久保护：无论调用方是否理解 3 元组返回值，static/thumbnails/ 始终会被保存。
+    这样即使升级前运行的是旧版（2 元组版），缩略图也不会丢——因为新代码接管后
+    _restore_user_data 会自动从 saved_thumbs 恢复。
+    """
     import tempfile
     tmpd = tempfile.mkdtemp(prefix='upgrade-keep-')
     saved_cfg = None
@@ -57,6 +62,7 @@ def _save_user_data(base_dir):
         if os.path.isdir(old_data):
             saved_data = os.path.join(tmpd, 'data')
             shutil.copytree(old_data, saved_data, symlinks=True)
+        # 关键：缩略图保存是"路径驱动"的，不依赖调用者是否解包第三元素
         if os.path.isdir(old_thumbs):
             saved_thumbs = os.path.join(tmpd, 'thumbnails')
             shutil.copytree(old_thumbs, saved_thumbs, symlinks=True)
