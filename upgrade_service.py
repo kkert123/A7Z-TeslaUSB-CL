@@ -384,33 +384,20 @@ def _extract_and_setup(tarball, target_dir):
     if rc != 0:
         return False, f"解压失败: {stderr}"
 
-    venv_dir = os.path.join(target_dir, "venv")
-    rc, stdout, stderr = _run(["python3", "-m", "venv", venv_dir], timeout=120)
-    if rc != 0:
-        # venv 创建失败（通常是没装 python3-venv 包），尝试复用旧 venv
-        # 注意：python3 -m venv 失败前可能已创建部分目录，先清理
-        if os.path.exists(venv_dir):
-            shutil.rmtree(venv_dir, ignore_errors=True)
-        current_dir = get_current_version_dir()
-        old_venv = os.path.join(current_dir, "venv") if current_dir else None
-        if old_venv and os.path.isdir(old_venv):
-            shutil.copytree(old_venv, venv_dir, symlinks=True)
-        # 无旧 venv → 跳过，所有 service 用 /usr/bin/python3 直接运行
-
-    pip = os.path.join(venv_dir, "bin", "pip") if os.path.isdir(venv_dir) else None
-    python3 = os.path.join(venv_dir, "bin", "python3") if os.path.isdir(venv_dir) else None
+    # 依赖安装：直接使用系统 python3/pip3
+    # 注意：systemd service (teslausb-web) 使用 /usr/bin/python3，不依赖 venv
     req = os.path.join(target_dir, "requirements.txt")
     if os.path.exists(req):
-        if pip and os.path.isfile(pip):
-            rc, stdout, stderr = _run([pip, "install", "-r", req], timeout=300)
-        elif python3 and os.path.isfile(python3):
-            # pip 二进制可能不存在（Debian 最小安装 venv 不含 pip），用 python3 -m pip 回退
-            rc, stdout, stderr = _run([python3, "-m", "pip", "install", "-r", req], timeout=300)
+        # 优先用系统 pip3，回退到 python3 -m pip
+        system_pip = shutil.which("pip3") or shutil.which("pip")
+        if system_pip:
+            rc, stdout, stderr = _run([system_pip, "install", "-r", req], timeout=300)
         else:
-            # venv 无 pip/python3 → 跳过依赖安装，服务用系统 python3 直接运行
-            return True, target_dir
+            rc, stdout, stderr = _run(["python3", "-m", "pip", "install", "-r", req], timeout=300)
         if rc != 0:
-            return False, f"依赖安装失败: {stderr}"
+            # 不阻塞升级：Flask 等核心依赖已在系统 python3 中预装
+            import logging
+            logging.getLogger(__name__).warning(f"依赖安装失败（服务使用系统 python3，可能不影响运行）: {stderr[:200]}")
 
     return True, target_dir
 
