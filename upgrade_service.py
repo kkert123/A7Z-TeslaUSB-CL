@@ -149,11 +149,28 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 
     # ── 6. 解压并安装 ──
     steps.append("解压安装...")
-    ok, msg = _extract_and_setup(tarball, new_dir)
-    if not ok:
+    # 直接内联 tar + 系统 pip3，不调用 _extract_and_setup
+    # 原因：运行中的进程可能使用旧版 upgrade_service，_extract_and_setup 可能还走 venv 路径
+    os.makedirs(new_dir, exist_ok=True)
+    rc, _, err = _run(["tar", "xzf", tarball, "-C", new_dir], timeout=120)
+    if rc != 0:
         _cleanup(tarball, sig_file)
         shutil.rmtree(new_dir, ignore_errors=True)
-        return False, f"安装失败: {msg}"
+        return False, f"解压失败: {err}"
+    # 清除 tarball 中可能残留的 venv 目录（旧版本打包遗留）
+    _legacy_venv = os.path.join(new_dir, "venv")
+    if os.path.isdir(_legacy_venv):
+        shutil.rmtree(_legacy_venv, ignore_errors=True)
+    # 用系统 pip3 安装依赖（失败不阻塞——Flask 已在系统 python3 预装）
+    _req = os.path.join(new_dir, "requirements.txt")
+    if os.path.exists(_req):
+        _pip = shutil.which("pip3") or shutil.which("pip") or "python3 -m pip"
+        if " " in _pip:
+            _r, _, _e = _run(["python3", "-m", "pip", "install", "-r", _req], timeout=300)
+        else:
+            _r, _, _e = _run([_pip, "install", "-r", _req], timeout=300)
+        if _r != 0:
+            steps.append(f"pip 警告: {_e[:120] if _e else 'unknown'}（系统 python3 已预装核心依赖）")
     steps[-1] = "安装完成"
 
     # ── 恢复旧版本配置 ──
@@ -200,12 +217,25 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     # 保存旧版本 config/data
     saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
 
-    # 解压安装
+    # 解压安装（内联，不调用 _extract_and_setup——运行中进程可能用旧版）
     steps.append("解压安装...")
-    ok, msg = _extract_and_setup(tarball_path, new_dir)
-    if not ok:
+    os.makedirs(new_dir, exist_ok=True)
+    rc, _, err = _run(["tar", "xzf", tarball_path, "-C", new_dir], timeout=120)
+    if rc != 0:
         shutil.rmtree(new_dir, ignore_errors=True)
-        return False, f"安装失败: {msg}"
+        return False, f"解压失败: {err}"
+    _lv = os.path.join(new_dir, "venv")
+    if os.path.isdir(_lv):
+        shutil.rmtree(_lv, ignore_errors=True)
+    _req = os.path.join(new_dir, "requirements.txt")
+    if os.path.exists(_req):
+        _pip = shutil.which("pip3") or shutil.which("pip") or "python3 -m pip"
+        if " " in _pip:
+            _r, _, _e = _run(["python3", "-m", "pip", "install", "-r", _req], timeout=300)
+        else:
+            _r, _, _e = _run([_pip, "install", "-r", _req], timeout=300)
+        if _r != 0:
+            steps.append(f"pip 警告(不影响): {_e[:120] if _e else '?'}")
     steps[-1] = "安装完成"
 
     # 恢复用户数据
