@@ -462,7 +462,30 @@ function closeTrim(){document.getElementById('trimPanel').classList.remove('show
 function doTrim(){
   const sel=document.getElementById('trimCam');const angle=sel?sel.value:ca;const fn=cf(angle);if(!fn)return;
   const s=parseFloat(document.getElementById('trimStart').value||0);const e=parseFloat(document.getElementById('trimEnd').value||0);
-  const u=surl(fn)+`?trim=${s},${e}`;const a=document.createElement('a');a.href=u;a.download=fn.replace('.mp4','_trim.mp4');document.body.appendChild(a);a.click();a.remove();closeTrim();
+  const btn=document.getElementById('trimGo');
+  if (!(e > s)) { alert('结束时间必须大于开始时间'); return; }
+  // 调用后端裁剪 API（/videos/trim/<folder>/<event_id>），返回裁剪后的 mp4
+  btn.disabled=true; btn.textContent='裁剪中…';
+  fetch('/videos/trim/'+F+'/'+EID, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({camera:angle, start:s, end:e})
+  })
+  .then(r=>{
+    if(!r.ok) return r.json().then(d=>{throw new Error(d.error||('HTTP '+r.status));});
+    return r.blob();
+  })
+  .then(blob=>{
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download=fn.replace('.mp4','_'+s+'-'+e+'s.mp4');
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    closeTrim();
+  })
+  .catch(err=>{ alert('裁剪失败：'+err.message); })
+  .finally(()=>{ btn.disabled=false; btn.textContent='✂️ 裁剪并下载'; });
 }
 
 // ── Init ──

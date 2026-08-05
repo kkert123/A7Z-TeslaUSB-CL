@@ -728,15 +728,21 @@ async function loadChangelogList() {
   list.innerHTML = '<span style="color:var(--text-muted)">加载中...</span>';
   try {
     // 时间戳参数 + no-store：绕过浏览器 HTTP 缓存，确保刷新拿到最新 release
-    const url = 'https://api.github.com/repos/kkert123/A7Z-TeslaUSB-CL/releases?per_page=5&_t=' + Date.now();
+    // per_page=10 拉更多再按版本号排序：GitHub API 按 created_at 排序，
+    // 但 release 重建后 created_at 混乱，可能导致 v0.3.1.9 排在 v0.3.1.12 前面
+    const url = 'https://api.github.com/repos/kkert123/A7Z-TeslaUSB-CL/releases?per_page=10&_t=' + Date.now();
     const r = await fetch(url, { cache: 'no-store' });
     if (r.status === 403 || r.status === 429) {
       list.innerHTML = '<span style="color:var(--danger)">GitHub API 访问过于频繁（限流），请稍后再试</span>';
       return;
     }
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const arr = await r.json();
+    let arr = await r.json();
     if (!Array.isArray(arr) || !arr.length) { list.innerHTML = '<span style="color:var(--text-muted)">暂无 release</span>'; return; }
+    // 按版本号降序排序（v0.3.1.12 > v0.3.1.9），取最新 5 个
+    arr = arr.filter(rel => /^v?\d+\.\d+\.\d+/.test(rel.tag_name || ''));
+    arr.sort((a, b) => cmpVersion(b.tag_name, a.tag_name));
+    arr = arr.slice(0, 5);
     list.innerHTML = arr.map((rel, i) => {
       const tag = rel.tag_name || '';
       const published = rel.published_at ? rel.published_at.slice(0, 10) : '';
@@ -764,6 +770,17 @@ async function loadChangelogList() {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// 版本号比较：v0.3.1.12 > v0.3.1.9（返回负数表示 a < b）
+function cmpVersion(a, b) {
+  const pa = (a || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = (b || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const da = pa[i] || 0, db = pb[i] || 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
 }
 
 function toggleChangelog(id, btn) {
