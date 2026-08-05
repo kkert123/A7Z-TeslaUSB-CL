@@ -87,8 +87,8 @@
 <!-- ═══════════════════════════════════════════
      Group 2: Version & upgrade
      ═══════════════════════════════════════════ -->
-<div class="sys-group" id="grp-version">
-  <div class="sys-group-header" onclick="toggleGroup('grp-version')">
+  <div class="sys-group" id="grp-version">
+  <div class="sys-group-header" id="version-anchor" onclick="toggleGroup('grp-version')">
     <span>版本管理 <span class="sg-summary" id="ver-summary">v{{ version }}</span></span>
     <span class="sg-chevron">▶</span>
   </div>
@@ -107,19 +107,16 @@
       <div class="vc-status" id="ver-status">—</div>
     </div>
 
-    <!-- 检查 + 升级按钮 -->
-    <div class="btn-row" style="margin-bottom:8px">
+    <!-- 检查 / 升级 / 回退 三个按钮统一对齐 -->
+    <div class="btn-row" style="margin-bottom:6px;flex-wrap:wrap;gap:8px">
       <button class="btn btn-sm btn-primary" onclick="checkVersionNow()">检查更新</button>
-      <span id="ver-changelog" style="font-size:0.72rem;color:var(--text-muted)"></span>
+      <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()" style="display:none">升级到 <span id="upgrade-target"></span></button>
+      <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">回退到 <span id="rollback-target"></span></button>
+      <span id="ver-status-badge" style="display:none;padding:2px 8px;border-radius:10px;background:rgba(231,76,60,.15);color:#e74c3c;font-size:.7rem;font-weight:600">⚠ 有新版本</span>
     </div>
-    <div id="upgrade-controls" style="display:none;padding:10px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px">
-      <div class="btn-row">
-        <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()">升级到 <span id="upgrade-target"></span></button>
-        <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">回退到 <span id="rollback-target"></span></button>
-      </div>
-      <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
-      <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
-    </div>
+    <div id="ver-changelog-wrap" style="display:none;margin-bottom:8px;font-size:.72rem;color:var(--text-muted)"><span id="ver-changelog"></span></div>
+    <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
+    <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
 
     <!-- 手动上传升级包 -->
     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
@@ -698,9 +695,13 @@ function saveThumbReset() {
 // ═══ Version management ═══
 function checkVersionNow() {
   var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status'), ce = document.getElementById('ver-changelog');
-  var ctrl = document.getElementById('upgrade-controls'), te = document.getElementById('upgrade-target');
+  var ceWrap = document.getElementById('ver-changelog-wrap'), badge = document.getElementById('ver-status-badge');
+  var btnUp = document.getElementById('btn-upgrade'), te = document.getElementById('upgrade-target');
   le.textContent = '查询中...'; se.textContent = '—'; ce.textContent = '';
-  ctrl.style.display = 'none'; _upgradeData = null;
+  if (ceWrap) ceWrap.style.display = 'none';
+  if (badge) badge.style.display = 'none';
+  if (btnUp) btnUp.style.display = 'none';
+  _upgradeData = null;
 
   fetch('/api/version/check')
     .then(r => r.json()).then(d => {
@@ -711,8 +712,13 @@ function checkVersionNow() {
       document.getElementById('sys-version-display').textContent = 'v' + d.current;
       if (d.has_update) {
         se.textContent = '有新版本'; se.style.color = '#e74c3c';
-        if (d.changelog) ce.textContent = (d.changelog.split('\n').find(l => l.trim()) || '').substring(0, 120);
-        _upgradeData = d; ctrl.style.display = 'block'; te.textContent = 'v' + d.latest;
+        if (d.changelog) {
+          ce.textContent = (d.changelog.split('\n').find(l => l.trim()) || '').substring(0, 120);
+          if (ceWrap) ceWrap.style.display = 'block';
+        }
+        if (badge) badge.style.display = 'inline-block';
+        _upgradeData = d;
+        if (btnUp) { btnUp.style.display = ''; te.textContent = 'v' + d.latest; }
       } else if (d.latest) {
         se.textContent = '已是最新'; se.style.color = '#27ae60';
       }
@@ -724,7 +730,7 @@ function checkVersionNow() {
 function loadRollbackInfo() {
   fetch('/api/version/rollback-info').then(r => r.json()).then(d => {
     var btn = document.getElementById('btn-rollback'), te = document.getElementById('rollback-target');
-    if (d.can_rollback && btn) { btn.style.display = ''; te.textContent = 'v' + d.rollback_info.version; document.getElementById('upgrade-controls').style.display = 'block'; }
+    if (d.can_rollback && btn) { btn.style.display = ''; te.textContent = 'v' + d.rollback_info.version; }
     else if (btn) btn.style.display = 'none';
   });
 }
@@ -816,5 +822,17 @@ loadWecomConfig(); loadPushHealth(); loadServices(); loadThumbResetConfig(); loa
 setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500);
 setInterval(function() { loadWecomConfig(); loadPushHealth(); loadSummary(); loadServices(); }, 30000);
 setInterval(function() { loadSummary(); }, 15000);
+
+// 从仪表盘徽章跳转过来时，展开版本组并滚动到锚点
+(function() {
+  if (location.hash === '#version-anchor') {
+    var grp = document.getElementById('grp-version');
+    if (grp && !grp.classList.contains('open')) grp.classList.add('open');
+    setTimeout(function() {
+      var el = document.getElementById('version-anchor');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 400);
+  }
+})();
 </script>
 {% endblock %}

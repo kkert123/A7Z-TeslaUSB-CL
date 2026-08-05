@@ -54,7 +54,10 @@
 
   <!-- 2. TeslaUSB 服务 -->
   <div class="hero-card service">
-    <div class="hero-label">TeslaUSB 服务</div>
+    <div class="hero-label" style="display:flex;justify-content:space-between;align-items:center">
+      <span>TeslaUSB 服务</span>
+      <a id="svc-update-badge" href="/system" style="display:none;padding:2px 8px;border-radius:10px;background:linear-gradient(135deg,#ff6b6b,#e74c3c);color:#fff;font-size:0.65rem;font-weight:600;text-decoration:none;animation:pulse-badge 2s ease-in-out infinite">⬆ 新版本可用</a>
+    </div>
     <div class="hero-value" style="font-size:var(--text-lg)">
       <span class="status-dot {% if service.active %}green{% else %}red{% endif %}"></span>
       <span id="svc-hero-status">{{ '运行中' if service.active else '已停止' }}</span>
@@ -377,11 +380,19 @@ function updateDashboard(d) {
     const vc = document.getElementById('svc-version-current');
     const vl = document.getElementById('svc-version-latest');
     const vs = document.getElementById('svc-version-status');
+    const badge = document.getElementById('svc-update-badge');
     if (vc) vc.textContent = 'v' + d.version_info.current;
     if (vl && d.version_info.latest && d.version_info.latest !== d.version_info.current) {
       vl.textContent = '\u2192 v' + d.version_info.latest;
       vl.style.color = '#e74c3c';
       if (vs) { vs.textContent = '\u26a0 \u6709\u65b0\u7248\u672c'; vs.style.color = '#e74c3c'; }
+      if (badge) {
+        badge.style.display = 'inline-block';
+        badge.textContent = '\u2b06 \u5347\u7ea7\u5230 v' + d.version_info.latest;
+        badge.setAttribute('href', '/system#version-anchor');
+      }
+    } else {
+      if (badge) badge.style.display = 'none';
     }
   }
 
