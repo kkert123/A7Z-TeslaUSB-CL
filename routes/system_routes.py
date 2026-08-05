@@ -33,7 +33,7 @@ def _is_user_away() -> bool:
         if not detector:
             return False  # 检测器未初始化，按在家处理
         info = detector.check_location()
-        state = (info.state or '').lower() if info else ''
+        state = (info.state.value if info and info.state else '')
         return state == 'away'
     except Exception:
         return False  # 出错默认按在家处理
@@ -102,8 +102,8 @@ def api_system_reboot_verify_code():
         _restart_verify_expire = time.time() + _VERIFY_TTL
         # 发送微信
         try:
-            notifier = weixin_notifier.WechatNotifier(bot_name='系统通知')
-            if notifier.webhook_key or notifier.webhook_url:
+            notifier = weixin_notifier.WeixinNotifier(bot_name='系统通知')
+            if notifier.config.webhook_key or notifier.config.webhook_url:
                 msg = f'🔐 **重启验证码**\n\n您的代码是：**{code}**\n\n5 分钟内有效，请勿泄露给他人。'
                 ok = notifier.send_markdown(msg)
                 if not ok:
@@ -544,7 +544,8 @@ def api_system_location_status():
         if not detector:
             return jsonify({'success': True, 'state': 'unknown', 'display': '检测器未初始化', 'is_away': False})
         info = detector.check_location()
-        state = (info.state or 'unknown').lower() if info else 'unknown'
+        # LocationState 是 Enum，取 .value 得到字符串 ('home'/'away'/'unknown')
+        state = (info.state.value if info and info.state else 'unknown')
         display = {'home': '在家', 'away': '外出', 'unknown': '未知'}.get(state, '未知')
         return jsonify({'success': True, 'state': state, 'display': display, 'is_away': state == 'away'})
     except Exception as e:

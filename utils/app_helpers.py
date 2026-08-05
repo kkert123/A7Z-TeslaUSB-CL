@@ -630,6 +630,23 @@ _log_thread.start()
 
 import license_plate_service
 
+
+def _get_version_info_for_sse() -> dict:
+    """供 SSE 推送的版本信息（current + latest，带 1h 缓存）
+
+    失败时只返回 current（前端徽章保持隐藏），不阻塞 SSE 广播。
+    """
+    base = {'current': config.APP_VERSION}
+    try:
+        from version_service import check_latest_release
+        info = check_latest_release(force=False)
+        if info and not info.get('error') and info.get('latest'):
+            base['latest'] = info['latest']
+            base['has_update'] = bool(info.get('has_update'))
+    except Exception:
+        pass
+    return base
+
 def _stats_broadcaster():
     """后台线程：每 5 秒采集系统状态并广播到 SSE 订阅者"""
     import gc
@@ -657,7 +674,7 @@ def _stats_broadcaster():
                 'preview_status': _get_preview_status(),
                 'teslacam_health': _get_teslacam_health(),
                 'location_status': _get_location_status(),
-                'version_info': {'current': config.APP_VERSION},
+                'version_info': _get_version_info_for_sse(),
             }
             # SSE 顶层兼容 JS updateDashboard 直接访问 d.nvme_total_disk 等
             stats['nvme_total_disk'] = sys_stats.get('nvme_total_disk')

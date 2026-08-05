@@ -385,15 +385,18 @@ function serviceAction(a) {
 let _powerIsAway = false;
 async function loadPowerStatus() {
   try {
-    const r = await fetch('/api/system/location-status');
-    if (!r.ok) return;
-    const d = await r.json();
     const stateEl = document.getElementById('power-loc-state');
     const helpEl = document.getElementById('power-loc-help');
     const btnShutdown = document.getElementById('btn-shutdown');
     if (!stateEl || !btnShutdown) return;
+    const r = await fetch('/api/system/location-status');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
     if (!d.success) {
-      stateEl.textContent = '无法检测';
+      stateEl.textContent = '检测失败';
+      stateEl.style.color = 'var(--danger)';
+      if (helpEl) helpEl.textContent = (d.error || '') + ' — 关机已禁用';
+      btnShutdown.disabled = true;
       return;
     }
     stateEl.textContent = d.display || d.state;
@@ -404,7 +407,10 @@ async function loadPowerStatus() {
     if (helpEl) {
       helpEl.textContent = _powerIsAway ? '（外出时不可关机）' : '';
     }
-  } catch (e) {}
+  } catch (e) {
+    const stateEl = document.getElementById('power-loc-state');
+    if (stateEl) { stateEl.textContent = '检测失败'; stateEl.style.color = 'var(--danger)'; }
+  }
 }
 
 function system重启() {
@@ -759,14 +765,17 @@ function toggleChangelog(id, btn) {
 
 async function loadServices() {
   const el = document.getElementById('services-list');
+  const summary = document.getElementById('service-summary');
+  if (!el) return;  // 元素不存在（旧页面）直接跳过
   el.innerHTML = '加载中...';
   try {
     const r = await fetch('/api/analytics/services');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    if (!d.success) { el.innerHTML = '<span style="color:var(--danger)">失败 to load</span>'; return; }
+    if (!d.success) { el.innerHTML = '<span style="color:var(--danger)">加载失败</span>'; if (summary) summary.textContent = '加载失败'; return; }
     const svcs = d.services || {};
     const entries = Object.entries(svcs);
-    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">无数据</span>'; return; }
+    if (!entries.length) { el.innerHTML = '<span style="color:var(--text-muted)">无数据</span>'; if (summary) summary.textContent = '无数据'; return; }
     el.innerHTML = entries.map(([name, svc]) => {
       const 成功 = svc.active;
       const timer = svc.timer_next ? '（下次: ' + svc.timer_next + ')' : '';
@@ -775,7 +784,12 @@ async function loadServices() {
         '<span style="color:' + (成功 ? 'var(--success)' : 'var(--danger)') + '">' + (成功 ? '运行中' : '已停止') + '</span>' +
         '</div>';
     }).join('');
-  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">失败 to load</span>'; }
+    // 更新折叠面板标题摘要（v0.3.1.8 引入的显示缺陷：摘要从未更新，永远"加载中…"）
+    if (summary) {
+      const run = entries.filter(([, s]) => s.active).length;
+      summary.textContent = run + '/' + entries.length + ' 运行中';
+    }
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger)">加载失败</span>'; if (summary) summary.textContent = '加载失败'; }
 }
 
 // ═══ 挂载点 status ═══

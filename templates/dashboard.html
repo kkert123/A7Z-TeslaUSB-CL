@@ -391,6 +391,12 @@ function updateDashboard(d) {
         badge.textContent = '\u2b06 \u5347\u7ea7\u5230 v' + d.version_info.latest;
         badge.setAttribute('href', '/system#version-anchor');
       }
+    } else if (vl && d.version_info.latest) {
+      // 已是最新版本
+      vl.textContent = '\u2713 \u5df2\u662f\u6700\u65b0';
+      vl.style.color = '#27ae60';
+      if (vs) { vs.textContent = '\u2713 \u5df2\u662f\u6700\u65b0\u7248\u672c'; vs.style.color = '#27ae60'; }
+      if (badge) badge.style.display = 'none';
     } else {
       if (badge) badge.style.display = 'none';
     }
