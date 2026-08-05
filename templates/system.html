@@ -112,6 +112,8 @@
       </div>
       <div class="vc-status" id="ver-status">—</div>
     </div>
+    <!-- 新版本摘要（仅"检查更新"发现新版本时显示，紧贴版本卡片，避免与下方手动上传区域混淆） -->
+    <div id="ver-changelog-wrap" style="display:none;margin-bottom:8px;font-size:.72rem;color:var(--text-muted)"><span id="ver-changelog"></span></div>
 
     <!-- 检查 / 升级 / 回退 三个按钮统一对齐 -->
     <div class="btn-row" style="margin-bottom:6px;flex-wrap:wrap;gap:8px">
@@ -120,7 +122,6 @@
       <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">回退到 <span id="rollback-target"></span></button>
       <span id="ver-status-badge" style="display:none;padding:2px 8px;border-radius:10px;background:rgba(231,76,60,.15);color:#e74c3c;font-size:.7rem;font-weight:600">⚠ 有新版本</span>
     </div>
-    <div id="ver-changelog-wrap" style="display:none;margin-bottom:8px;font-size:.72rem;color:var(--text-muted)"><span id="ver-changelog"></span></div>
     <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
     <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
 
