@@ -356,7 +356,7 @@ class SentryService:
                     # 标记 preview_queue.json（如果存在），避免后台重复处理
                     import json
                     from pathlib import Path
-                    queue_file = Path('/opt/teslausb-web/data/preview_queue.json')
+                    queue_file = Path('/opt/radxa_data/teslausb/data/preview_queue.json')
                     if queue_file.exists():
                         try:
                             with open(queue_file, 'r', encoding='utf-8') as f:

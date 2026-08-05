@@ -52,6 +52,14 @@ def get_thumbnail_filename(folder_type: str, event_id: str) -> str:
     prefix = _THUMB_PREFIX.get(folder_type, 'UNK_')
     return f"{prefix}{event_id}_grid.jpg"
 
+
+def validate_event_id(event_id: str) -> bool:
+    """校验事件 ID 格式：仅允许 YYYY-MM-DD_HH-MM-SS 形态，防路径穿越"""
+    if not event_id:
+        return False
+    import re
+    return bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:_\d+)?', event_id))
+
 def get_thumbnail_path(folder_type: str, event_id: str) -> str:
     """返回缩略图完整路径"""
     return os.path.join(THUMBNAIL_DIR, get_thumbnail_filename(folder_type, event_id))
@@ -535,6 +543,8 @@ def get_event_files(folder_type: str, event_id: str) -> List[dict]:
     """
     if folder_type not in VIDEO_FOLDERS:
         return []
+    if not validate_event_id(event_id):
+        return []
 
     folder_path = VIDEO_FOLDERS[folder_type]['path']
     videos = []
@@ -601,6 +611,8 @@ def create_event_zip(folder_type: str, event_id: str) -> Tuple[Optional[bytes], 
         (zip_bytes, filename) — zip_bytes 为 None 表示失败
     """
     if folder_type not in VIDEO_FOLDERS:
+        return None, ''
+    if not validate_event_id(event_id):
         return None, ''
 
     folder_path = VIDEO_FOLDERS[folder_type]['path']
@@ -980,6 +992,8 @@ def get_event_cameras(folder_type: str, event_id: str) -> Optional[dict]:
         如果事件不存在或无视频返回 None
     """
     if folder_type not in VIDEO_FOLDERS:
+        return None
+    if not validate_event_id(event_id):
         return None
 
     folder_path = VIDEO_FOLDERS[folder_type]['path']

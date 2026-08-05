@@ -585,15 +585,24 @@ import subprocess
 def _log_broadcaster():
     """后台线程：持续读取 journalctl 并广播到所有 SSE 订阅者"""
     import select
-    proc = subprocess.Popen(
-        ['sudo', '-S', 'journalctl', '-f', '-n', '50', '--no-pager', '-o', 'short-iso'],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-    )
-    try:
-        proc.stdin.write('radxa\n')
-        proc.stdin.flush()
-    except:
-        pass
+    # 安全：sudo 密码不硬编码，从环境变量 SUDO_PASSWORD 读取（未配置时回退 sudo -n）
+    # 若两者均不可用，journalctl 读取失败，仅日志广播不可用，不影响其他功能
+    sudo_pwd = os.environ.get('SUDO_PASSWORD', '')
+    if sudo_pwd:
+        proc = subprocess.Popen(
+            ['sudo', '-S', 'journalctl', '-f', '-n', '50', '--no-pager', '-o', 'short-iso'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
+        try:
+            proc.stdin.write(sudo_pwd + '\n')
+            proc.stdin.flush()
+        except:
+            pass
+    else:
+        proc = subprocess.Popen(
+            ['sudo', '-n', 'journalctl', '-f', '-n', '50', '--no-pager', '-o', 'short-iso'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
     try:
         for line in iter(proc.stdout.readline, ''):
             if not line.strip():

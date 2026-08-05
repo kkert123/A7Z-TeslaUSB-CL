@@ -161,7 +161,7 @@ def _get_current_ssid() -> Optional[str]:
 
 
 def _is_nas_reachable(nas_ip: str) -> bool:
-    """检查 NAS 是否可达（ping + SMB 端口检查）"""
+    """检查 NAS 是否可达（ping + SMB 端口检查，均用参数列表/socket 避免 shell 注入）"""
     if not nas_ip:
         return False
     try:
@@ -172,13 +172,15 @@ def _is_nas_reachable(nas_ip: str) -> bool:
         )
         if r.returncode != 0:
             return False
-        
-        # SMB 端口检查 (445)
-        r = subprocess.run(
-            ["timeout", "2", "bash", "-c", f"echo > /dev/tcp/{nas_ip}/445 2>/dev/null"],
-            capture_output=True, timeout=3,
-        )
-        return r.returncode == 0
+
+        # SMB 端口检查 (445) — 用 socket 连接，不经过 shell，天然防注入
+        import socket
+        try:
+            sock = socket.create_connection((nas_ip, 445), timeout=2)
+            sock.close()
+            return True
+        except (OSError, socket.error):
+            return False
     except Exception:
         return False
 

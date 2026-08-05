@@ -97,6 +97,11 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     steps = []
 
     # ── 0. 前置检查 ──
+    # 版本号白名单校验：仅允许 数字.数字.数字(.数字) 格式，防目录穿越/注入
+    import re as _re
+    if not _re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', str(new_version)):
+        return False, f"非法版本号: {new_version!r}"
+
     current_dir = get_current_version_dir()
     if not current_dir:
         return False, "当前部署目录不存在，无法升级"
@@ -158,11 +163,21 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     # 直接内联 tar + 系统 pip3，不调用 _extract_and_setup
     # 原因：运行中的进程可能使用旧版 upgrade_service，_extract_and_setup 可能还走 venv 路径
     os.makedirs(new_dir, exist_ok=True)
-    rc, _, err = _run(["tar", "xzf", tarball, "-C", new_dir], timeout=120)
-    if rc != 0:
+    # 安全解压：校验每个成员路径，拒绝 ../ 或绝对路径（zip-slip 防护）
+    try:
+        import tarfile as _tf
+        with _tf.open(tarball, 'r:*') as _t:
+            for _m in _t.getmembers():
+                _m_path = _m.name.replace('\\', '/')
+                if _m_path.startswith('/') or '..' in _m_path.split('/'):
+                    _cleanup(tarball, sig_file)
+                    shutil.rmtree(new_dir, ignore_errors=True)
+                    return False, f"升级包包含非法路径: {_m_path!r}，已中止"
+            _t.extractall(new_dir)
+    except Exception as _e:
         _cleanup(tarball, sig_file)
         shutil.rmtree(new_dir, ignore_errors=True)
-        return False, f"解压失败: {err}"
+        return False, f"解压失败: {_e}"
     # Windows tar 打包丢失 Unix 执行位 → 解压后统一 chmod +x
     # 根因: usb_gadget_init.sh 无 +x → present_usb.sh 报"不存在或不可执行" → mode 服务 failed
     try:
@@ -214,6 +229,9 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 def do_upgrade_from_tarball(tarball_path, new_version):
     """从本地 tar.gz 升级（跳过下载+校验，调用方已做）。返回 (success, message)"""
     steps = []
+    import re as _re
+    if not _re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', str(new_version)):
+        return False, f"非法版本号: {new_version!r}"
     current_dir = get_current_version_dir()
     if not current_dir:
         return False, "当前部署目录不存在，无法升级"
@@ -235,10 +253,19 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     # 解压安装（内联，不调用 _extract_and_setup——运行中进程可能用旧版）
     steps.append("解压安装...")
     os.makedirs(new_dir, exist_ok=True)
-    rc, _, err = _run(["tar", "xzf", tarball_path, "-C", new_dir], timeout=120)
-    if rc != 0:
+    # 安全解压：校验每个成员路径，拒绝 ../ 或绝对路径（zip-slip 防护）
+    try:
+        import tarfile as _tf
+        with _tf.open(tarball_path, 'r:*') as _t:
+            for _m in _t.getmembers():
+                _m_path = _m.name.replace('\\', '/')
+                if _m_path.startswith('/') or '..' in _m_path.split('/'):
+                    shutil.rmtree(new_dir, ignore_errors=True)
+                    return False, f"升级包包含非法路径: {_m_path!r}，已中止"
+            _t.extractall(new_dir)
+    except Exception as _e:
         shutil.rmtree(new_dir, ignore_errors=True)
-        return False, f"解压失败: {err}"
+        return False, f"解压失败: {_e}"
     # Windows tar 打包丢失 Unix 执行位 → 解压后统一 chmod +x
     try:
         for root, _, files in os.walk(new_dir):

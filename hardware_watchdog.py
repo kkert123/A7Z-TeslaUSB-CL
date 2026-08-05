@@ -394,6 +394,12 @@ class HardwareWatchdog:
 
                     status = self.run_health_check()
 
+                    # 关键：检查完成后立即再喂一次狗。
+                    # 健康检查含多个子进程（curl/ping/systemctl），可能耗时 >10s，
+                    # 若等到 sleep(interval) 之后才喂，累计间隔可能超过 16s 硬件窗口 → 误触发硬件重启。
+                    if watchdog_active and not want_reboot:
+                        self.pet_watchdog()
+
                     if status["healthy"]:
                         consecutive_failures = 0
                         logger.info(
