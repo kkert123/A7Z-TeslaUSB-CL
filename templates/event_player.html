@@ -16,6 +16,38 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Se
   position:fixed;inset:0;display:grid;grid-template-rows:auto 1fr auto;
   background:#000;z-index:1000;
 }
+/* ════════════════════════════════════════════════════════
+   PC 端（≥ 900px）：左视频主区 + 右侧信息/操作栏
+   ════════════════════════════════════════════════════════ */
+@media (min-width: 900px) {
+  .player{
+    grid-template-rows:auto 1fr;
+    grid-template-columns:1fr 340px;
+    grid-template-areas:
+      "meta meta"
+      "video aside";
+    gap:0;
+  }
+  .meta-strip{grid-area:meta;padding:8px 16px;max-height:120px}
+  .meta-row-1{margin-bottom:4px}
+  .meta-row-2{font-size:.72em}
+  .meta-row-3{font-size:.68em}
+  .video-area{grid-area:video;background:#000}
+  .bottom-panel{
+    grid-area:aside;background:rgba(15,15,18,.95);
+    border-top:none;border-left:1px solid rgba(255,255,255,.1);
+    overflow-y:auto;align-content:start;
+  }
+  .bottom-panel::-webkit-scrollbar{width:6px}
+  .bottom-panel::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:3px}
+  .view-grid{padding:10px;gap:6px;grid-template-columns:repeat(2,1fr)}
+  .view-cell{padding:14px 6px;min-height:62px}
+  .view-cell .ic{font-size:1.1em}
+  .view-cell .lb{font-size:.7em}
+  .action-bar{padding:8px 10px 12px}
+  .action-bar .act-btn{padding:8px 10px;font-size:.74em}
+  .close-btn{top:10px;right:16px}
+}
 /* ── 顶部元数据区（紧凑三栏） ── */
 .meta-strip{
   position:relative;background:linear-gradient(180deg,rgba(20,20,24,.95) 0%,rgba(20,20,24,.85) 100%);

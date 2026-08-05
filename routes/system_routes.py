@@ -1,4 +1,4 @@
-import os, json, time, subprocess, threading
+import os, json, time, subprocess, threading, random
 from datetime import datetime
 from flask import Blueprint, render_template, request, jsonify, Response, send_file, send_from_directory, redirect, url_for
 from app_state import state
@@ -13,6 +13,31 @@ import config
 
 
 system_bp = Blueprint('system', __name__, url_prefix='')
+
+# ── 重启验证码（5 分钟有效，进程内，重启后失效） ──
+_restart_verify_code = None
+_restart_verify_expire = 0.0
+_VERIFY_TTL = 300  # 秒
+
+
+def _gen_verify_code() -> str:
+    """生成 6 位随机数字验证码"""
+    return ''.join(random.choices('0123456789', k=6))
+
+
+def _is_user_away() -> bool:
+    """检测用户是否外出（位置状态非 home）"""
+    try:
+        from location_detector import get_location_detector
+        detector = get_location_detector()
+        if not detector:
+            return False  # 检测器未初始化，按在家处理
+        info = detector.check_location()
+        state = (info.state or '').lower() if info else ''
+        return state == 'away'
+    except Exception:
+        return False  # 出错默认按在家处理
+
 
 # Late imports from app.py (avoid circular imports at module load)
 from utils.app_helpers import get_template_context, get_system_stats, get_disk_usage, _update_sentry_count, get_cached_sentry_events, _get_preview_status, _get_teslacam_health, _update_temp_histories, _update_nvme_temp_history, _update_disk_io, WECOM_BOTS, WECOM_CONFIG_PATH
@@ -67,10 +92,47 @@ def api_system_service():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@system_bp.route('/api/system/reboot/verify-code', methods=['POST'])
+def api_system_reboot_verify_code():
+    """发送 6 位重启验证码到企业微信（系统通知 bot）"""
+    global _restart_verify_code, _restart_verify_expire
+    try:
+        code = _gen_verify_code()
+        _restart_verify_code = code
+        _restart_verify_expire = time.time() + _VERIFY_TTL
+        # 发送微信
+        try:
+            notifier = weixin_notifier.WechatNotifier(bot_name='系统通知')
+            if notifier.webhook_key or notifier.webhook_url:
+                msg = f'🔐 **重启验证码**\n\n您的代码是：**{code}**\n\n5 分钟内有效，请勿泄露给他人。'
+                ok = notifier.send_markdown(msg)
+                if not ok:
+                    return jsonify({'success': False, 'error': '企业微信发送失败，请检查系统通知机器人配置'}), 500
+            else:
+                return jsonify({'success': False, 'error': '系统通知机器人未配置，请先在"健康与通知"中配置'}), 400
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'微信发送异常: {e}'}), 500
+        return jsonify({'success': True, 'message': '验证码已发送到企业微信，5 分钟内有效', 'expires_in': _VERIFY_TTL})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @system_bp.route('/api/system/reboot', methods=['POST'])
 def api_system_reboot():
-    """重启系统"""
+    """重启系统（需要 6 位验证码）"""
+    global _restart_verify_code, _restart_verify_expire
     try:
+        body = request.get_json(silent=True) or {}
+        code = (body.get('code') or '').strip()
+        if not code:
+            return jsonify({'success': False, 'error': '请先获取验证码'}), 400
+        if not _restart_verify_code or time.time() > _restart_verify_expire:
+            return jsonify({'success': False, 'error': '验证码已过期，请重新获取'}), 400
+        if code != _restart_verify_code:
+            return jsonify({'success': False, 'error': '验证码错误'}), 403
+        # 校验通过，单次有效
+        _restart_verify_code = None
+        _restart_verify_expire = 0.0
         subprocess.Popen(['sudo', 'shutdown', '-r', '+1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return jsonify({'success': True, 'message': '系统将在1分钟后重启'})
     except Exception as e:
@@ -79,8 +141,10 @@ def api_system_reboot():
 
 @system_bp.route('/api/system/shutdown', methods=['POST'])
 def api_system_shutdown():
-    """关机"""
+    """关机（用户外出时不可用）"""
     try:
+        if _is_user_away():
+            return jsonify({'success': False, 'error': '检测到您当前不在家，无法远程关机（请到家后操作）'}), 403
         subprocess.Popen(['sudo', 'shutdown', '-h', '+1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return jsonify({'success': True, 'message': '系统将在1分钟后关机'})
     except Exception as e:
@@ -469,6 +533,22 @@ def api_system_wecom_config():
 
 
 # ── 系统信息 API ──────────────────────────────────────────────
+
+
+@system_bp.route('/api/system/location-status')
+def api_system_location_status():
+    """当前用户位置状态（用于电源控制按钮 enable/disable）"""
+    try:
+        from location_detector import get_location_detector
+        detector = get_location_detector()
+        if not detector:
+            return jsonify({'success': True, 'state': 'unknown', 'display': '检测器未初始化', 'is_away': False})
+        info = detector.check_location()
+        state = (info.state or 'unknown').lower() if info else 'unknown'
+        display = {'home': '在家', 'away': '外出', 'unknown': '未知'}.get(state, '未知')
+        return jsonify({'success': True, 'state': state, 'display': display, 'is_away': state == 'away'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e), 'is_away': False}), 500
 
 
 @system_bp.route('/api/system/info')

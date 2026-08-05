@@ -81,6 +81,12 @@
       <button class="btn btn-sm btn-outline" onclick="serviceAction('stop')">停止</button>
       <button class="btn btn-sm btn-outline" onclick="serviceAction('start')">启动</button>
     </div>
+
+    <!-- 系统健康（合并到系统信息） -->
+    <div style="margin-top:14px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">系统健康</div>
+      <div id="health-details" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
+    </div>
   </div>
 </div>
 
@@ -118,6 +124,17 @@
     <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
     <div id="upgrade-result" style="display:none;margin-top:6px;font-size:0.78rem"></div>
 
+    <!-- 升级进度条 -->
+    <div id="upgrade-progressbar-wrap" style="display:none;margin-top:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span id="upgrade-stage" style="font-size:0.75rem;font-weight:600;color:var(--accent)">准备中…</span>
+        <span id="upgrade-pct" style="font-size:0.75rem;font-weight:600;color:var(--text-muted)">0%</span>
+      </div>
+      <div style="width:100%;height:8px;background:var(--bg-card);border-radius:4px;overflow:hidden;border:0.5px solid var(--border)">
+        <div id="upgrade-bar" style="width:0%;height:100%;background:linear-gradient(90deg,var(--accent),#34c759);transition:width .3s ease;border-radius:4px"></div>
+      </div>
+    </div>
+
     <!-- 手动上传升级包 -->
     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
       <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">手动上传</div>
@@ -142,6 +159,15 @@
         <button class="btn btn-sm btn-outline" onclick="clearGithubToken()">清除</button>
       </div>
       <span id="gh-token-status" style="font-size:0.68rem;color:var(--text-muted)"></span>
+    </div>
+
+    <!-- 新版本更新说明（最近 5 个 release） -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:0.8rem;font-weight:600">📜 新版本更新说明</span>
+        <button class="btn btn-sm btn-outline" onclick="loadChangelogList()">刷新</button>
+      </div>
+      <div id="changelog-list" style="font-size:0.75rem"><span style="color:var(--text-muted)">加载中...</span></div>
     </div>
   </div>
 </div>
@@ -193,12 +219,6 @@
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
-    <!-- 系统健康 -->
-    <div style="margin-bottom:14px">
-      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">系统健康</div>
-      <div id="health-details" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
-    </div>
-
     <!-- 企业微信推送配置 -->
     <div style="margin-bottom:14px">
       <div style="font-size:0.8rem;font-weight:600;margin-bottom:8px">企业微信推送</div>
@@ -207,15 +227,23 @@
       </div>
       <div id="push-health-list" style="margin-top:10px;font-size:0.75rem;padding-top:8px;border-top:0.5px solid var(--border)"></div>
     </div>
+  </div>
+</div>
 
-    <!-- 服务状态 -->
-    <div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:0.8rem;font-weight:600">服务状态</span>
-        <button class="btn btn-sm btn-outline" onclick="loadServices()">刷新</button>
-      </div>
-      <div id="services-list" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
+<!-- ═══════════════════════════════════════════
+     Group 5: 服务状态（独立模块）
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-service">
+  <div class="sys-group-header" onclick="toggleGroup('grp-service')">
+    <span>服务状态 <span class="sg-summary" id="service-summary">加载中...</span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:0.78rem;color:var(--text-muted)">所有 systemd 服务</span>
+      <button class="btn btn-sm btn-outline" onclick="loadServices()">刷新</button>
     </div>
+    <div id="services-list" style="font-size:0.8rem;color:var(--text-muted)">加载中...</div>
   </div>
 </div>
 
@@ -296,11 +324,29 @@
     <span class="sg-chevron">▶</span>
   </div>
   <div class="sys-group-body">
+    <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:6px">
+      当前位置：<span id="power-loc-state" style="font-weight:600;color:var(--text)">检测中…</span>
+      <span id="power-loc-help" style="margin-left:6px;color:var(--text-muted);font-size:0.65rem"></span>
+    </div>
     <div class="btn-row">
-      <button class="btn btn-sm" onclick="system重启()" style="color:var(--warning);border-color:var(--warning)">重启</button>
-      <button class="btn btn-sm" onclick="system关机()" style="color:var(--danger);border-color:var(--danger)">关机</button>
+      <button id="btn-reboot" class="btn btn-sm" onclick="system重启()" style="color:var(--warning);border-color:var(--warning)">重启</button>
+      <button id="btn-shutdown" class="btn btn-sm" onclick="system关机()" style="color:var(--danger);border-color:var(--danger)">关机</button>
     </div>
     <p style="font-size:0.68rem;color:var(--text-muted);margin-top:6px">电源 cycle required after shutdown</p>
+  </div>
+</div>
+
+<!-- 重启验证码输入弹窗 -->
+<div id="reboot-verify-modal" style="display:none;position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+  <div style="background:var(--bg-card);border-radius:var(--r-md);padding:20px;width:min(380px,92vw);border:1px solid var(--border)">
+    <h4 style="font-size:.95rem;font-weight:600;margin-bottom:8px">🔐 重启验证</h4>
+    <div id="reboot-verify-info" style="font-size:.75rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5"></div>
+    <input type="text" id="reboot-verify-input" placeholder="6 位验证码" maxlength="6" style="width:100%;padding:10px;font-size:1.1rem;text-align:center;letter-spacing:6px;font-family:monospace;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);margin-bottom:10px">
+    <div id="reboot-verify-err" style="font-size:.72rem;color:var(--danger);min-height:18px;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-sm btn-outline" onclick="closeRebootVerify()">取消</button>
+      <button id="reboot-verify-go" class="btn btn-sm btn-primary" onclick="submitRebootVerify()">验证并重启</button>
+    </div>
   </div>
 </div>
 
@@ -336,14 +382,98 @@ function serviceAction(a) {
   }).catch(() => showResult('op-result', '请求失败', false));
 }
 
+let _powerIsAway = false;
+async function loadPowerStatus() {
+  try {
+    const r = await fetch('/api/system/location-status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const stateEl = document.getElementById('power-loc-state');
+    const helpEl = document.getElementById('power-loc-help');
+    const btnShutdown = document.getElementById('btn-shutdown');
+    if (!stateEl || !btnShutdown) return;
+    if (!d.success) {
+      stateEl.textContent = '无法检测';
+      return;
+    }
+    stateEl.textContent = d.display || d.state;
+    stateEl.style.color = d.is_away ? 'var(--danger)' : 'var(--success)';
+    _powerIsAway = !!d.is_away;
+    btnShutdown.disabled = _powerIsAway;
+    btnShutdown.title = _powerIsAway ? '您当前不在家，远程关机已禁用' : '';
+    if (helpEl) {
+      helpEl.textContent = _powerIsAway ? '（外出时不可关机）' : '';
+    }
+  } catch (e) {}
+}
+
 function system重启() {
-  if (!confirm('确定重启系统？')) return;
-  fetch('/api/system/reboot', { method: 'POST' })
-    .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
+  // 触发微信验证码发送 → 弹窗输入
+  if (!confirm('重启系统需要二次验证：点击"确定"将通过企业微信发送 6 位验证码，请收到后输入。')) return;
+  const info = document.getElementById('reboot-verify-info');
+  const err = document.getElementById('reboot-verify-err');
+  const modal = document.getElementById('reboot-verify-modal');
+  const goBtn = document.getElementById('reboot-verify-go');
+  const input = document.getElementById('reboot-verify-input');
+  err.textContent = '';
+  info.textContent = '正在发送验证码到企业微信…';
+  modal.style.display = 'flex';
+  input.value = '';
+  goBtn.disabled = true;
+  goBtn.textContent = '发送中…';
+  fetch('/api/system/reboot/verify-code', { method: 'POST' })
+    .then(r => r.json()).then(d => {
+      if (!d.success) {
+        info.textContent = '❌ 发送失败';
+        err.textContent = d.error || '未知错误';
+        goBtn.disabled = false;
+        goBtn.textContent = '验证并重启';
+        return;
+      }
+      info.textContent = '✅ 验证码已发送到企业微信（5 分钟内有效）\n系统通知机器人 → 您的微信';
+      goBtn.disabled = false;
+      goBtn.textContent = '验证并重启';
+      input.focus();
+    }).catch(e => {
+      info.textContent = '❌ 网络错误';
+      err.textContent = e;
+      goBtn.disabled = false;
+      goBtn.textContent = '验证并重启';
+    });
+}
+
+function closeRebootVerify() {
+  document.getElementById('reboot-verify-modal').style.display = 'none';
+}
+
+function submitRebootVerify() {
+  const code = document.getElementById('reboot-verify-input').value.trim();
+  const err = document.getElementById('reboot-verify-err');
+  const goBtn = document.getElementById('reboot-verify-go');
+  if (!code || code.length !== 6) { err.textContent = '请输入 6 位验证码'; return; }
+  if (!/^\d{6}$/.test(code)) { err.textContent = '验证码必须是 6 位数字'; return; }
+  err.textContent = '';
+  goBtn.disabled = true; goBtn.textContent = '验证中…';
+  fetch('/api/system/reboot', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }) })
+    .then(r => r.json()).then(d => {
+      if (d.success) {
+        document.getElementById('reboot-verify-info').textContent = '✅ 验证成功！1 分钟后重启。';
+        showResult('op-result', d.message, true);
+        setTimeout(() => closeRebootVerify(), 1500);
+      } else {
+        err.textContent = d.error || '验证失败';
+        goBtn.disabled = false; goBtn.textContent = '验证并重启';
+      }
+    }).catch(e => {
+      err.textContent = '网络错误: ' + e;
+      goBtn.disabled = false; goBtn.textContent = '验证并重启';
+    });
 }
 
 function system关机() {
-  if (!confirm('确定关机？')) return;
+  if (_powerIsAway) { showResult('op-result', '您当前不在家，无法远程关机', false); return; }
+  if (!confirm('确定关机？\nA7Z 将立即停止，需手动上电才能恢复。')) return;
   fetch('/api/system/shutdown', { method: 'POST' })
     .then(r => r.json()).then(d => showResult('op-result', d.message, d.success));
 }
@@ -586,6 +716,47 @@ async function loadPushHealth() {
   } catch (e) { el.innerHTML = '<span style="color:var(--danger)">加载失败</span>'; }
 }
 
+async function loadChangelogList() {
+  const list = document.getElementById('changelog-list');
+  if (!list) return;
+  list.innerHTML = '<span style="color:var(--text-muted)">加载中...</span>';
+  try {
+    const r = await fetch('https://api.github.com/repos/kkert123/A7Z-TeslaUSB-CL/releases?per_page=5');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const arr = await r.json();
+    if (!Array.isArray(arr) || !arr.length) { list.innerHTML = '<span style="color:var(--text-muted)">暂无 release</span>'; return; }
+    list.innerHTML = arr.map((rel, i) => {
+      const tag = rel.tag_name || '';
+      const published = rel.published_at ? rel.published_at.slice(0, 10) : '';
+      const body = (rel.body || '').trim();
+      const firstLine = body.split('\n').find(l => l.trim()) || '(无说明)';
+      const rest = body.split('\n').slice(1).join('\n').trim();
+      const id = 'changelog-' + i;
+      return `
+        <div style="padding:8px 0;border-bottom:0.5px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <a href="${rel.html_url}" target="_blank" style="font-weight:600;color:var(--accent);text-decoration:none">${tag}</a>
+            <span style="font-size:0.65rem;color:var(--text-muted)">${published}</span>
+          </div>
+          <div id="${id}-first" style="color:var(--text-muted);font-size:0.72rem;line-height:1.5">${escapeHtml(firstLine).substring(0, 200)}</div>
+          ${rest ? `<div id="${id}-rest" style="display:none;margin-top:4px;color:var(--text-muted);font-size:0.72rem;line-height:1.5;white-space:pre-wrap">${escapeHtml(rest)}</div><button class="btn btn-sm btn-outline" style="margin-top:4px;font-size:0.65rem;padding:2px 8px" onclick="toggleChangelog('${id}-rest', this)">展开/收起</button>` : ''}
+        </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<span style="color:var(--danger)">加载失败：' + escapeHtml(e.message) + '</span>';
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function toggleChangelog(id, btn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
 async function loadServices() {
   const el = document.getElementById('services-list');
   el.innerHTML = '加载中...';
@@ -739,16 +910,43 @@ let _upgradeData = null;
 function startUpgrade() {
   if (!_upgradeData || !confirm('确认升级到 v' + _upgradeData.latest + '？\n\n操作流程：\n1. 备份当前版本\n2. 下载升级包\n3. SHA-256 + Ed25519 双重校验\n4. 安装并重启服务\n\n下载超时后会自动重试 3 次并用镜像加速')) return;
   var btn = document.getElementById('btn-upgrade'), prog = document.getElementById('upgrade-progress'), res = document.getElementById('upgrade-result');
+  var barWrap = document.getElementById('upgrade-progressbar-wrap'), bar = document.getElementById('upgrade-bar'), pct = document.getElementById('upgrade-pct'), stage = document.getElementById('upgrade-stage');
   btn.disabled = true; prog.style.display = 'block'; prog.textContent = '升级中...\n'; res.style.display = 'none';
+  barWrap.style.display = 'block'; setBar(8, '1/4 备份当前版本');
   var body = { version: _upgradeData.latest, asset_url: _upgradeData.asset_url, sha256: _upgradeData.sha256 || '', sig_url: _upgradeData.sig_url || '' };
-  if (!body.sha256) { prog.textContent += '\n发布页未找到 SHA-256 校验码，升级中止。'; btn.disabled = false; return; }
+  if (!body.sha256) { prog.textContent += '\n发布页未找到 SHA-256 校验码，升级中止。'; btn.disabled = false; barWrap.style.display = 'none'; return; }
+  // 模拟进度（实际后端是同步的无法实时推送，前端按时间估算）
+  var progTimer = setInterval(function(){
+    var cur = parseInt(bar.style.width) || 0;
+    if (cur < 35) setBar(cur + 3, '1/4 备份当前版本');
+    else if (cur < 45) setBar(cur + 2, '2/4 下载升级包');
+    else if (cur < 75) setBar(cur + 1, '2/4 下载升级包');
+    else if (cur < 90) setBar(cur + 1, '3/4 校验 SHA-256 + Ed25519');
+  }, 800);
   fetch('/api/version/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(r => r.json()).then(d => {
+      clearInterval(progTimer);
       prog.textContent += (d.message || d.error || '') + '\n'; prog.scrollTop = prog.scrollHeight;
-      if (d.success) { res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>'; setTimeout(() => location.reload(), 3000); }
-      else { res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>'; }
+      if (d.success) {
+        setBar(95, '4/4 安装并重启服务');
+        res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>';
+        setTimeout(() => { setBar(100, '完成'); setTimeout(() => location.reload(), 1500); }, 600);
+      } else {
+        res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>';
+        barWrap.style.display = 'none';
+      }
       btn.disabled = false;
-    }).catch(e => { prog.textContent += '错误: ' + e + '\n'; btn.disabled = false; });
+    }).catch(e => {
+      clearInterval(progTimer);
+      prog.textContent += '错误: ' + e + '\n'; btn.disabled = false; barWrap.style.display = 'none';
+    });
+}
+
+function setBar(pct, stage) {
+  var bar = document.getElementById('upgrade-bar'), p = document.getElementById('upgrade-pct'), s = document.getElementById('upgrade-stage');
+  if (bar) bar.style.width = pct + '%';
+  if (p) p.textContent = pct + '%';
+  if (s && stage) s.textContent = stage;
 }
 
 function startRollback() {
@@ -819,7 +1017,9 @@ function clearGithubToken() {
 // ═══ Init ═══
 loadSystemInfo(); loadModeDisplay(); loadAutoPresentConfig(); load挂载点Status(); loadSummary();
 loadWecomConfig(); loadPushHealth(); loadServices(); loadThumbResetConfig(); loadFanCurve(); loadGithubToken();
-setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500);
+loadPowerStatus();
+setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500); setTimeout(loadChangelogList, 2000);
+setInterval(loadPowerStatus, 60000);  // 每 60 秒刷新位置状态
 setInterval(function() { loadWecomConfig(); loadPushHealth(); loadSummary(); loadServices(); }, 30000);
 setInterval(function() { loadSummary(); }, 15000);
 

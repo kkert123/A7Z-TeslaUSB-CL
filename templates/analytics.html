@@ -78,12 +78,6 @@
   </div>
 </div>
 
-<!-- 服务状态 -->
-<div class="card" style="margin-bottom:var(--s4)">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s3)">⚙️ 服务状态</h3>
-  <div id="services-list"></div>
-</div>
-
   <!-- ═══════════════════════════════════════════ -->
   <!-- 清理管理（增强版）                          -->
   <!-- ═══════════════════════════════════════════ -->
@@ -332,34 +326,6 @@ async function loadSummary(){
     document.getElementById('stat-events').textContent='—';
     document.getElementById('stat-rate').textContent='—';
     document.getElementById('stat-health').textContent='—';
-  }
-}
-
-// ── 服务状态 ──────────────────────────────────────────────────
-
-async function loadServices(){
-  try{
-    const r=await fetch('/api/analytics/services');
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const d=await r.json();
-    if(!d.success){throw new Error(d.error||'API 返回失败');}
-    const svcs=d.services||{};
-    const entries=Object.entries(svcs);
-    if(!entries.length){
-      renderEmpty('services-list','服务状态不可用','systemd 可能未正常运行，请通过 SSH 检查');
-      return;
-    }
-    document.getElementById('services-list').innerHTML=entries.map(([name,svc])=>{
-      const ok=svc.active;
-      const timerInfo=svc.timer_next?' (下次: '+svc.timer_next+')':'';
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
-        <span>${name}${timerInfo?'<span style="font-size:var(--text-xs);color:var(--text-muted)">'+timerInfo+'</span>':''}</span>
-        <span style="color:${ok?'var(--success)':'var(--danger)'}">${ok?'● 运行中':'○ 已停止'}</span>
-      </div>`;
-    }).join('');
-  }catch(e){
-    console.error('loadServices error:',e);
-    renderError('services-list', loadServices, '服务状态加载失败');
   }
 }
 
@@ -638,11 +604,10 @@ async function runCleanupExecute(){
 // 初始加载
 loadPushHealth();
 loadSummary();
-loadServices();
 loadCleanupPolicies();
 
 // 每 30 秒全局刷新
-setInterval(()=>{loadPushHealth();loadSummary();loadServices();loadCleanupPolicies();},30000);
+setInterval(()=>{loadPushHealth();loadSummary();loadCleanupPolicies();},30000);
 // 事件统计每 15 秒单独刷新一次（更及时反映上传状态）
 setInterval(()=>{loadSummary();},15000);
 </script>
