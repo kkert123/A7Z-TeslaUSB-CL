@@ -21,7 +21,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from cryptography.fernet import Fernet, InvalidToken
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    Fernet = None  # type: ignore
+    InvalidToken = Exception  # type: ignore
+    CRYPTO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +141,11 @@ class ConfigEncryption:
     """
     
     def __init__(self, key_path: str = DEFAULT_ENCRYPTION_KEY_PATH):
+        if not CRYPTO_AVAILABLE:
+            raise EncryptionError(
+                "cryptography 模块未安装，无法使用加密功能。"
+                "请执行: pip3 install cryptography"
+            )
         self.key_path = Path(key_path)
         self._cipher: Optional[Fernet] = None
     
@@ -234,7 +245,14 @@ class ConfigManager:
         encryption_key_path: str = DEFAULT_ENCRYPTION_KEY_PATH,
     ):
         self.config_path = Path(config_path)
-        self.encryption = ConfigEncryption(encryption_key_path)
+        try:
+            self.encryption = ConfigEncryption(encryption_key_path)
+        except EncryptionError:
+            logger.warning(
+                "加密模块不可用 (cryptography 未安装)，密码加密功能将禁用。"
+                "如需使用加密功能，请执行: pip3 install cryptography"
+            )
+            self.encryption = None
         self._config: Optional[TeslaUSBConfig] = None
         self._last_modified: float = 0
         self._load_config()
@@ -354,12 +372,16 @@ class ConfigManager:
     
     def encrypt_password(self, password: str) -> str:
         """加密密码"""
+        if self.encryption is None:
+            raise EncryptionError("加密功能不可用: cryptography 模块未安装")
         return self.encryption.encrypt(password)
     
     def decrypt_password(self, encrypted: str) -> str:
         """解密密码"""
         if not encrypted:
             return ""
+        if self.encryption is None:
+            raise EncryptionError("解密功能不可用: cryptography 模块未安装")
         return self.encryption.decrypt(encrypted)
     
     def update_nas_password(self, password: str) -> None:
@@ -479,20 +501,28 @@ def get_wecom_keys() -> dict:
     import json
     import os
 
-    SENTRY_JSON = "/opt/teslausb-web/config/sentry.json"
+    # M19 教训：多模块配置路径必须一致。实际部署路径为 /opt/radxa_data/teslausb/config/sentry.json，
+    # 旧路径 /opt/teslausb-web/config/sentry.json 仅为兼容遗留部署保留。
+    SENTRY_JSON_CANDIDATES = [
+        "/opt/radxa_data/teslausb/config/sentry.json",
+        "/opt/teslausb-web/config/sentry.json",
+    ]
 
     status_key = ""
     sentry_key = ""
 
     # 优先从 sentry.json 读取
-    if os.path.exists(SENTRY_JSON):
-        try:
-            with open(SENTRY_JSON, encoding="utf-8") as f:
-                cfg = json.load(f)
-            status_key = cfg.get("wecom_status_webhook_key") or cfg.get("wecom_webhook_key", "")
-            sentry_key = cfg.get("wecom_sentry_webhook_key", "")
-        except Exception:
-            pass
+    for SENTRY_JSON in SENTRY_JSON_CANDIDATES:
+        if os.path.exists(SENTRY_JSON):
+            try:
+                with open(SENTRY_JSON, encoding="utf-8") as f:
+                    cfg = json.load(f)
+                status_key = cfg.get("wecom_status_webhook_key") or cfg.get("wecom_webhook_key", "")
+                sentry_key = cfg.get("wecom_sentry_webhook_key", "")
+                if status_key or sentry_key:
+                    break
+            except Exception:
+                pass
 
     # 回退到 config_manager
     if not status_key or not sentry_key:
