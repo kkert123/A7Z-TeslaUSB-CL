@@ -100,12 +100,12 @@ def api_system_reboot_verify_code():
         code = _gen_verify_code()
         _restart_verify_code = code
         _restart_verify_expire = time.time() + _VERIFY_TTL
-        # 发送微信
+        # 发送微信（纯文本消息，不使用企业微信 markdown 格式）
         try:
             notifier = weixin_notifier.WeixinNotifier(bot_name='系统通知')
             if notifier.config.webhook_key or notifier.config.webhook_url:
-                msg = f'🔐 **重启验证码**\n\n您的代码是：**{code}**\n\n5 分钟内有效，请勿泄露给他人。'
-                ok = notifier.send_markdown(msg)
+                msg = '🔐 重启验证码\n\n您的代码是：{code}\n\n5 分钟内有效，请勿泄露给他人。'.format(code=code)
+                ok = notifier.send_text(msg)
                 if not ok:
                     return jsonify({'success': False, 'error': '企业微信发送失败，请检查系统通知机器人配置'}), 500
             else:

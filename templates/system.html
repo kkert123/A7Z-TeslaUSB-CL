@@ -727,7 +727,13 @@ async function loadChangelogList() {
   if (!list) return;
   list.innerHTML = '<span style="color:var(--text-muted)">加载中...</span>';
   try {
-    const r = await fetch('https://api.github.com/repos/kkert123/A7Z-TeslaUSB-CL/releases?per_page=5');
+    // 时间戳参数 + no-store：绕过浏览器 HTTP 缓存，确保刷新拿到最新 release
+    const url = 'https://api.github.com/repos/kkert123/A7Z-TeslaUSB-CL/releases?per_page=5&_t=' + Date.now();
+    const r = await fetch(url, { cache: 'no-store' });
+    if (r.status === 403 || r.status === 429) {
+      list.innerHTML = '<span style="color:var(--danger)">GitHub API 访问过于频繁（限流），请稍后再试</span>';
+      return;
+    }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const arr = await r.json();
     if (!Array.isArray(arr) || !arr.length) { list.innerHTML = '<span style="color:var(--text-muted)">暂无 release</span>'; return; }
@@ -748,6 +754,9 @@ async function loadChangelogList() {
           ${rest ? `<div id="${id}-rest" style="display:none;margin-top:4px;color:var(--text-muted);font-size:0.72rem;line-height:1.5;white-space:pre-wrap">${escapeHtml(rest)}</div><button class="btn btn-sm btn-outline" style="margin-top:4px;font-size:0.65rem;padding:2px 8px" onclick="toggleChangelog('${id}-rest', this)">展开/收起</button>` : ''}
         </div>`;
     }).join('');
+    // 显示最后刷新时间，让用户确认刷新成功
+    list.innerHTML += '<div style="margin-top:6px;font-size:0.62rem;color:var(--text-muted)">更新于 ' +
+      new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '</div>';
   } catch (e) {
     list.innerHTML = '<span style="color:var(--danger)">加载失败：' + escapeHtml(e.message) + '</span>';
   }
