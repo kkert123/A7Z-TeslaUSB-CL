@@ -163,6 +163,15 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
         _cleanup(tarball, sig_file)
         shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"解压失败: {err}"
+    # Windows tar 打包丢失 Unix 执行位 → 解压后统一 chmod +x
+    # 根因: usb_gadget_init.sh 无 +x → present_usb.sh 报"不存在或不可执行" → mode 服务 failed
+    try:
+        for root, _, files in os.walk(new_dir):
+            for f in files:
+                if f.endswith('.sh'):
+                    os.chmod(os.path.join(root, f), 0o755)
+    except Exception:
+        pass
     # 清除 tarball 中可能残留的 venv 目录（旧版本打包遗留）
     _legacy_venv = os.path.join(new_dir, "venv")
     if os.path.isdir(_legacy_venv):
@@ -230,6 +239,14 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     if rc != 0:
         shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"解压失败: {err}"
+    # Windows tar 打包丢失 Unix 执行位 → 解压后统一 chmod +x
+    try:
+        for root, _, files in os.walk(new_dir):
+            for f in files:
+                if f.endswith('.sh'):
+                    os.chmod(os.path.join(root, f), 0o755)
+    except Exception:
+        pass
     _lv = os.path.join(new_dir, "venv")
     if os.path.isdir(_lv):
         shutil.rmtree(_lv, ignore_errors=True)
