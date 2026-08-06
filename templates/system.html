@@ -112,8 +112,6 @@
       </div>
       <div class="vc-status" id="ver-status">—</div>
     </div>
-    <!-- 新版本摘要（仅"检查更新"发现新版本时显示，紧贴版本卡片，避免与下方手动上传区域混淆） -->
-    <div id="ver-changelog-wrap" style="display:none;margin-bottom:8px;font-size:.72rem;color:var(--text-muted)"><span id="ver-changelog"></span></div>
 
     <!-- 检查 / 升级 / 回退 三个按钮统一对齐 -->
     <div class="btn-row" style="margin-bottom:6px;flex-wrap:wrap;gap:8px">
@@ -134,6 +132,15 @@
       <div style="width:100%;height:8px;background:var(--bg-card);border-radius:4px;overflow:hidden;border:0.5px solid var(--border)">
         <div id="upgrade-bar" style="width:0%;height:100%;background:linear-gradient(90deg,var(--accent),#34c759);transition:width .3s ease;border-radius:4px"></div>
       </div>
+    </div>
+
+    <!-- 新版本更新说明（最近 5 个 release，页面加载时自动展开最新版本） -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:0.8rem;font-weight:600">📜 新版本更新说明</span>
+        <button class="btn btn-sm btn-outline" onclick="loadChangelogList()">刷新</button>
+      </div>
+      <div id="changelog-list" style="font-size:0.75rem"><span style="color:var(--text-muted)">加载中...</span></div>
     </div>
 
     <!-- 手动上传升级包 -->
@@ -162,14 +169,6 @@
       <span id="gh-token-status" style="font-size:0.68rem;color:var(--text-muted)"></span>
     </div>
 
-    <!-- 新版本更新说明（最近 5 个 release） -->
-    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:0.8rem;font-weight:600">📜 新版本更新说明</span>
-        <button class="btn btn-sm btn-outline" onclick="loadChangelogList()">刷新</button>
-      </div>
-      <div id="changelog-list" style="font-size:0.75rem"><span style="color:var(--text-muted)">加载中...</span></div>
-    </div>
   </div>
 </div>
 
@@ -764,7 +763,13 @@ async function loadChangelogList() {
     // 显示最后刷新时间，让用户确认刷新成功
     list.innerHTML += '<div style="margin-top:6px;font-size:0.62rem;color:var(--text-muted)">更新于 ' +
       new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '</div>';
-  } catch (e) {
+    // 自动展开最新版本（changelog-0），便于用户立即看到本次更新内容
+    const firstRest = document.getElementById('changelog-0-rest');
+    const firstBtn = list.querySelector('button.btn.btn-sm.btn-outline');
+    if (firstRest) {
+      firstRest.style.display = 'block';
+      if (firstBtn) firstBtn.textContent = '收起';
+    }  } catch (e) {
     list.innerHTML = '<span style="color:var(--danger)">加载失败：' + escapeHtml(e.message) + '</span>';
   }
 }
@@ -787,7 +792,9 @@ function cmpVersion(a, b) {
 function toggleChangelog(id, btn) {
   const el = document.getElementById(id);
   if (!el) return;
-  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  if (btn) btn.textContent = show ? '收起' : '展开';
 }
 
 async function loadServices() {
@@ -906,11 +913,10 @@ function saveThumbReset() {
 
 // ═══ Version management ═══
 function checkVersionNow() {
-  var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status'), ce = document.getElementById('ver-changelog');
-  var ceWrap = document.getElementById('ver-changelog-wrap'), badge = document.getElementById('ver-status-badge');
+  var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status');
+  var badge = document.getElementById('ver-status-badge');
   var btnUp = document.getElementById('btn-upgrade'), te = document.getElementById('upgrade-target');
-  le.textContent = '查询中...'; se.textContent = '—'; ce.textContent = '';
-  if (ceWrap) ceWrap.style.display = 'none';
+  le.textContent = '查询中...'; se.textContent = '—';
   if (badge) badge.style.display = 'none';
   if (btnUp) btnUp.style.display = 'none';
   _upgradeData = null;
@@ -924,10 +930,6 @@ function checkVersionNow() {
       document.getElementById('sys-version-display').textContent = 'v' + d.current;
       if (d.has_update) {
         se.textContent = '有新版本'; se.style.color = '#e74c3c';
-        if (d.changelog) {
-          ce.textContent = (d.changelog.split('\n').find(l => l.trim()) || '').substring(0, 120);
-          if (ceWrap) ceWrap.style.display = 'block';
-        }
         if (badge) badge.style.display = 'inline-block';
         _upgradeData = d;
         if (btnUp) { btnUp.style.display = ''; te.textContent = 'v' + d.latest; }
