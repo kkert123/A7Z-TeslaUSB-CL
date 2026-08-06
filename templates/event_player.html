@@ -424,15 +424,16 @@ function updateHud(){
   if(!f.length)return;
   const i=Math.min(Math.floor(vid.currentTime*Math.max(1,seiData.fps||24)),f.length-1);
   const fr=f[i]||{};
-  document.getElementById('hudGear').textContent=fr.gear||'P';
-  document.getElementById('hudSpeed').textContent=Math.round(fr.speed||0);
-  const w=fr.steering||0;
+  // 兼容字段名：优先后端 sei_parser 字段（speed_kmh/gear_state/...），回退旧前端命名
+  document.getElementById('hudGear').textContent=fr.gear_state || fr.gear || 'P';
+  document.getElementById('hudSpeed').textContent=Math.round(fr.speed_kmh ?? fr.speed ?? 0);
+  const w=fr.steering_wheel_angle ?? fr.steering ?? 0;
   document.getElementById('hudWheel').style.setProperty('--angle',(w*180)+'deg');
-  document.getElementById('blinkerLeft').classList.toggle('on',!!fr.blinker_left);
-  document.getElementById('blinkerRight').classList.toggle('on',!!fr.blinker_right);
-  document.getElementById('brakePedal').style.setProperty('--p',((fr.brake||0)*100)+'%');
-  document.getElementById('throtPedal').style.setProperty('--p',((fr.throttle||0)*100)+'%');
-  document.getElementById('apIndicator').classList.toggle('show',!!fr.autopilot);
+  document.getElementById('blinkerLeft').classList.toggle('on',!!(fr.blinker_on_left ?? fr.blinker_left));
+  document.getElementById('blinkerRight').classList.toggle('on',!!(fr.blinker_on_right ?? fr.blinker_right));
+  document.getElementById('brakePedal').style.setProperty('--p',((fr.brake_applied ?? fr.brake ?? 0)*100)+'%');
+  document.getElementById('throtPedal').style.setProperty('--p',((fr.accelerator_pedal_position ?? fr.throttle ?? 0)*100)+'%');
+  document.getElementById('apIndicator').classList.toggle('show',!!(fr.autopilot_state ?? fr.autopilot) && (fr.autopilot_state ?? fr.autopilot) !== 'NONE');
   if(seiOn)requestAnimationFrame(updateHud);
 }
 

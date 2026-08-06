@@ -536,7 +536,23 @@ def api_sei_telemetry(folder_type, event_id, camera):
     if data is None:
         return jsonify({'success': False, 'error': 'No SEI data'}), 404
 
-    return jsonify({'success': True, 'camera': camera, 'frames': data})
+    # 探测真实帧率（前端 HUD 时序对齐用），失败默认 30
+    fps = None
+    try:
+        import subprocess
+        pr = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', video_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if pr.returncode == 0 and pr.stdout.strip():
+            num, _, den = pr.stdout.strip().partition('/')
+            if den and float(den) > 0:
+                fps = round(float(num) / float(den))
+    except Exception:
+        pass
+
+    return jsonify({'success': True, 'camera': camera, 'frames': data, 'fps': fps or 30})
 
 
 
