@@ -180,7 +180,7 @@ def api_analytics_disk():
 @analytics_bp.route('/api/analytics/services')
 def api_analytics_services():
     """系统服务状态列表"""
-    svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-fsck.timer', 'smbd', 'cron']
+    svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-mode', 'teslausb-io-tune', 'teslausb-fsck.timer', 'smbd', 'cron']
     services = {}
     try:
         for svc in svc_list:
