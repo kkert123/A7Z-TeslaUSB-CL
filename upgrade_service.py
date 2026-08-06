@@ -112,28 +112,28 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     if os.path.exists(new_dir):
         shutil.rmtree(new_dir)
 
-    # ── 1. 下载 ──
+    # ── 1. 下载 + SHA-256 校验（一体化：镜像/直连任一源校验失败自动换源）──
     tarball = os.path.join(tempfile.gettempdir(), f"upgrade-v{new_version}.tar.gz")
     sig_file = None
     try:
-        steps.append("下载中...")
-        _download(asset_url, tarball)
-        steps[-1] = "下载完成"
+        steps.append("下载并校验 SHA-256...")
+        _download(asset_url, tarball, sha256_expected)
+        steps[-1] = "下载完成，SHA-256 校验通过"
 
         if sig_url:
             sig_file = tarball + ".sig"
             _download(sig_url, sig_file)
     except Exception as e:
         _cleanup(tarball, sig_file)
-        return False, f"下载失败: {e}"
+        return False, f"下载或校验失败: {e}"
 
-    # ── 2. SHA-256 校验 ──
-    steps.append("SHA-256 校验...")
-    ok, msg = _verify_sha256(tarball, sha256_expected)
-    if not ok:
-        _cleanup(tarball, sig_file)
-        return False, f"SHA-256 校验失败: {msg}"
-    steps[-1] = f"SHA-256 通过 ({msg[:12]}...)"
+    # ── 2. 双保险：显式 SHA-256 校验（sha256_expected 为空时跳过）──
+    if sha256_expected:
+        ok, msg = _verify_sha256(tarball, sha256_expected)
+        if not ok:
+            _cleanup(tarball, sig_file)
+            return False, f"SHA-256 校验失败: {msg}"
+        steps.append(f"SHA-256 复核通过 ({msg[:12]}...)")
 
     # ── 3. Ed25519 签名验证 ──
     if sig_url and sig_file and os.path.exists(sig_file):
@@ -370,12 +370,24 @@ def get_rollback_info():
 # 内部实现
 # ═══════════════════════════════════════════════════════════════
 
-def _download(url, dest):
-    """下载文件 — 国内优先走镜像，直连做回退"""
+def _download(url, dest, sha256_expected=None):
+    """下载文件 — 国内优先走镜像，直连做回退。
+
+    若指定 sha256_expected，则下载后立即校验 SHA-256：
+    校验失败说明该下载源返回了损坏/缓存污染内容，自动换源重试，
+    全部源均不通过才抛异常（防止镜像返回错误文件导致升级失败）。
+    """
+    if sha256_expected:
+        _download_verified(url, dest, sha256_expected)
+        return
+    _download_raw(url, dest)
+
+
+def _download_raw(url, dest):
+    """基础下载（不做校验），单源失败自动切备源"""
     max_retries = 2
     last_error = None
 
-    # 国内优先 ghproxy 镜像直连
     mirror_url = url.replace(
         "https://github.com/",
         "https://ghproxy.net/https://github.com/"
@@ -389,15 +401,10 @@ def _download(url, dest):
     for try_url in urls_to_try:
         for retry in range(max_retries):
             try:
-                req = urllib.request.Request(try_url)
-                req.add_header("User-Agent", "A7Z-TeslaUSB-Upgrade/1.0")
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    with open(dest, "wb") as f:
-                        shutil.copyfileobj(resp, f)
+                _http_get(try_url, dest)
                 return  # 成功
             except Exception as e:
                 last_error = e
-                # GitHub 直连 504 不用重试，直接切镜像
                 if hasattr(e, 'code') and e.code == 504:
                     break
                 if retry < max_retries - 1:
@@ -405,6 +412,35 @@ def _download(url, dest):
                     time.sleep((retry + 1) * 5)
                 continue
     raise last_error or Exception("下载失败")
+
+
+def _download_verified(url, dest, sha256_expected):
+    """下载 + SHA-256 校验，失败自动换源（镜像 <-> 直连），全部失败抛异常"""
+    mirror_url = url.replace(
+        "https://github.com/",
+        "https://ghproxy.net/https://github.com/"
+    )
+    urls_to_try = [mirror_url, url] if mirror_url != url else [url]
+    errors = []
+    for try_url in urls_to_try:
+        try:
+            _http_get(try_url, dest)
+            ok, msg = _verify_sha256(dest, sha256_expected)
+            if ok:
+                return
+            errors.append(f"{try_url}: 校验失败 {msg[:24]}")
+        except Exception as e:
+            errors.append(f"{try_url}: {e}")
+    raise RuntimeError("下载内容校验失败，已尝试全部下载源： " + "; ".join(errors))
+
+
+def _http_get(url, dest):
+    """单次 HTTP 下载到文件"""
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "A7Z-TeslaUSB-Upgrade/1.0")
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(resp, f)
 
 
 def _verify_sha256(filepath, expected):
