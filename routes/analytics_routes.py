@@ -180,14 +180,26 @@ def api_analytics_disk():
 @analytics_bp.route('/api/analytics/services')
 def api_analytics_services():
     """系统服务状态列表"""
-    svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-mode', 'teslausb-io-tune', 'teslausb-fsck.timer', 'smbd', 'cron']
+    # cron 无业务依赖（系统定时任务均走 systemd timer），不再监控显示
+    svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-mode', 'teslausb-io-tune', 'teslausb-fsck.timer', 'smbd']
     services = {}
     try:
         for svc in svc_list:
             try:
-                r = subprocess.run(['systemctl', 'is-active', svc],
-                                 capture_output=True, text=True, timeout=3)
-                active = r.returncode == 0 and 'active' in (r.stdout or '')
+                # oneshot 服务（如 teslausb-mode）用 ActiveState 判断更准确，
+                # 避免 is-active 对 exited 状态误报（与 boot_notify.py 一致）
+                r = subprocess.run(
+                    ['systemctl', 'show', '-p', 'ActiveState', svc],
+                    capture_output=True, text=True, timeout=3
+                )
+                if r.returncode == 0:
+                    state = r.stdout.strip().split('=')[-1]
+                    active = state == 'active'
+                else:
+                    # 回退到 is-active
+                    r2 = subprocess.run(['systemctl', 'is-active', svc],
+                                        capture_output=True, text=True, timeout=3)
+                    active = r2.returncode == 0 and 'active' in (r2.stdout or '')
 
                 # 对于 timer，获取下次触发时间
                 timer_next = None
