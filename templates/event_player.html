@@ -414,27 +414,38 @@ async function loadSEI(angle){
     if(!r.ok)throw new Error('SEI fetch failed');
     seiData=await r.json();
     updateHud();
-  }catch(e){if(e.name!=='AbortError')console.warn(e);}
+  }catch(e){
+    if(e.name!=='AbortError'){
+      console.warn(e);
+      seiData=null;  // 该镜头无 SEI / 加载失败 → 清空数据，HUD 归零显示，避免残留旧镜头
+      updateHud();
+    }
+  }
   finally{document.getElementById('seiLoading') && (document.getElementById('seiLoading').style.display='none');}
 }
 
 function updateHud(){
+  // 先调度下一帧，保证动画循环永不中断（断流修复）
+  if(seiOn)requestAnimationFrame(updateHud);
   if(!seiData)return;
   const f=seiData.frames||[];
   if(!f.length)return;
-  const i=Math.min(Math.floor(vid.currentTime*Math.max(1,seiData.fps||24)),f.length-1);
+  // 比例定位：后端 timestamp_ms 为 0-1000 归一化刻度（idx/total），
+  // 与播放进度 currentTime/duration 同属比例体系，二者直接对齐（同步修复）
+  const dur=Math.max(vid.duration||0,0.001);
+  const i=Math.min(Math.floor((vid.currentTime/dur)*f.length),f.length-1);
   const fr=f[i]||{};
   // 兼容字段名：优先后端 sei_parser 字段（speed_kmh/gear_state/...），回退旧前端命名
   document.getElementById('hudGear').textContent=fr.gear_state || fr.gear || 'P';
   document.getElementById('hudSpeed').textContent=Math.round(fr.speed_kmh ?? fr.speed ?? 0);
   const w=fr.steering_wheel_angle ?? fr.steering ?? 0;
-  document.getElementById('hudWheel').style.setProperty('--angle',(w*180)+'deg');
+  // steering_wheel_angle 单位即角度（官方协议），直接使用；增加小幅平滑避免跳变
+  document.getElementById('hudWheel').style.setProperty('--angle',(w)+'deg');
   document.getElementById('blinkerLeft').classList.toggle('on',!!(fr.blinker_on_left ?? fr.blinker_left));
   document.getElementById('blinkerRight').classList.toggle('on',!!(fr.blinker_on_right ?? fr.blinker_right));
   document.getElementById('brakePedal').style.setProperty('--p',((fr.brake_applied ?? fr.brake ?? 0)*100)+'%');
   document.getElementById('throtPedal').style.setProperty('--p',((fr.accelerator_pedal_position ?? fr.throttle ?? 0)*100)+'%');
   document.getElementById('apIndicator').classList.toggle('show',!!(fr.autopilot_state ?? fr.autopilot) && (fr.autopilot_state ?? fr.autopilot) !== 'NONE');
-  if(seiOn)requestAnimationFrame(updateHud);
 }
 
 vid.addEventListener('timeupdate',()=>{if(seiOn)updateHud();});

@@ -36,9 +36,20 @@ def _extract_sei_direct(video_path):
     results = []
     frame_idx = 0  # video frame counter (type 1 or 5 NALs)
     while p + 4 <= end:
-        nal_sz = struct.unpack('>I', raw[p:p+4])[0]
-        p += 4
-        if nal_sz < 2 or p + nal_sz > end: break
+        # 读取长度前缀；损坏/非法长度（<2 或越界）时 1 字节步进重对齐（最多 8 次），
+        # 避免少量损坏数据导致后续 SEI 全部丢失（断流）
+        nal_sz = 0
+        for _ in range(9):
+            if p + 4 > end:
+                break
+            cand = struct.unpack('>I', raw[p:p+4])[0]
+            if 2 <= cand and p + 4 + cand <= end:
+                nal_sz = cand
+                p += 4
+                break
+            p += 1  # 步进重对齐
+        if nal_sz < 2:
+            break  # 无法对齐（垃圾尾部或 mdat 结束）
         hdr_byte = raw[p]
         avc_type = hdr_byte & 0x1F
         hevc_type = (hdr_byte >> 1) & 0x3F
@@ -49,7 +60,7 @@ def _extract_sei_direct(video_path):
             if proto:
                 proto['_frame_idx'] = frame_idx  # save video frame position for timing
                 results.append(proto)
-                if len(results) >= 2000: break
+                # 不提前截断：保证 total 帧数与 timestamp 归一化完整（截断会导致 HUD 时序偏移）
         if is_frame:
             frame_idx += 1
         p += nal_sz
