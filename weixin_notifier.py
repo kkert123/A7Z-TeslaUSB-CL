@@ -467,8 +467,11 @@ class WeixinNotifier:
                 ""
             ]
 
-        # 地点
-        lines.append(f"📍 地点: {location}")
+        # 地点（防御：过滤 home/away/unknown 状态占位符，避免文本推送显示 "away"）
+        loc_text = str(location or '').strip()
+        if loc_text.lower() in ('home', 'away', 'unknown'):
+            loc_text = '未知位置'
+        lines.append(f"📍 地点: {loc_text}")
         
         # 坐标
         if coordinates:

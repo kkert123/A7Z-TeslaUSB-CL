@@ -14,12 +14,14 @@ TeslaUSB-Neo 视频预览/水印模块
 """
 
 import os
+import re
 import subprocess
 import json
 import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple
+from config import PARTITIONS
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
 
@@ -430,47 +432,71 @@ class VideoPreviewGenerator:
         if not key_timestamp:
             key_timestamp = datetime.now()
 
-        # 2) 解析文件夹名获取视频段起始时间
-        folder_name = event_folder.name
-        try:
-            video_start_str = folder_name.replace('_', '-', 2).replace('_', ' ')
-            video_start = datetime.strptime(video_start_str, '%Y-%m-%d-%H-%M-%S')
-        except Exception:
-            logger.warning(f"无法解析文件夹名: {folder_name}")
-            video_start = None
+        # 2) 从文件名解析每个视频段的时间戳，找到包含 key_ts 的段
+        # 文件名格式: 2026-05-19_14-01-47-front.mp4
+        # 文件夹名是结束时间，不可用作偏移基准
+        _VIDEO_TS_RE = re.compile(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z_]+)\.mp4')
+        
+        def _parse_video_ts_file(fname: str) -> Optional[datetime]:
+            m = _VIDEO_TS_RE.match(fname)
+            if not m:
+                return None
+            try:
+                s = m.group(1).replace('_', ' ')
+                return datetime.strptime(s, '%Y-%m-%d %H-%M-%S')
+            except ValueError:
+                return None
 
-        # 3) 查找四个摄像头视频文件
+        # 收集所有视频文件的时间戳（按摄像头分组）
         camera_map = {
             'front': ('前摄像头', False),
             'back': ('后摄像头', False),
             'left': ('左摄像头', True),
             'right': ('右摄像头', True),
         }
+        all_videos_by_cam = {cam: [] for cam in camera_map}
+        for cam_key in camera_map:
+            raw_files = sorted(event_folder.glob(f'*-{cam_key}.mp4'))
+            if not raw_files and cam_key in ('left', 'right'):
+                raw_files = sorted(event_folder.glob(f'*-{cam_key}_repeater.mp4'))
+            for vf in raw_files:
+                ts = _parse_video_ts_file(vf.name)
+                if ts:
+                    all_videos_by_cam[cam_key].append((ts, vf))
 
-        frames = {}  # camera_key -> PIL Image
+        # 3) 对每个摄像头，找到包含 key_timestamp 的视频段，计算偏移
+
+        frames = {}  # camera_key -> (PIL Image, cam_label)
 
         for cam_key, (cam_label, need_flip) in camera_map.items():
-            # 搜索该摄像头的视频文件
-            # 兼容两种名称: left 和 left_repeater
-            video_files = sorted(event_folder.glob(f'*-{cam_key}.mp4'))
-            if not video_files and cam_key in ('left', 'right'):
-                video_files = sorted(event_folder.glob(f'*-{cam_key}_repeater.mp4'))
-            if not video_files:
+            videos = all_videos_by_cam.get(cam_key, [])
+            if not videos:
                 logger.warning(f"未找到 {cam_key} 摄像头视频: {event_folder}")
                 continue
 
-            video_path = video_files[0]
+            # 找到包含 key_timestamp 的视频段 (每段 60s)
+            best_video = None
+            best_offset = 3.0  # fallback
 
-            # 计算关键帧在视频中的时间偏移
-            time_offset = None
-            if video_start and key_timestamp:
-                delta = (key_timestamp - video_start).total_seconds()
-                if delta > 0:
-                    time_offset = delta
+            for v_ts, vf in videos:
+                delta = (key_timestamp - v_ts).total_seconds()
+                if 0 <= delta < 60:
+                    best_video = vf
+                    best_offset = delta
+                    break
+                if delta < 0 and best_video is None:
+                    # key_ts 早于所有视频段，取最早的
+                    best_video = vf
+                    best_offset = 3.0
 
-            # 如果没有有效偏移，默认取第 3 秒
-            if time_offset is None or time_offset < 0:
-                time_offset = 3.0
+            if best_video is None:
+                # 没有精确匹配，取最后一个视频段
+                best_video = videos[-1][1]
+                last_delta = (key_timestamp - videos[-1][0]).total_seconds()
+                best_offset = max(last_delta, 3.0) if last_delta > 0 else 3.0
+
+            video_path = best_video
+            time_offset = best_offset
 
             # 使用 ffmpeg 快速提取帧 (-ss 在 -i 前面)
             try:
@@ -490,15 +516,13 @@ class VideoPreviewGenerator:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                 if proc.returncode == 0:
                     frame = Image.open(tmp_path)
-                    # 左右摄像头水平翻转
                     if need_flip:
                         frame = frame.transpose(Image.FLIP_LEFT_RIGHT)
                     frames[cam_key] = (frame, cam_label)
-                    logger.info(f"提取 {cam_key} 帧成功 (offset={time_offset:.1f}s)")
+                    logger.info(f"提取 {cam_key} 帧成功 (seg={v_ts.strftime('%H:%M:%S') if best_video else '?'} offset={time_offset:.1f}s)")
                 else:
                     logger.warning(f"提取 {cam_key} 帧失败: {proc.stderr[:200]}")
 
-                # 清理临时文件
                 try:
                     os.unlink(tmp_path)
                 except OSError:
@@ -596,8 +620,10 @@ class VideoPreviewGenerator:
             # 时间水印文字
             time_str = key_timestamp.strftime('%Y-%m-%dT%H:%M:%S')
             watermark_lines = [time_str]
-            if location:
-                watermark_lines.append(location)
+            # 防御：过滤 home/away/unknown 等状态占位符（它们不是真实地址）
+            # 防止调用方误传 event.location_status 导致水印显示 "away"
+            if location and str(location).strip().lower() not in ('home', 'away', 'unknown'):
+                watermark_lines.append(str(location).strip())
 
             # 时间数字用 DejaVu（笔画清晰），中文位置用 DroidSans
             try:
@@ -656,7 +682,7 @@ class VideoPreviewGenerator:
             # 8) 保存最终图片
             grid_rgb = grid.convert('RGB')
             output_path = self.output_dir / f"{event_id}_grid_preview.jpg"
-            grid_rgb.save(output_path, 'JPEG', quality=82)
+            grid_rgb.save(output_path, 'JPEG', quality=75)
 
             result['grid_preview'] = output_path
 
@@ -776,7 +802,7 @@ def generate_thumbnail_for_event(folder_type: str, event_id: str) -> dict:
     result = {'success': False, 'thumbnail_path': None, 'error': None}
 
     try:
-        base_cam_path = Path('/media/cnlvan/cam/TeslaCam')
+        base_cam_path = Path(PARTITIONS["cam"]) / "TeslaCam"
         thumb_dir = Path('/opt/teslausb-web/static/thumbnails')
         thumb_dir.mkdir(parents=True, exist_ok=True)
 

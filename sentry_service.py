@@ -300,9 +300,38 @@ class SentryService:
             logger.warning(f"读取 event.json 失败: {event_json_path}: {e}")
             return {}
 
+    # 位置状态占位符：state.value 仅表示 home/away/unknown，不可作为真实地址展示
+    _STATE_PLACEHOLDER_VALUES = ("home", "away", "unknown")
+
+    @classmethod
+    def _sanitize_location_text(cls, location: str) -> Optional[str]:
+        """过滤位置状态占位符，返回可展示的地址文本（无则 None）。
+
+        location 可能来自 event.location_status（"home"/"away"/"unknown"）
+        或真实地址（如 "乐清市象阳高园村"）。状态占位符必须过滤，
+        否则会以 "away" 形式直接写入水印/微信通知。
+        """
+        if not location:
+            return None
+        text = str(location).strip()
+        if not text:
+            return None
+        if text.lower() in cls._STATE_PLACEHOLDER_VALUES:
+            return None
+        return text
+
     def _read_event_location(self, event):
-        """读取 event.json 获取真实位置信息"""
-        real_location = event.location_status
+        """读取 event.json 获取真实位置信息（绝不返回 home/away/unknown 占位符）。
+
+        兜底策略（按优先级）：
+        1. event.json 的 city/street（Tesla 写入的真实地址）
+        2. location_detector 的 raw_location（TeslaMate API 实时地址）
+        3. 中文 "未知位置"
+
+        Returns:
+            (real_location, event_reason, event_coords)
+        """
+        real_location = None
         event_reason = None
         event_coords = None
         try:
@@ -318,7 +347,32 @@ class SentryService:
                 event_reason = ev_data.get('reason')
         except Exception as e:
             logger.warning(f"读取 event.json 失败: {e}")
+
+        # 过滤占位符；event.json 无有效地址时尝试 location_detector 实时地址
+        real_location = self._sanitize_location_text(real_location)
+        if not real_location:
+            real_location = self._fetch_location_detector_address()
+        if not real_location:
+            real_location = "未知位置"
         return real_location, event_reason, event_coords
+
+    def _fetch_location_detector_address(self) -> Optional[str]:
+        """从 location_detector 获取真实地址（raw_location），失败返回 None。
+
+        注意：只取 raw_location（真实地址文本），绝不取 state.value（home/away/unknown）。
+        """
+        try:
+            detector = self.location_detector
+            if detector is None:
+                # 未显式注入时尝试单例（可能已在别处初始化）
+                from location_detector import get_location_detector
+                detector = get_location_detector()
+            info = detector.check_location()
+            if info and hasattr(info, 'raw_location'):
+                return self._sanitize_location_text(info.raw_location)
+        except Exception as e:
+            logger.debug(f"从 location_detector 获取地址失败: {e}")
+        return None
 
     def _on_new_event(self, event):
 

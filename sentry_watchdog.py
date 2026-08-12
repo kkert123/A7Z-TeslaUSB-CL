@@ -470,7 +470,7 @@ class SentryWatchdog:
                 event_folder=event.folder_path,
                 event_id=event.id,
                 timestamp=event.timestamp,
-                location=event.location_status
+                location=self._resolve_event_address(event)
             )
             preview_path = results.get('grid_preview')
             if preview_path:
@@ -480,6 +480,28 @@ class SentryWatchdog:
                 logger.warning(f"四宫格预览图生成失败: {results.get('error', 'unknown')}")
         except Exception as e:
             logger.error(f"生成预览失败: {e}")
+
+    @staticmethod
+    def _resolve_event_address(event: SentryEvent) -> str:
+        """解析事件真实地址用于水印（绝不返回 home/away/unknown 占位符）。
+
+        优先读取 event.json 的 city/street（Tesla 写入的真实地址）；
+        读取失败或无 city 时回退中文"未知位置"。
+        """
+        try:
+            import json
+            event_json_path = event.folder_path / 'event.json'
+            if event_json_path.exists():
+                with open(event_json_path, 'r', encoding='utf-8') as f:
+                    ev_data = json.load(f)
+                city = ev_data.get('city', '')
+                street = ev_data.get('street', '')
+                if city:
+                    addr = f"{city} {street}".strip() if street else city
+                    return addr
+        except Exception:
+            pass
+        return "未知位置"
 
     def confirm_upload(self, event_id: str, confirmation_code: str) -> bool:
         """
