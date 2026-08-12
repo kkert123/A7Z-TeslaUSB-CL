@@ -171,6 +171,32 @@ class Config:
         "lightshow_service.py",
         "wrap_service.py",
         "license_plate_service.py",
+        # ═══ 2026-08-13 M41 修复: 以下文件曾缺失于升级包导致升级自举失败 ═══
+        # 升级/回滚/版本检测核心（routes/system_routes.py import 它们）
+        "upgrade_service.py",
+        "version_service.py",
+        # 风扇控制守护进程（systemd 直接运行该脚本）
+        "fan_control.py",
+        # 部署管理工具（历史包一直包含）
+        "deploy_manager.py",
+        # 模板（v21 及更早的完整包包含，白名单曾遗漏）
+        "templates/boombox.html",
+        "templates/license_plates.html",
+        "templates/lightshow.html",
+        "templates/lockchime.html",
+        "templates/login.html",
+        "templates/media.html",
+        "templates/upload_progress.html",
+        "templates/wraps.html",
+        # static 资源
+        "static/add_to_style.css",
+        "static/app.js",
+        "static/placeholder.svg",
+        # config 补充
+        "config/dashcam.proto",
+        "config/weixin_config.example.json",
+        # 升级公钥（供设备端校验签名使用）
+        "upgrade_key.pub",
     ]
 
     # 部署后需要重启的服务
