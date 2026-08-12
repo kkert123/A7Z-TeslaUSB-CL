@@ -156,6 +156,7 @@ class SentryWatchdog:
         'nas_base_path': '/mnt/nas/TeslaSentry',
         'preview_enabled': True,
         'watermark_enabled': True,
+        'preview_quality': 80,  # 微信推送四宫格 JPEG 质量 (75/80/85/90)
     }
     
     def __init__(self, config: Optional[Dict] = None):
@@ -465,7 +466,10 @@ class SentryWatchdog:
         """生成四宫格预览图（备用，主逻辑在 sentry_service._on_new_event）"""
         try:
             from video_preview import VideoPreviewGenerator
-            generator = VideoPreviewGenerator()
+            generator = VideoPreviewGenerator(
+                watermark_enabled=self.config.get('watermark_enabled', True),
+                preview_quality=self.config.get('preview_quality', 80)
+            )
             results = generator.generate_sentry_grid_preview(
                 event_folder=event.folder_path,
                 event_id=event.id,

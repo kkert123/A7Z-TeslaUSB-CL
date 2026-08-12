@@ -97,6 +97,7 @@ class SentryService:
         # 预览配置
         'preview_enabled': True,
         'watermark_enabled': True,
+        'preview_quality': 80,  # 微信推送四宫格 JPEG 质量 (75/80/85/90)
         
         # 调试
         'debug': False,
@@ -188,7 +189,8 @@ class SentryService:
         
         # 2. 视频预览
         self.preview_generator = VideoPreviewGenerator(
-            watermark_enabled=self.config.get('watermark_enabled', True)
+            watermark_enabled=self.config.get('watermark_enabled', True),
+            preview_quality=self.config.get('preview_quality', 80)
         )
         logger.info("视频预览组件已初始化")
         
@@ -225,6 +227,7 @@ class SentryService:
             'scan_interval_seconds': self.config.get('scan_interval_seconds', 10),
             'preview_enabled': self.config.get('preview_enabled', True),
             'watermark_enabled': self.config.get('watermark_enabled', True),
+            'preview_quality': self.config.get('preview_quality', 80),
             'nas_base_path': self.config.get('nas_base_path'),
             'upload_enabled': self.config.get('upload_enabled', True),
         }

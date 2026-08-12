@@ -8,6 +8,7 @@
   "scan_interval_seconds": 10,
   "preview_enabled": true,
   "watermark_enabled": true,
+  "preview_quality": 80,
   "nas_base_path": "/mnt/nas/TeslaSentry",
   "upload_enabled": false,
   "teslamate_url": "",

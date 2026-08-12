@@ -312,6 +312,23 @@
         <span id="thumb-reset-status" style="font-size:0.7rem;color:var(--text-muted)"></span>
       </div>
     </div>
+
+    <!-- 哨兵预览设置 (v0.3.1.23) -->
+    <div style="padding-top:10px;border-top:0.5px solid var(--border)">
+      <div style="font-size:0.8rem;font-weight:600;margin-bottom:6px">哨兵预览设置</div>
+      <div class="btn-row">
+        <select id="preview-quality" style="padding:4px 6px;font-size:0.75rem;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">
+          <option value="75">75（省体积）</option>
+          <option value="80">80（推荐）</option>
+          <option value="85">85（更清晰）</option>
+          <option value="90">90（最高）</option>
+        </select>
+        <span style="font-size:0.75rem;color:var(--text-muted)">微信推送图质量</span>
+        <button id="preview-config-save" class="btn btn-primary btn-sm" onclick="savePreviewConfig()">保存</button>
+        <span id="preview-config-status" style="font-size:0.7rem;color:var(--text-muted)"></span>
+      </div>
+      <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">保存后需重启哨兵服务生效</div>
+    </div>
   </div>
 </div>
 
@@ -911,6 +928,40 @@ function saveThumbReset() {
   setTimeout(() => el.textContent = '', 3000);
 }
 
+// ═══ Sentry preview config (v0.3.1.23) ═══
+function loadPreviewConfig() {
+  fetch('/api/sentry/preview-config')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success) return;
+      var sel = document.getElementById('preview-quality');
+      if (sel && d.preview_quality) sel.value = String(d.preview_quality);
+    })
+    .catch(() => {});
+}
+function savePreviewConfig() {
+  var sel = document.getElementById('preview-quality');
+  var st = document.getElementById('preview-config-status');
+  var q = parseInt(sel.value) || 80;
+  st.textContent = '保存中...'; st.style.display = 'inline'; st.style.color = 'var(--text-muted)';
+  fetch('/api/sentry/preview-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preview_quality: q })
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.success) {
+        st.textContent = '已保存 (q' + d.preview_quality + ')，重启哨兵服务生效'; st.style.color = 'var(--success)';
+        sel.value = String(d.preview_quality);
+      } else {
+        st.textContent = d.error || '保存失败'; st.style.color = 'var(--danger)';
+      }
+      setTimeout(() => st.textContent = '', 5000);
+    })
+    .catch(() => { st.textContent = '保存失败（网络错误）'; st.style.color = 'var(--danger)'; });
+}
+
 // ═══ Version management ═══
 function checkVersionNow() {
   var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status');
@@ -1059,7 +1110,7 @@ function clearGithubToken() {
 
 // ═══ Init ═══
 loadSystemInfo(); loadModeDisplay(); loadAutoPresentConfig(); load挂载点Status(); loadSummary();
-loadWecomConfig(); loadPushHealth(); loadServices(); loadThumbResetConfig(); loadFanCurve(); loadGithubToken();
+loadWecomConfig(); loadPushHealth(); loadServices(); loadThumbResetConfig(); loadFanCurve(); loadGithubToken(); loadPreviewConfig();
 loadPowerStatus();
 setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500); setTimeout(loadChangelogList, 2000);
 setInterval(loadPowerStatus, 60000);  // 每 60 秒刷新位置状态

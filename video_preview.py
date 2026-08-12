@@ -99,7 +99,8 @@ class VideoPreviewGenerator:
     
     def __init__(self, output_dir: Optional[Path] = None,
                  font_path: Optional[Path] = None,
-                 watermark_enabled: bool = True):
+                 watermark_enabled: bool = True,
+                 preview_quality: int = 80):
         """
         初始化预览生成器
         
@@ -107,12 +108,14 @@ class VideoPreviewGenerator:
             output_dir: 输出目录
             font_path: 字体文件路径
             watermark_enabled: 是否启用水印
+            preview_quality: 微信推送四宫格 JPEG 质量（75/80/85/90）
         """
         self.output_dir = output_dir or Path('/opt/teslausb-web/data/previews')
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.font_path = font_path
         self.watermark_enabled = watermark_enabled
+        self.preview_quality = preview_quality
         
         # 查找可用字体
         self._font = None
@@ -614,75 +617,76 @@ class VideoPreviewGenerator:
             target_h = int(grid_h * target_w / grid_w)
             grid = grid.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-            # 7) 缩放后绘制右下角时间水印 (确保清晰)
-            draw = ImageDraw.Draw(grid)
+            # 7) 缩放后绘制右下角时间水印 (确保清晰) — 受 watermark_enabled 控制
+            if self.watermark_enabled:
+                draw = ImageDraw.Draw(grid)
 
-            # 时间水印文字
-            time_str = key_timestamp.strftime('%Y-%m-%dT%H:%M:%S')
-            watermark_lines = [time_str]
-            # 防御：过滤 home/away/unknown 等状态占位符（它们不是真实地址）
-            # 防止调用方误传 event.location_status 导致水印显示 "away"
-            if location and str(location).strip().lower() not in ('home', 'away', 'unknown'):
-                watermark_lines.append(str(location).strip())
+                # 时间水印文字
+                time_str = key_timestamp.strftime('%Y-%m-%dT%H:%M:%S')
+                watermark_lines = [time_str]
+                # 防御：过滤 home/away/unknown 等状态占位符（它们不是真实地址）
+                # 防止调用方误传 event.location_status 导致水印显示 "away"
+                if location and str(location).strip().lower() not in ('home', 'away', 'unknown'):
+                    watermark_lines.append(str(location).strip())
 
-            # 时间数字用 DejaVu（笔画清晰），中文位置用 DroidSans
-            try:
-                time_font = ImageFont.truetype(
-                    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 36
+                # 时间数字用 DejaVu（笔画清晰），中文位置用 DroidSans
+                try:
+                    time_font = ImageFont.truetype(
+                        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 36
+                    )
+                    cn_font = ImageFont.truetype(
+                        '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf', 36
+                    )
+                except Exception:
+                    time_font = self._font or ImageFont.load_default()
+                    cn_font = time_font
+
+                wm_margin = 16
+                wm_padding = 10
+                line_spacing = 6
+
+                # 计算水印区域尺寸
+                total_text_height = 0
+                max_text_width = 0
+                for i, line in enumerate(watermark_lines):
+                    # 时间行用 DejaVu，位置行用中文字体
+                    font = time_font if i == 0 else cn_font
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                    max_text_width = max(max_text_width, tw)
+                    total_text_height += th + line_spacing
+                total_text_height -= line_spacing  # 最后一行不需要额外间距
+
+                box_w = max_text_width + wm_padding * 2
+                box_h = total_text_height + wm_padding * 2
+                wm_x = target_w - box_w - wm_margin
+                wm_y = target_h - box_h - wm_margin
+
+                # 半透明背景
+                overlay = Image.new('RGBA', grid.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle(
+                    [wm_x, wm_y, wm_x + box_w, wm_y + box_h],
+                    fill=(0, 0, 0, 170)
                 )
-                cn_font = ImageFont.truetype(
-                    '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf', 36
-                )
-            except Exception:
-                time_font = self._font or ImageFont.load_default()
-                cn_font = time_font
+                grid = Image.alpha_composite(grid.convert('RGBA'), overlay)
+                draw = ImageDraw.Draw(grid)
 
-            wm_margin = 16
-            wm_padding = 10
-            line_spacing = 6
+                # 绘制时间水印文字（时间用 DejaVu，位置用中文字体）
+                text_y = wm_y + wm_padding
+                for i, line in enumerate(watermark_lines):
+                    font = time_font if i == 0 else cn_font
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    th = bbox[3] - bbox[1]
+                    draw.text((wm_x + wm_padding, text_y), line,
+                              fill=(255, 255, 255), font=font)
+                    text_y += th + line_spacing
 
-            # 计算水印区域尺寸
-            total_text_height = 0
-            max_text_width = 0
-            for i, line in enumerate(watermark_lines):
-                # 时间行用 DejaVu，位置行用中文字体
-                font = time_font if i == 0 else cn_font
-                bbox = draw.textbbox((0, 0), line, font=font)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
-                max_text_width = max(max_text_width, tw)
-                total_text_height += th + line_spacing
-            total_text_height -= line_spacing  # 最后一行不需要额外间距
-
-            box_w = max_text_width + wm_padding * 2
-            box_h = total_text_height + wm_padding * 2
-            wm_x = target_w - box_w - wm_margin
-            wm_y = target_h - box_h - wm_margin
-
-            # 半透明背景
-            overlay = Image.new('RGBA', grid.size, (0, 0, 0, 0))
-            overlay_draw = ImageDraw.Draw(overlay)
-            overlay_draw.rectangle(
-                [wm_x, wm_y, wm_x + box_w, wm_y + box_h],
-                fill=(0, 0, 0, 170)
-            )
-            grid = Image.alpha_composite(grid.convert('RGBA'), overlay)
-            draw = ImageDraw.Draw(grid)
-
-            # 绘制时间水印文字（时间用 DejaVu，位置用中文字体）
-            text_y = wm_y + wm_padding
-            for i, line in enumerate(watermark_lines):
-                font = time_font if i == 0 else cn_font
-                bbox = draw.textbbox((0, 0), line, font=font)
-                th = bbox[3] - bbox[1]
-                draw.text((wm_x + wm_padding, text_y), line,
-                          fill=(255, 255, 255), font=font)
-                text_y += th + line_spacing
-
-            # 8) 保存最终图片
+            # 8) 保存最终图片（质量受 preview_quality 控制，默认 80）
             grid_rgb = grid.convert('RGB')
             output_path = self.output_dir / f"{event_id}_grid_preview.jpg"
-            grid_rgb.save(output_path, 'JPEG', quality=75)
+            grid_rgb.save(output_path, 'JPEG', quality=self.preview_quality)
 
             result['grid_preview'] = output_path
 

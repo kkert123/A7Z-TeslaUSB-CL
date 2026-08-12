@@ -724,6 +724,75 @@ def api_version_token():
     })
 
 
+# 哨兵预览图配置（JPEG 质量）—— 允许值白名单，非法值回退默认 80
+_PREVIEW_QUALITY_ALLOWED = {75, 80, 85, 90}
+_PREVIEW_QUALITY_DEFAULT = 80
+
+
+@system_bp.route('/api/sentry/preview-config', methods=['GET', 'POST'])
+def api_sentry_preview_config():
+    """读取/保存哨兵预览图 JPEG 质量配置（写入 config/sentry.json）"""
+    cfg_path = getattr(config, 'SENTRY_CONFIG_FILE', '') or '/opt/radxa_data/teslausb/config/sentry.json'
+
+    if request.method == 'GET':
+        quality = _PREVIEW_QUALITY_DEFAULT
+        watermark = True
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path) as f:
+                    cfg = json.load(f)
+                quality = cfg.get('preview_quality', _PREVIEW_QUALITY_DEFAULT)
+                watermark = bool(cfg.get('watermark_enabled', True))
+            except (json.JSONDecodeError, IOError):
+                pass
+        # 读取时也做白名单校验（配置文件可能被手工改坏）
+        if quality not in _PREVIEW_QUALITY_ALLOWED:
+            quality = _PREVIEW_QUALITY_DEFAULT
+        return jsonify({
+            'success': True,
+            'preview_quality': quality,
+            'watermark_enabled': watermark,
+            'allowed': sorted(_PREVIEW_QUALITY_ALLOWED)
+        })
+
+    data = request.get_json(silent=True) or {}
+    quality = data.get('preview_quality', _PREVIEW_QUALITY_DEFAULT)
+    # 白名单校验：非法值回退默认，绝不接受任意数值
+    if quality not in _PREVIEW_QUALITY_ALLOWED:
+        quality = _PREVIEW_QUALITY_DEFAULT
+
+    cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    cfg['preview_quality'] = quality
+    if 'watermark_enabled' in data:
+        cfg['watermark_enabled'] = bool(data['watermark_enabled'])
+
+    import tempfile
+    cfg_dir = os.path.dirname(cfg_path)
+    os.makedirs(cfg_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=cfg_dir, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, cfg_path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return jsonify({'success': False, 'error': '配置文件写入失败'}), 500
+
+    return jsonify({
+        'success': True,
+        'preview_quality': quality,
+        'message': f'已保存，重启哨兵服务后生效 (质量={quality})'
+    })
+
+
 def _schedule_restart():
     """延迟 1 秒后重启服务（后台线程，不阻塞 HTTP 响应）"""
     import threading, time as _time
