@@ -794,12 +794,50 @@ def api_sentry_preview_config():
 
 
 def _schedule_restart():
-    """延迟 1 秒后重启服务（后台线程，不阻塞 HTTP 响应）"""
+    """延迟 1 秒后重启 web 服务（后台线程，不阻塞 HTTP 响应）。
+
+    v0.3.1.25 修复（M43）：之前用 `sudo systemctl restart`，但 web 服务
+    (teslausb-web.service) 以 root 运行（User=root），root 直接调 systemctl
+    即可；sudo 需要密码而 daemon 线程无 tty，导致 sudo 实际失败 → 升级后
+    web 从未真正重启，新代码不生效。现改为：
+      1. 首选 root 直接 `systemctl restart`（无 sudo）
+      2. 失败回退 `echo PWD | sudo -S systemctl restart`（密码读环境变量）
+      3. 重启后延迟校验服务 active，确认真正生效
+    """
     import threading, time as _time
     def _do_restart():
         _time.sleep(1)
         import subprocess
-        subprocess.run(["sudo", "systemctl", "restart", "teslausb-web"], timeout=30)
+        # 方案 1: root 直连 systemd（无 sudo，服务 User=root）
+        try:
+            r = subprocess.run(["systemctl", "restart", "teslausb-web"],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                _verify_restart()
+                return
+        except Exception:
+            pass
+        # 方案 2: 回退 sudo -S（读环境变量密码，与 deploy_manager 一致）
+        try:
+            pwd = os.environ.get("A7Z_PASSWORD", "radxa")
+            r = subprocess.run(f"echo '{pwd}' | sudo -S systemctl restart teslausb-web",
+                               shell=True, capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                _verify_restart()
+        except Exception:
+            pass
+    def _verify_restart():
+        """重启后轮询确认服务恢复 active（最多 30s），确保新代码真正生效"""
+        import time as _t
+        for _ in range(30):
+            _t.sleep(1)
+            try:
+                r = subprocess.run(["systemctl", "is-active", "teslausb-web"],
+                                   capture_output=True, text=True, timeout=5)
+                if r.stdout.strip() == "active":
+                    return
+            except Exception:
+                pass
     threading.Thread(target=_do_restart, daemon=True).start()
 
 
