@@ -747,28 +747,170 @@ def set_ap_force_mode(mode: str) -> dict:
         return {"success": False, "message": f"设置 AP 模式失败: {e}"}
 
 
-def start_ap() -> dict:
-    """手动启动 AP"""
+# AP 静态 IP 与子网（与 ap_control.sh 保持一致）
+AP_STATIC_IP = "192.168.42.1"
+
+
+def _write_hostapd_conf() -> bool:
+    """按当前 AP 配置重写 /etc/hostapd/hostapd.conf，返回是否成功。
+
+    始终重写（而非仅在文件缺失时生成），避免旧配置残留旧 SSID/密码，
+    导致用户改过的 AP 名称不生效。
+    """
+    config = get_ap_config()
+    ssid = config.get("ssid", "TeslaUSB-Setup")
+    passphrase = config.get("passphrase", "teslausb123")
+    # hostapd 要求 WPA 密码 8-63 字符，过短会导致 hostapd 启动失败 → AP 无法广播
+    if not passphrase or len(passphrase) < 8:
+        passphrase = "teslausb123"
+
+    conf = f"""interface=wlan0
+driver=nl80211
+ssid={ssid}
+hw_mode=g
+channel=6
+wmm_enabled=0
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=2
+wpa_passphrase={passphrase}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=TKIP
+rsn_pairwise=CCMP
+"""
     try:
+        with open("/tmp/hostapd.conf.tmp", "w") as f:
+            f.write(conf)
+        # 确保目录存在后再拷贝（/etc/hostapd 可能不存在）
         subprocess.run(
+            ["sudo", "-n", "mkdir", "-p", "/etc/hostapd"],
+            capture_output=True, timeout=10,
+        )
+        r = subprocess.run(
+            ["sudo", "-n", "cp", "/tmp/hostapd.conf.tmp", "/etc/hostapd/hostapd.conf"],
+            capture_output=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            os.unlink("/tmp/hostapd.conf.tmp")
+        except Exception:
+            pass
+
+
+def _ap_bring_up() -> Tuple[bool, str]:
+    """完整启动 AP 热点（对齐 ap_control.sh，补齐原实现缺失的关键步骤）。
+
+    关键：必须先释放 NetworkManager/wpa_supplicant 对 wlan0 的 station 管控，
+    否则 hostapd 无法把 wlan0 切换到 AP(master) 模式，导致 AP 不广播、手机搜不到。
+    """
+    try:
+        # 1) 释放 station 管控 + 停止 wpa_supplicant（避免与 hostapd 争抢 wlan0）
+        subprocess.run(
+            ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "no"],
+            capture_output=True, text=True, timeout=10,
+        )
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "stop", "wpa_supplicant"],
+            capture_output=True, text=True, timeout=10,
+        )
+
+        # 2) 重写 hostapd.conf（始终按当前 AP 配置）
+        _write_hostapd_conf()
+
+        # 3) 启动 hostapd（把 wlan0 置为 AP 模式并广播 SSID）
+        r_hap = subprocess.run(
             ["sudo", "-n", "systemctl", "start", "hostapd"],
             capture_output=True, text=True, timeout=30,
         )
-        return {"success": True, "message": "AP 已启动"}
+        time.sleep(2)
+
+        # 4) 静态 IP
+        subprocess.run(
+            ["sudo", "-n", "ip", "addr", "add", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
+            capture_output=True, text=True, timeout=10,
+        )
+
+        # 5) dnsmasq DHCP（网段前缀按 AP 静态 IP 推导，避免字符串替换陷阱）
+        _ap_prefix = ".".join(AP_STATIC_IP.split(".")[:3])
+        dnsmasq_conf = (
+            "interface=wlan0\n"
+            f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
+            f"dhcp-option=3,{AP_STATIC_IP}\n"
+            f"dhcp-option=6,{AP_STATIC_IP}\n"
+        )
+        try:
+            with open("/tmp/ap-dnsmasq.conf.tmp", "w") as f:
+                f.write(dnsmasq_conf)
+            subprocess.run(
+                ["sudo", "-n", "mkdir", "-p", "/etc/dnsmasq.d"],
+                capture_output=True, timeout=10,
+            )
+            subprocess.run(
+                ["sudo", "-n", "cp", "/tmp/ap-dnsmasq.conf.tmp", "/etc/dnsmasq.d/ap.conf"],
+                capture_output=True, timeout=10,
+            )
+        finally:
+            try:
+                os.unlink("/tmp/ap-dnsmasq.conf.tmp")
+            except Exception:
+                pass
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", "dnsmasq"],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        # 6) 校验 hostapd 是否真的起来
+        verify = subprocess.run(
+            ["systemctl", "is-active", "hostapd"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if verify.stdout.strip() == "active":
+            return True, "AP 已启动"
+        return False, f"hostapd 未 active: {(r_hap.stderr or '').strip()[:200]}"
     except Exception as e:
-        return {"success": False, "message": f"启动 AP 失败: {e}"}
+        return False, f"启动 AP 失败: {e}"
 
 
-def stop_ap() -> dict:
-    """手动停止 AP"""
+def _ap_bring_down() -> Tuple[bool, str]:
+    """完整关闭 AP 并恢复 wlan0 的 station 模式（对齐 ap_control.sh stop_ap）。"""
     try:
         subprocess.run(
             ["sudo", "-n", "systemctl", "stop", "hostapd"],
             capture_output=True, text=True, timeout=30,
         )
-        return {"success": True, "message": "AP 已停止"}
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
+            capture_output=True, text=True, timeout=30,
+        )
+        # 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
+        subprocess.run(
+            ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # 重启 NetworkManager：交还 wlan0 管理权并触发自动重连（最可靠的恢复方式）
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", "NetworkManager"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return True, "AP 已停止"
     except Exception as e:
-        return {"success": False, "message": f"停止 AP 失败: {e}"}
+        return False, f"停止 AP 失败: {e}"
+
+
+def start_ap() -> dict:
+    """手动启动 AP（完整 bring-up）"""
+    ok, msg = _ap_bring_up()
+    return {"success": ok, "message": msg}
+
+
+def stop_ap() -> dict:
+    """手动停止 AP（完整 bring-down + 恢复 station）"""
+    ok, msg = _ap_bring_down()
+    return {"success": ok, "message": msg}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -916,9 +1058,30 @@ class WifiSmartSwitch:
             pass
         return ""
 
+    def _wifi_associated(self) -> bool:
+        """检查 wlan0 是否已关联并拿到 IPv4 地址。
+
+        用于避免 Tailscale(tailscale0)/以太网等其它接口仍可通时，误判"WiFi 正常"，
+        导致断网后既不重连也不开启 AP。探测失败时返回 True，回退到纯 ping 判定，避免误伤。
+        """
+        try:
+            r = subprocess.run(
+                ["ip", "-4", "addr", "show", "dev", "wlan0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                return False
+            return re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", r.stdout) is not None
+        except Exception:
+            return True
+
     def _check_connectivity(self) -> bool:
         """并行 ping 3 个目标，任一成功即视为网络正常"""
         from subprocess import Popen, DEVNULL
+
+        # WiFi 关联性前置检查：wlan0 无 IP 时直接判为断网（见 _wifi_associated 说明）
+        if not self._wifi_associated():
+            return False
 
         processes = []
         for target in CONNECTIVITY_TARGETS:
@@ -1045,11 +1208,19 @@ class WifiSmartSwitch:
         self.log.info("正在切换到WiFi: %s", ssid)
 
         # 🔧 检查是否已连接目标 SSID，避免不必要的断连
-        current_ssid = get_current_wifi_ssid()
+        # 原代码误用未定义的 get_current_wifi_ssid()，会抛 NameError 导致整个
+        # 重连链路崩溃（这正是"断网后无法自动重连"的直接根因）。
+        current_ssid = self._get_current_ssid()
         if current_ssid and current_ssid == ssid:
-            self.log.info("已在目标网络 %s，跳过切换", ssid)
-            self._save_switch_time()
-            return True
+            # 已关联到目标 SSID，但若连通性仍异常（典型场景：车机热点网段变更后，
+            # wlan0 仍在 L2 关联，却持有旧子网的 IP/默认路由，L3 不通），
+            # 直接跳过会导致 DHCP 租约与默认路由永不刷新 → 永远无法真正恢复联网。
+            # 此时必须强制重连以刷新 DHCP，不能跳过。
+            if self._check_connectivity():
+                self.log.info("已在目标网络 %s 且连通正常，跳过切换", ssid)
+                self._save_switch_time()
+                return True
+            self.log.info("已关联 %s 但连通异常（疑似网段变更/旧租约），强制重连刷新 DHCP", ssid)
 
         # 断开当前连接
         try:
@@ -1097,7 +1268,7 @@ class WifiSmartSwitch:
                 pass
             self.log.info("网络正常")
 
-            # 如果 AP 正在运行，自动关闭
+            # 如果 AP 正在运行，自动关闭（并恢复 wlan0 的 station 模式）
             try:
                 force_mode = get_ap_force_mode()
                 if force_mode != "force-on":
@@ -1107,15 +1278,8 @@ class WifiSmartSwitch:
                     )
                     if result.stdout.strip() == "active":
                         self.log.info("WiFi 已恢复，关闭 AP 热点...")
-                        subprocess.run(
-                            ["sudo", "-n", "systemctl", "stop", "hostapd"],
-                            capture_output=True, text=True, timeout=30,
-                        )
-                        subprocess.run(
-                            ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
-                            capture_output=True, text=True, timeout=30,
-                        )
-                        self.log.info("AP 热点已关闭")
+                        ok, msg = _ap_bring_down()
+                        self.log.info("AP 热点关闭结果: %s", msg if not ok else "已关闭")
             except Exception:
                 pass
 
@@ -1227,7 +1391,7 @@ class WifiSmartSwitch:
             return []
 
     def _start_ap_fallback(self) -> None:
-        """当所有 WiFi 不可用时自动启用 AP 热点"""
+        """当所有 WiFi 不可用时自动启用 AP 热点（复用完整 bring-up 流程）"""
         try:
             force_mode = get_ap_force_mode()
             if force_mode == "force-off":
@@ -1243,52 +1407,14 @@ class WifiSmartSwitch:
                 self.log.info("AP 已运行")
                 return
 
-            # 确保 hostapd 配置文件存在
-            if not os.path.exists("/etc/hostapd/hostapd.conf"):
-                self._generate_hostapd_conf()
-
-            # 启动 hostapd + dnsmasq
             self.log.info("正在启动 AP 热点...")
-            subprocess.run(
-                ["sudo", "-n", "systemctl", "start", "hostapd"],
-                capture_output=True, text=True, timeout=30,
-            )
-            subprocess.run(
-                ["sudo", "-n", "systemctl", "start", "dnsmasq"],
-                capture_output=True, text=True, timeout=30,
-            )
-            self.log.info("AP 热点已启动 (SSID: %s)", get_ap_config().get("ssid", "TeslaUSB-Setup"))
+            ok, msg = _ap_bring_up()
+            if ok:
+                self.log.info("AP 热点已启动 (SSID: %s)", get_ap_config().get("ssid", "TeslaUSB-Setup"))
+            else:
+                self.log.error("AP 启动失败: %s", msg)
         except Exception as e:
             self.log.error("启动 AP 失败: %s", e)
-
-    def _generate_hostapd_conf(self) -> None:
-        """生成 hostapd 配置文件"""
-        config = get_ap_config()
-        ssid = config.get("ssid", "TeslaUSB-Setup")
-        passphrase = config.get("passphrase", "teslausb123")
-
-        conf = f"""interface=wlan0
-driver=nl80211
-ssid={ssid}
-hw_mode=g
-channel=6
-wmm_enabled=0
-macaddr_acl=0
-auth_algs=1
-ignore_broadcast_ssid=0
-wpa=2
-wpa_passphrase={passphrase}
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
-rsn_pairwise=CCMP
-"""
-        with open("/tmp/hostapd.conf.tmp", "w") as f:
-            f.write(conf)
-        subprocess.run(
-            ["sudo", "-n", "cp", "/tmp/hostapd.conf.tmp", "/etc/hostapd/hostapd.conf"],
-            capture_output=True, timeout=10,
-        )
-        os.unlink("/tmp/hostapd.conf.tmp")
 
     # ── 入口 ──
 
