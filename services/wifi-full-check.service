@@ -1,0 +1,10 @@
+[Unit]
+Description=WiFi Full Check Service (Python)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/radxa_data/teslausb/wifi_service.py --full
+StandardOutput=journal
+StandardError=journal

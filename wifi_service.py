@@ -1475,6 +1475,7 @@ def ensure_smart_switch_timers() -> dict:
     """确保 WiFi 智能切换 systemd timer 已部署并启用（幂等自愈）。
 
     步骤：
+      0. 同步 .service 单元（timer 的触发目标；仅复制，不 enable，oneshot 无需 enable）
       1. 从应用目录 services/ 复制 timer 到 /etc/systemd/system/（缺失或内容不一致时）
       2. daemon-reload
       3. enable（未启用时）并 start（未激活时，立即触发一次检查）
@@ -1483,7 +1484,24 @@ def ensure_smart_switch_timers() -> dict:
     results = {}
     for timer_name in ("wifi-quick-check", "wifi-full-check"):
         entry = {"enabled": False, "started": False, "action": "none"}
+        _unit_changed = False
         try:
+            # 0) 同步 .service 单元：若缺失或内容不一致则复制（否则 timer 触发会失败）
+            svc_src = os.path.join(TIMER_SRC_DIR, f"{timer_name}.service")
+            svc_dst = os.path.join(TIMER_DST_DIR, f"{timer_name}.service")
+            if os.path.exists(svc_src):
+                svc_diff = True
+                if os.path.exists(svc_dst):
+                    try:
+                        with open(svc_src, "rb") as f1, open(svc_dst, "rb") as f2:
+                            svc_diff = f1.read() != f2.read()
+                    except Exception:
+                        svc_diff = True
+                if svc_diff:
+                    _sudo(["cp", svc_src, svc_dst])
+                    entry["action"] = "svc-copied"
+                    _unit_changed = True
+
             src = os.path.join(TIMER_SRC_DIR, f"{timer_name}.timer")
             dst = os.path.join(TIMER_DST_DIR, f"{timer_name}.timer")
 
@@ -1506,9 +1524,11 @@ def ensure_smart_switch_timers() -> dict:
             if need_copy:
                 _sudo(["cp", src, dst])
                 entry["action"] = "copied"
+                _unit_changed = True
 
-            # 3) 重载 systemd 单元定义
-            _sudo(["systemctl", "daemon-reload"])
+            # 3) 仅当单元文件有变化才重载 systemd 定义（避免每次无谓 daemon-reload）
+            if _unit_changed:
+                _sudo(["systemctl", "daemon-reload"])
 
             # 4) 启用（is-enabled 为 disabled/static 时执行 enable，并校验返回码）
             r = subprocess.run(
