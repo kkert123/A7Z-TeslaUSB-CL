@@ -744,7 +744,10 @@ class SentryWatchdog:
     def _monitor_loop(self):
         """监控线程循环"""
         logger.info("监控线程启动")
-        
+
+        # WiFi 智能切换 timer 自愈计数（每 30 次扫描 ≈ 5 分钟检查一次）
+        _timer_selfheal_count = 0
+
         while self._running:
             try:
                 # 扫描新事件
@@ -760,6 +763,13 @@ class SentryWatchdog:
 
                 # 定期保存状态
                 self._save_state()
+
+                # WiFi 智能切换 timer 自愈：timer 一旦失效（曾被禁用/文件丢失），
+                # 自动重连与 AP 兜底会完全失效（设备曾自 7/25 起 26 天未运行）。
+                _timer_selfheal_count += 1
+                if _timer_selfheal_count >= 30:
+                    _timer_selfheal_count = 0
+                    self._selfheal_wifi_timers()
                 
             except Exception as e:
                 logger.error(f"监控线程异常: {e}")
@@ -768,6 +778,24 @@ class SentryWatchdog:
             time.sleep(self.config['scan_interval_seconds'])
         
         logger.info("监控线程停止")
+
+    def _selfheal_wifi_timers(self):
+        """自愈 WiFi 智能切换 systemd timer（幂等）。
+
+        若 wifi-quick-check.timer / wifi-full-check.timer 缺失或未启用，
+        则从应用目录部署并 enable --now，恢复自动重连与 AP 兜底能力。
+        """
+        try:
+            from wifi_service import ensure_smart_switch_timers
+            results = ensure_smart_switch_timers()
+            for name, st in results.items():
+                action = st.get('action', 'none')
+                if action not in ('none', 'src-missing'):
+                    logger.warning(f"WiFi timer 自愈 {name}: action={action}")
+                elif not st.get('enabled') or not st.get('started'):
+                    logger.info(f"WiFi timer 状态 {name}: {st}")
+        except Exception as e:
+            logger.warning(f"WiFi timer 自愈失败: {e}")
     
     def _check_expired_events(self):
         """检查并处理超时事件"""

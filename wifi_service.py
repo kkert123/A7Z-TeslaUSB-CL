@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 from datetime import datetime
 from ipaddress import ip_address, IPv4Address, IPv6Address
@@ -835,12 +836,14 @@ def _ap_bring_up() -> Tuple[bool, str]:
         )
 
         # 5) dnsmasq DHCP（网段前缀按 AP 静态 IP 推导，避免字符串替换陷阱）
+        #    port=0：dnsmasq 仅做 DHCP 不做 DNS —— 设备上 53 端口被 systemd-resolved
+        #    占用导致 dnsmasq 启动失败（曾使 AP 完全不可用），纯 DHCP 可绕开冲突。
         _ap_prefix = ".".join(AP_STATIC_IP.split(".")[:3])
         dnsmasq_conf = (
+            "port=0\n"
             "interface=wlan0\n"
             f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
             f"dhcp-option=3,{AP_STATIC_IP}\n"
-            f"dhcp-option=6,{AP_STATIC_IP}\n"
         )
         try:
             with open("/tmp/ap-dnsmasq.conf.tmp", "w") as f:
@@ -858,10 +861,12 @@ def _ap_bring_up() -> Tuple[bool, str]:
                 os.unlink("/tmp/ap-dnsmasq.conf.tmp")
             except Exception:
                 pass
-        subprocess.run(
+        r_dns = subprocess.run(
             ["sudo", "-n", "systemctl", "restart", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
         )
+        if r_dns.returncode != 0:
+            print(f"[AP] dnsmasq 重启失败: {(r_dns.stderr or '').strip()[:200]}", file=sys.stderr)
 
         # 6) 校验 hostapd 是否真的起来
         verify = subprocess.run(
@@ -889,6 +894,12 @@ def _ap_bring_down() -> Tuple[bool, str]:
         # 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
         subprocess.run(
             ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # 删除 AP 的 dnsmasq 配置：避免下次开机 dnsmasq（系统 enabled）自动带起
+        # 在 wlan0 上的 DHCP 服务，干扰正常 station 模式的网络。
+        subprocess.run(
+            ["sudo", "-n", "rm", "-f", "/etc/dnsmasq.d/ap.conf"],
             capture_output=True, text=True, timeout=10,
         )
         # 重启 NetworkManager：交还 wlan0 管理权并触发自动重连（最可靠的恢复方式）
@@ -1440,6 +1451,97 @@ def run_smart_switch(mode: str) -> int:
     """CLI 入口函数"""
     switcher = WifiSmartSwitch()
     return switcher.run(mode)
+
+
+# ─────────────────────────────────────────────
+# WiFi 智能切换 timer 自愈（v0.3.1.27）
+# ─────────────────────────────────────────────
+# 背景：wifi-quick-check.timer / wifi-full-check.timer 若被禁用或文件丢失，
+# 自动重连与 AP 兜底将完全失效（设备曾因此自 2026-07-25 起智能切换从未运行，
+# 断网 210 分钟既未切到家里 WiFi 也未开 AP）。
+TIMER_SRC_DIR = "/opt/radxa_data/teslausb/services"
+TIMER_DST_DIR = "/etc/systemd/system"
+
+
+def _sudo(cmd: list) -> subprocess.CompletedProcess:
+    """统一提权执行（与模块内其它命令一致：sudo -n；root 下等效直接执行）"""
+    return subprocess.run(
+        ["sudo", "-n"] + cmd,
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def ensure_smart_switch_timers() -> dict:
+    """确保 WiFi 智能切换 systemd timer 已部署并启用（幂等自愈）。
+
+    步骤：
+      1. 从应用目录 services/ 复制 timer 到 /etc/systemd/system/（缺失或内容不一致时）
+      2. daemon-reload
+      3. enable（未启用时）并 start（未激活时，立即触发一次检查）
+    返回 {timer_name: {enabled, started, action}}，任何异常不向上抛出。
+    """
+    results = {}
+    for timer_name in ("wifi-quick-check", "wifi-full-check"):
+        entry = {"enabled": False, "started": False, "action": "none"}
+        try:
+            src = os.path.join(TIMER_SRC_DIR, f"{timer_name}.timer")
+            dst = os.path.join(TIMER_DST_DIR, f"{timer_name}.timer")
+
+            # 1) 源文件不存在则跳过（应用目录未部署，等升级包带上）
+            if not os.path.exists(src):
+                entry["action"] = "src-missing"
+                results[timer_name] = entry
+                continue
+
+            # 2) 目标缺失或内容不一致 → 复制
+            need_copy = False
+            if not os.path.exists(dst):
+                need_copy = True
+            else:
+                try:
+                    with open(src, "rb") as f1, open(dst, "rb") as f2:
+                        need_copy = f1.read() != f2.read()
+                except Exception:
+                    need_copy = True
+            if need_copy:
+                _sudo(["cp", src, dst])
+                entry["action"] = "copied"
+
+            # 3) 重载 systemd 单元定义
+            _sudo(["systemctl", "daemon-reload"])
+
+            # 4) 启用（is-enabled 为 disabled/static 时执行 enable，并校验返回码）
+            r = subprocess.run(
+                ["systemctl", "is-enabled", f"{timer_name}.timer"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.stdout.strip() != "enabled":
+                r_en = _sudo(["systemctl", "enable", f"{timer_name}.timer"])
+                if r_en.returncode != 0:
+                    entry["action"] = f"enable-failed: {(r_en.stderr or '').strip()[:100]}"
+                    results[timer_name] = entry
+                    continue
+                entry["action"] = entry["action"] if entry["action"] != "none" else "enabled"
+            entry["enabled"] = True
+
+            # 5) 启动（未激活时 start，立即触发一次检查；校验返回码）
+            r = subprocess.run(
+                ["systemctl", "is-active", f"{timer_name}.timer"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.stdout.strip() != "active":
+                r_st = _sudo(["systemctl", "start", f"{timer_name}.timer"])
+                if r_st.returncode != 0:
+                    entry["action"] = f"start-failed: {(r_st.stderr or '').strip()[:100]}"
+                    results[timer_name] = entry
+                    continue
+                entry["action"] = "started"
+            entry["started"] = True
+
+        except Exception as e:
+            entry["action"] = f"error: {e}"
+        results[timer_name] = entry
+    return results
 
 
 # ─────────────────────────────────────────────
