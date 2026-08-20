@@ -120,6 +120,8 @@ class Config:
         "services/wifi-full-check.timer",
         "services/wifi-quick-check.service",
         "services/wifi-quick-check.timer",
+        # 风扇温控 systemd 单元（2026-08-21 v0.3.1.28：system 页服务状态展示 teslausb-fan）
+        "services/teslausb-fan.service",
         "media_service.py",
         "video_preview.py",
         "hardware_watchdog.py",

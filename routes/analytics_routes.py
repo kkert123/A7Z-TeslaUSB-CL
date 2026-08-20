@@ -19,13 +19,13 @@ import cloud_archive_service
 analytics_bp = Blueprint('analytics', __name__, url_prefix='')
 
 
-def _format_timer_next(svc: str) -> str:
+def _format_timer_next(svc: str):
     """格式化 systemd timer 的下次触发时间。
 
     systemd 对 timer 提供两类下次触发时间：
       - NextElapseUSecRealtime：OnCalendar 定时器返回可读字符串（如
         "Sun 2026-08-23 03:04:31 CST"）；单调定时器（OnBootSec/OnUnitActiveSec，
-        如 wifi-quick-check.timer）此字段为空。
+        如 wifi-quick-check.timer）此字段为空或 0。
       - NextElapseUSecMonotonic：单调定时器返回相对时间（如 "10min 2.462289s"）。
     本函数按 Realtime(数字/可读串) → Monotonic(相对串) 依次提取，任一失败返回 None。
     """
@@ -46,19 +46,26 @@ def _format_timer_next(svc: str) -> str:
                 elif k == 'NextElapseUSecMonotonic':
                     mono = v.strip()
 
-        # 1) Realtime：微秒数字 → 绝对时间
-        if real and real.lower() != 'n/a':
+        # 1) Realtime：微秒数字 → 绝对时间。
+        #    守卫 '0'：部分 systemd 版本对未激活 timer 输出 0，fromtimestamp(0)
+        #    会误显示 1970-01-01 且阻断下方 Monotonic 回退。
+        if real and real != '0' and real.lower() != 'n/a':
             if real.isdigit():
                 return datetime.fromtimestamp(int(real) / 1_000_000).strftime('%m/%d %H:%M')
-            # 可读字符串如 "Sun 2026-08-23 03:04:31 CST" → 提取日期时间部分
+            # 可读字符串如 "Sun 2026-08-23 03:04:31 CST" → 解析后按 %m/%d %H:%M 输出
             parts = real.split()
             idx = next((i for i, p in enumerate(parts)
                         if p.count('-') == 2 and p[:4].isdigit()), None)
             if idx is not None and idx + 1 < len(parts):
-                return (parts[idx] + ' ' + parts[idx + 1])[5:16].replace('-', '/')
+                try:
+                    dt_val = datetime.strptime(
+                        parts[idx] + ' ' + parts[idx + 1], '%Y-%m-%d %H:%M:%S')
+                    return dt_val.strftime('%m/%d %H:%M')
+                except ValueError:
+                    pass
 
         # 2) 回退：Monotonic 相对时间（如 "10min 2.462289s"）
-        if mono and mono.lower() != 'n/a':
+        if mono and mono != '0' and mono.lower() != 'n/a':
             return mono
         return None
     except Exception:
