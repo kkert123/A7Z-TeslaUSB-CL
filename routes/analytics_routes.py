@@ -18,6 +18,52 @@ import cloud_archive_service
 
 analytics_bp = Blueprint('analytics', __name__, url_prefix='')
 
+
+def _format_timer_next(svc: str) -> str:
+    """格式化 systemd timer 的下次触发时间。
+
+    systemd 对 timer 提供两类下次触发时间：
+      - NextElapseUSecRealtime：OnCalendar 定时器返回可读字符串（如
+        "Sun 2026-08-23 03:04:31 CST"）；单调定时器（OnBootSec/OnUnitActiveSec，
+        如 wifi-quick-check.timer）此字段为空。
+      - NextElapseUSecMonotonic：单调定时器返回相对时间（如 "10min 2.462289s"）。
+    本函数按 Realtime(数字/可读串) → Monotonic(相对串) 依次提取，任一失败返回 None。
+    """
+    try:
+        tr = subprocess.run(
+            ['systemctl', 'show', svc,
+             '--property=NextElapseUSecRealtime,NextElapseUSecMonotonic'],
+            capture_output=True, text=True, timeout=3
+        )
+        if tr.returncode != 0:
+            return None
+        real = mono = ''
+        for line in tr.stdout.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                if k == 'NextElapseUSecRealtime':
+                    real = v.strip()
+                elif k == 'NextElapseUSecMonotonic':
+                    mono = v.strip()
+
+        # 1) Realtime：微秒数字 → 绝对时间
+        if real and real.lower() != 'n/a':
+            if real.isdigit():
+                return datetime.fromtimestamp(int(real) / 1_000_000).strftime('%m/%d %H:%M')
+            # 可读字符串如 "Sun 2026-08-23 03:04:31 CST" → 提取日期时间部分
+            parts = real.split()
+            idx = next((i for i, p in enumerate(parts)
+                        if p.count('-') == 2 and p[:4].isdigit()), None)
+            if idx is not None and idx + 1 < len(parts):
+                return (parts[idx] + ' ' + parts[idx + 1])[5:16].replace('-', '/')
+
+        # 2) 回退：Monotonic 相对时间（如 "10min 2.462289s"）
+        if mono and mono.lower() != 'n/a':
+            return mono
+        return None
+    except Exception:
+        return None
+
 # Late imports from app.py (avoid circular imports at module load)
 from utils.app_helpers import get_template_context, get_system_stats, _scan_video_folder
 
@@ -181,7 +227,11 @@ def api_analytics_disk():
 def api_analytics_services():
     """系统服务状态列表"""
     # cron 无业务依赖（系统定时任务均走 systemd timer），不再监控显示
-    svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-mode', 'teslausb-io-tune', 'teslausb-fsck.timer', 'smbd']
+    # v0.3.1.28: 新增 WiFi 智能切换（wifi-*-check.timer，oneshot service 常态 inactive 会误报，
+    #            故展示 timer 的 active waiting 状态）+ 风扇温控（teslausb-fan）
+    svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-mode', 'teslausb-io-tune',
+                'teslausb-fsck.timer', 'smbd',
+                'wifi-quick-check.timer', 'wifi-full-check.timer', 'teslausb-fan']
     services = {}
     try:
         for svc in svc_list:
@@ -204,20 +254,7 @@ def api_analytics_services():
                 # 对于 timer，获取下次触发时间
                 timer_next = None
                 if svc.endswith('.timer'):
-                    try:
-                        tr = subprocess.run(
-                            ['systemctl', 'show', svc, '--property=NextElapseUSecRealtime'],
-                            capture_output=True, text=True, timeout=3
-                        )
-                        if tr.returncode == 0:
-                            raw = tr.stdout.strip().split('=', 1)[-1]
-                            if raw:
-                                # 微秒时间戳 → 格式化
-                                ts = int(raw) / 1_000_000
-                                from datetime import datetime as dt
-                                timer_next = dt.fromtimestamp(ts).strftime('%m/%d %H:%M')
-                    except:
-                        pass
+                    timer_next = _format_timer_next(svc)
 
                 services[svc] = {
                     'active': active,
