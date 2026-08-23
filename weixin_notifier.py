@@ -547,6 +547,16 @@ class WeixinNotifier:
             img_success = self.send_image(preview_path)
             if not img_success:
                 logger.warning(f"预览图发送失败: {preview_path}")
+        elif preview_path and not os.path.exists(preview_path):
+            # 预览图路径非空但文件缺失（被清理/生成失败）→ 视为图片失败，
+            # 让补发队列重试兜底（_find_existing_thumbnail / 重新生成）
+            logger.warning(f"预览图文件不存在: {preview_path}")
+            img_success = False
+        elif skip_text:
+            # 文本已发成功但无可用预览图（队列兜底也失败）→ 补图无望：
+            # 视为失败，队列重试后最终 abandoned，避免"静默成功"掩盖补发无图
+            logger.warning("skip_text 模式但无可用预览图，补图失败")
+            img_success = False
 
         # 回传文本/图片各自成败（供补发队列决定下次是否只补发图片）
         if _status is not None:
