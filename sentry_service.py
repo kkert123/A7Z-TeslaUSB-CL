@@ -437,21 +437,24 @@ class SentryService:
         notifier = self.sentry_notifier or self.notifier
         if notifier:
             try:
+                _status = {}
                 success = notifier.send_sentry_detected(
                     event_id=event.id,
                     location=real_location,
                     file_count=event.file_count,
                     reason=event_reason,
                     coordinates=event_coords,
-                    preview_path=preview_path
+                    preview_path=preview_path,
+                    _status=_status,
                 )
                 if success:
                     # 推送成功 → 标记已通知（供对账补发去重，避免重复补发）
                     self._mark_notified(event.id)
                 else:
-                    # 发送失败 → 加入重试队列
+                    # 发送失败 → 加入重试队列（文本已成功则 text_sent=True，只补图）
                     self._enqueue_notification(event, real_location, event_reason,
-                                               event_coords, preview_path, None)
+                                               event_coords, preview_path, None,
+                                               text_sent=_status.get('text_ok', False))
 
             except Exception as e:
                 logger.error(f"哨兵事件通知失败: {e}")
@@ -520,6 +523,7 @@ class SentryService:
         notifier = self.sentry_notifier or self.notifier
         if notifier:
             try:
+                _status = {}
                 success = notifier.send_sentry_detected(
                     event_id=event.id,
                     location=real_location,
@@ -527,13 +531,16 @@ class SentryService:
                     reason=event_reason,
                     coordinates=event_coords,
                     preview_path=preview_path,
-                    confirmation_code=confirmation_code
+                    confirmation_code=confirmation_code,
+                    _status=_status,
                 )
                 if success:
                     self._mark_notified(event.id)
                 else:
+                    # 文本已成功（仅图片失败）→ text_sent=True，补发只补图不重复文本
                     self._enqueue_notification(event, real_location, event_reason,
-                                               event_coords, preview_path, confirmation_code)
+                                               event_coords, preview_path, confirmation_code,
+                                               text_sent=_status.get('text_ok', False))
 
             except Exception as e:
                 logger.error(f"确认请求通知失败: {e}")
@@ -541,8 +548,11 @@ class SentryService:
                                            event_coords, preview_path, confirmation_code)
 
     def _enqueue_notification(self, event, real_location, event_reason, event_coords,
-                              preview_path, confirmation_code):
-        """将失败的通知加入重试队列"""
+                              preview_path, confirmation_code, text_sent: bool = False):
+        """将失败的通知加入重试队列
+
+        text_sent: 文本已发送成功（仅图片失败）→ 重试跳过文本只补图片。
+        """
         try:
             from sentry_notify_queue import SentryNotifyQueue
             queue = SentryNotifyQueue()
@@ -553,7 +563,9 @@ class SentryService:
                 confirmation_code=confirmation_code,
                 reason=event_reason,
                 coordinates=event_coords,
-                preview_path=preview_path
+                preview_path=preview_path,
+                event_folder=str(event.folder_path) if getattr(event, 'folder_path', None) else None,
+                text_sent=text_sent,
             )
             logger.info(f"通知已加入重试队列: {event.id}")
         except Exception as e:

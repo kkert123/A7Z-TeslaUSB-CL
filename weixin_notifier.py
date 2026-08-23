@@ -435,7 +435,9 @@ class WeixinNotifier:
                            temperature: float = None,
                            locked: bool = None,
                            preview_path: str = None,
-                           is_reconciled: bool = False) -> bool:
+                           is_reconciled: bool = False,
+                           skip_text: bool = False,
+                           _status: Optional[dict] = None) -> bool:
         """
         发送哨兵事件检测通知（文本格式，兼容所有微信客户端）
 
@@ -450,9 +452,14 @@ class WeixinNotifier:
             locked: 车辆锁定状态
             preview_path: 预览图路径
             is_reconciled: 是否为对账补发（reconcile 兜底补发的遗漏事件）
+            skip_text: 跳过文本（补发重试场景：文本已发送成功、仅图片失败时，
+                       避免文本重复推送）
+            _status: 可选输出参数（dict），回传 text_ok / img_ok 以便调用方区分
+                     文本与图片的成败（用于队列决定下次是否只补发图片）
 
         Returns:
-            是否发送成功
+            是否发送成功。有预览图时文本与图片**均成功**才算成功；
+            图片失败不再被吞掉，使补发队列能重试补齐缩略图。
         """
         # 构建消息内容（纯文本格式）
         if is_reconciled:
@@ -526,10 +533,13 @@ class WeixinNotifier:
 
         content = "\n".join(lines)
 
-        # 先发送文本消息
-        text_success = self.send_text(content)
+        # 先发送文本消息（skip_text=True 跳过：补发重试场景文本已发送成功）
+        text_success = True
+        if not skip_text:
+            text_success = self.send_text(content)
 
         # 如果有预览图，发送图片
+        img_success = True
         if preview_path and os.path.exists(preview_path):
             # 延迟一下，避免消息顺序颠倒
             import time
@@ -538,7 +548,14 @@ class WeixinNotifier:
             if not img_success:
                 logger.warning(f"预览图发送失败: {preview_path}")
 
-        return text_success
+        # 回传文本/图片各自成败（供补发队列决定下次是否只补发图片）
+        if _status is not None:
+            _status['text_ok'] = text_success
+            _status['img_ok'] = img_success
+
+        # 有预览图时图片失败即整体失败：否则补发队列会误判成功并删除，
+        # 导致缩略图永久丢失（曾连续 8/20、8/23 两次补发无图）。
+        return text_success and img_success
 
     def send_upload_progress(self, event_id: str, progress: int,
                             current_file: str = None) -> bool:

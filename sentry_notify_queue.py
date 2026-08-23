@@ -43,6 +43,10 @@ NOTIFIED_FILE = Path('/opt/radxa_data/teslausb/data/sentry_notified_events.json'
 SENTRY_CONFIG = Path('/opt/radxa_data/teslausb/config/sentry.json')
 SENTRY_CLIPS_FALLBACK = '/mnt/teslacam/TeslaCam/SentryClips'
 THUMB_DIR = Path('/opt/radxa_data/teslausb/static/thumbnails')
+# video_preview.py 的默认输出目录（正常推送四宫格图/缩略图实际落盘位置）。
+# 与 THUMB_DIR 目录不同、命名约定也不同，reconcile 补发时必须一并查找复用，
+# 否则找不到正常推送已生成的缩略图，只能依赖 ffmpeg 现生成。
+PREVIEWS_DIR = Path('/opt/teslausb-web/data/previews')
 RECONCILE_MAX_AGE_DAYS = 3        # 只补扫最近 N 天的事件，避免历史全量轰炸
 # 跳过"较新"的事件：必须给 watchdog 正常推送(发文本+编码上传缩略图+延迟)及随后
 # 的 mark_notified 留足时间，否则 reconcile 会抢在 watchdog 完成标记前把"正在被
@@ -86,8 +90,14 @@ class SentryNotifyQueue:
     def enqueue(self, event_id: str, location: str, file_count: int,
                 confirmation_code: str = None, reason: str = None,
                 coordinates: str = None, preview_path: str = None,
-                is_reconciled: bool = False):
-        """将失败的通知加入队列（is_reconciled 标记是否为对账补发的遗漏事件）"""
+                is_reconciled: bool = False, event_folder: str = None,
+                text_sent: bool = False):
+        """将失败的通知加入队列（is_reconciled 标记是否为对账补发的遗漏事件）
+
+        event_folder: 事件文件夹绝对路径。记录后，重试发送时若缩略图缺失/被清理，
+        可以据此重新生成缩略图，避免"补发只有文字没有图"。
+        text_sent: 文本消息已发送成功（仅图片失败入队）→ 重试时跳过文本只补图片。
+        """
         entry = {
             'event_id': event_id,
             'location': location,
@@ -96,10 +106,12 @@ class SentryNotifyQueue:
             'reason': reason,
             'coordinates': coordinates,
             'preview_path': str(preview_path) if preview_path else None,
+            'event_folder': str(event_folder) if event_folder else None,
             'retry_count': 0,
             'added_at': datetime.now().isoformat(),
             'is_reconciled': is_reconciled,
             'last_retry': None,
+            'text_sent': text_sent,   # v0.3.1.29: 文本已发成功但图片失败 → True，重试只补图
             'status': 'pending'
         }
         self.entries.append(entry)
@@ -148,50 +160,113 @@ class SentryNotifyQueue:
             notified.add(event_id)
             self._save_notified(notified)
 
+    def _find_existing_thumbnail(self, event_id: str) -> Optional[str]:
+        """查找事件已有的缩略图，覆盖正常推送与补发约定的全部路径。
+
+        正常推送四宫格图由 video_preview 写入 PREVIEWS_DIR，命名为
+        `{event_id}_grid_preview.jpg` / `{event_id}_grid_thumb.jpg`；
+        补发兜底图由 _generate_thumbnail_fallback 写入 THUMB_DIR，命名为
+        `SEN_{event_id}_grid.jpg`。历史版本可能在任一位置，全部尝试复用，
+        避免正常推送已有图时仍走 ffmpeg 现生成（易失败导致补发无图）。
+        """
+        candidates = [
+            THUMB_DIR / f"SEN_{event_id}_grid.jpg",
+            THUMB_DIR / f"{event_id}_grid_preview.jpg",
+            THUMB_DIR / f"{event_id}_grid_thumb.jpg",
+            PREVIEWS_DIR / f"{event_id}_grid_preview.jpg",
+            PREVIEWS_DIR / f"{event_id}_grid_thumb.jpg",
+        ]
+        for p in candidates:
+            try:
+                if not (p.is_file() and p.stat().st_size > 0):
+                    continue
+                # JPEG 魔数校验：过滤损坏/截断的非空文件，避免坏图被复用反复发送
+                try:
+                    with open(p, 'rb') as f:
+                        if f.read(3) != b'\xff\xd8\xff':
+                            continue
+                except OSError:
+                    continue
+                return str(p)
+            except OSError:
+                continue
+        return None
+
     def _generate_thumbnail_fallback(self, event_folder: Path, event_id: str) -> Optional[str]:
-        """补发场景缩略图兜底生成：用 ffmpeg 提取第一个 mp4 文件的首帧。
-        
-        返回缩略图路径，失败返回 None。
+        """补发场景缩略图兜底生成：用 ffmpeg 从事件视频提取一帧作为缩略图。
+
+        遍历全部 mp4 逐个尝试（首个文件可能损坏/仍在写入），并依次尝试三种
+        ffmpeg 提取策略（快速 seek → select 帧 → 首帧），最大化生成成功率。
+        返回缩略图路径，全部失败返回 None。
         """
         thumb_path = THUMB_DIR / f"SEN_{event_id}_grid.jpg"
-        
+
         # 已有缩略图则不重复生成
-        if thumb_path.exists():
+        if thumb_path.exists() and thumb_path.stat().st_size > 0:
             return str(thumb_path)
-        
-        # 找第一个有效的 mp4 文件
-        first_mp4 = None
-        for p in sorted(event_folder.iterdir()):
-            if p.is_file() and p.suffix.lower() == '.mp4':
-                first_mp4 = p
-                break
-        if not first_mp4:
-            return None
-        
+
+        # 收集所有 mp4（排序保证确定性，且优先正常片段）。
+        # 只尝试前 5 个：正常事件首个片段即成功；极端情况（全部损坏）下
+        # 限制最坏耗时上限，避免把 120s 的 timer 阻塞死。
         try:
-            THUMB_DIR.mkdir(parents=True, exist_ok=True)
-            # 提取第 2 帧（跳过可能的黑帧/关键帧头）
-            result = subprocess.run(
-                ['ffmpeg', '-y', '-i', str(first_mp4), '-vf',
-                 'select=eq(n\\,2)', '-vframes', '1', '-q:v', '3',
-                 str(thumb_path)],
-                capture_output=True, text=True, timeout=15,
-            )
-            if thumb_path.exists() and thumb_path.stat().st_size > 0:
-                logger.info(f"补发缩略图生成成功: {event_id}")
-                return str(thumb_path)
-            else:
-                logger.warning(f"补发缩略图生成失败(ffmpeg): {event_id} {result.stderr[-200:]}")
-                # 清理空文件
+            mp4s = sorted(
+                p for p in event_folder.iterdir()
+                if p.is_file() and p.suffix.lower() == '.mp4'
+            )[:5]
+        except OSError as e:
+            logger.warning(f"补发缩略图生成失败(扫描目录异常): {event_id} {e}")
+            return None
+        if not mp4s:
+            logger.warning(f"补发缩略图生成失败(无 mp4): {event_id}")
+            return None
+
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 三种策略模板：先 seek（快且通用），再 select 第 2 帧（seek 不精确时兜底），
+        # 最后直接取首帧。任一种成功即返回。
+        strategies = [
+            ['ffmpeg', '-y', '-ss', '1', '-i', '{video}',
+             '-vframes', '1', '-q:v', '3', '{out}'],
+            ['ffmpeg', '-y', '-i', '{video}',
+             '-vf', 'select=eq(n\\,2)', '-vframes', '1', '-q:v', '3', '{out}'],
+            ['ffmpeg', '-y', '-i', '{video}',
+             '-vframes', '1', '-q:v', '3', '{out}'],
+        ]
+
+        # 总截止时间：无论多少策略/视频，单次兜底生成不超过 90s，
+        # 保证 120s 的 notify-retry timer 不会被卡死（正常场景首个策略秒回）。
+        deadline = time.time() + 90
+
+        def _cleanup():
+            try:
                 if thumb_path.exists():
                     thumb_path.unlink()
-                return None
-        except FileNotFoundError:
-            logger.debug("ffmpeg 不可用，跳过补发缩略图生成")
-            return None
-        except Exception as e:
-            logger.warning(f"补发缩略图生成异常: {event_id} {e}")
-            return None
+            except OSError:
+                pass
+
+        for video in mp4s:
+            for tmpl in strategies:
+                if time.time() > deadline:
+                    logger.warning(f"补发缩略图生成超时(90s): {event_id}")
+                    return None
+                cmd = [part.format(video=str(video), out=str(thumb_path)) for part in tmpl]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    if (result.returncode == 0
+                            and thumb_path.exists() and thumb_path.stat().st_size > 0):
+                        logger.info(f"补发缩略图生成成功: {event_id} <- {video.name}")
+                        return str(thumb_path)
+                    logger.debug(f"补发缩略图生成尝试失败({video.name}): {result.stderr[-200:]}")
+                    _cleanup()
+                except FileNotFoundError:
+                    logger.debug("ffmpeg 不可用，跳过补发缩略图生成")
+                    return None
+                except Exception as e:
+                    logger.debug(f"补发缩略图生成尝试失败({video.name}): {e}")
+                    _cleanup()
+
+        logger.warning(f"补发缩略图生成失败(所有视频/策略均失败): {event_id}")
+        return None
 
     def _safe_read_event_json(self, event_json_path: Path) -> dict:
         """安全读取 event.json（兼容 Tesla 约 5% 的 protobuf 二进制格式）"""
@@ -315,9 +390,8 @@ class SentryNotifyQueue:
                 1 for p in folder.iterdir()
                 if p.is_file() and p.suffix.lower() == '.mp4'
             )
-            thumb = THUMB_DIR / f"SEN_{ev_id}_grid.jpg"
-            preview = str(thumb) if thumb.exists() else None
-            # 如果缩略图不存在，尝试 on-demand 生成（提取第一个视频帧）
+            # 优先复用正常推送已生成的缩略图；不存在再兜底现生成
+            preview = self._find_existing_thumbnail(ev_id)
             if not preview:
                 preview = self._generate_thumbnail_fallback(folder, ev_id)
             self.enqueue(
@@ -328,6 +402,7 @@ class SentryNotifyQueue:
                 coordinates=coords,
                 preview_path=preview,
                 is_reconciled=True,
+                event_folder=str(folder),
             )
             added += 1
 
@@ -415,6 +490,21 @@ class SentryNotifyQueue:
                 if preview_path and not os.path.exists(preview_path):
                     preview_path = None
 
+                # 发送前兜底：缩略图缺失（入队时生成失败 / 之后被清理）时，
+                # 先复用正常推送已生成的图，再尝试从事件视频重新生成，
+                # 避免补发只有文字没有缩略图。
+                if not preview_path:
+                    preview_path = self._find_existing_thumbnail(event_id)
+                    if not preview_path:
+                        event_folder = entry.get('event_folder')
+                        if event_folder and os.path.isdir(event_folder):
+                            preview_path = self._generate_thumbnail_fallback(
+                                Path(event_folder), event_id
+                            )
+                            if preview_path:
+                                entry['preview_path'] = preview_path
+
+                status = {}
                 success = notifier.send_sentry_detected(
                     event_id=event_id,
                     location=entry.get('location', '未知'),
@@ -424,6 +514,9 @@ class SentryNotifyQueue:
                     coordinates=entry.get('coordinates'),
                     preview_path=preview_path,
                     is_reconciled=entry.get('is_reconciled', False),
+                    # 文本已成功、仅图片失败 → 跳过文本只补发图片（避免文本重复推送）
+                    skip_text=entry.get('text_sent', False),
+                    _status=status,
                 )
 
                 if success:
@@ -431,6 +524,15 @@ class SentryNotifyQueue:
                     self.mark_notified(event_id)
                     logger.info(f"✅ 通知重试成功: {event_id}")
                     continue  # 不加入 remaining = 已删除
+
+                # 失败分析：文本已成功但图片失败（如网络恢复初期图片上传连接失败）→
+                # 标记 text_sent，下次只补发图片，直到缩略图补齐或达到重试上限。
+                if status.get('text_ok') and not status.get('img_ok'):
+                    entry['text_sent'] = True
+                    logger.warning(
+                        f"通知 {event_id} 文本已发但图片失败，下次仅补发图片 "
+                        f"(retry={entry['retry_count'] + 1}/{MAX_RETRIES})"
+                    )
 
                 # 发送失败，增加重试计数
                 entry['retry_count'] += 1
