@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 CPU_LOAD_THRESHOLD = 80      # CPU 负载百分比阈值
 MEMORY_THRESHOLD = 85        # 内存使用百分比阈值
 DISK_THRESHOLD = 95          # 磁盘使用百分比阈值
-RESPONSE_TIMEOUT = 3        # 服务响应超时（秒），缩短避免阻塞
+RESPONSE_TIMEOUT = 8        # 服务响应超时（秒），放宽避免单线程排队误报
 
 # 关键服务列表（需监控）
 # 注意：只列入常驻服务，teslausb-gadget 仅在 USB 连接 Tesla 时运行，不列入
@@ -248,7 +248,7 @@ class HardwareWatchdog:
         try:
             result = subprocess.run(
                 ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                 f"http://localhost:{port}/", "--connect-timeout", "3", "--max-time", "3"],
+                 f"http://localhost:{port}/", "--connect-timeout", "8", "--max-time", "8"],
                 capture_output=True,
                 text=True,
                 timeout=RESPONSE_TIMEOUT,
