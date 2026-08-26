@@ -750,6 +750,8 @@ def set_ap_force_mode(mode: str) -> dict:
 
 # AP 静态 IP 与子网（与 ap_control.sh 保持一致）
 AP_STATIC_IP = "192.168.42.1"
+# AP 模式下 dnsmasq 的 DHCP 配置文件（systemd drop-in 条件启动 + 残留清理均依赖此路径）
+DNSMASQ_AP_CONF = "/etc/dnsmasq.d/ap.conf"
 
 
 def _write_hostapd_conf() -> bool:
@@ -853,7 +855,7 @@ def _ap_bring_up() -> Tuple[bool, str]:
                 capture_output=True, timeout=10,
             )
             subprocess.run(
-                ["sudo", "-n", "cp", "/tmp/ap-dnsmasq.conf.tmp", "/etc/dnsmasq.d/ap.conf"],
+                ["sudo", "-n", "cp", "/tmp/ap-dnsmasq.conf.tmp", DNSMASQ_AP_CONF],
                 capture_output=True, timeout=10,
             )
         finally:
@@ -910,6 +912,50 @@ def _ap_bring_down() -> Tuple[bool, str]:
         return True, "AP 已停止"
     except Exception as e:
         return False, f"停止 AP 失败: {e}"
+
+
+def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
+    """确保 AP 处于关闭状态（幂等自愈，业务闭环的关键兜底）。
+
+    两种模式：
+    - only_cleanup=False（默认）：hostapd 运行中 → 完整 bring-down（停 hostapd/dnsmasq、
+      删 ap.conf、恢复 station 管控）；仅配置残留 → 清理。
+    - only_cleanup=True：只清理「hostapd 未运行但 ap.conf 残留」的脏状态，
+      不触碰运行中的 AP（运行中 AP 由网络正常分支负责关闭），
+      用于开机/每次检测前的低风险自愈，避免强制关 AP 造成 fallback 震荡。
+    """
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", "hostapd"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.stdout.strip() == "active":
+            if only_cleanup:
+                return True, "AP 运行中，跳过（由网络正常分支负责关闭）"
+            return _ap_bring_down()
+
+        # hostapd 未运行：清理残留配置，防止 dnsmasq 以 AP 配置在
+        # station 模式下干扰 DHCP / 开机自动带起
+        if not os.path.exists(DNSMASQ_AP_CONF):
+            return True, "AP 已处于关闭状态"
+        r_rm = subprocess.run(
+            ["sudo", "-n", "rm", "-f", DNSMASQ_AP_CONF],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r_rm.returncode != 0:
+            return False, f"删除 {DNSMASQ_AP_CONF} 失败: {(r_rm.stderr or '').strip()[:120]}"
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
+            capture_output=True, text=True, timeout=30,
+        )
+        # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）
+        subprocess.run(
+            ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "yes"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return True, "AP 残留已清理"
+    except Exception as e:
+        return False, f"清理 AP 残留失败: {e}"
 
 
 def start_ap() -> dict:
@@ -1270,6 +1316,16 @@ class WifiSmartSwitch:
         """快速网络连通性检测，连续失败 2 次触发完整检查"""
         self.log.info("开始快速检测...")
 
+        # AP 残留自愈：只清理「hostapd 未运行 + ap.conf 残留」的脏状态，
+        # 不强制关闭运行中的 AP（运行中 AP 由网络正常分支负责关闭，避免 fallback 震荡）
+        try:
+            if get_ap_force_mode() != "force-on":
+                ok, msg = _ap_ensure_down(only_cleanup=True)
+                if not ok:
+                    self.log.warning("AP 残留自愈失败: %s", msg)
+        except Exception:
+            pass
+
         if self._check_connectivity():
             # 网络正常，重置失败计数
             try:
@@ -1279,18 +1335,14 @@ class WifiSmartSwitch:
                 pass
             self.log.info("网络正常")
 
-            # 如果 AP 正在运行，自动关闭（并恢复 wlan0 的 station 模式）
+            # 确保 AP 处于关闭状态（幂等自愈：hostapd 运行中则完整关闭，
+            # 仅配置残留则清理 ap.conf + 停 dnsmasq，防止干扰 station 模式）
             try:
                 force_mode = get_ap_force_mode()
                 if force_mode != "force-on":
-                    result = subprocess.run(
-                        ["systemctl", "is-active", "hostapd"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    if result.stdout.strip() == "active":
-                        self.log.info("WiFi 已恢复，关闭 AP 热点...")
-                        ok, msg = _ap_bring_down()
-                        self.log.info("AP 热点关闭结果: %s", msg if not ok else "已关闭")
+                    ok, msg = _ap_ensure_down()
+                    if not ok:
+                        self.log.warning("AP 关闭/清理失败: %s", msg)
             except Exception:
                 pass
 
