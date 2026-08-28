@@ -883,8 +883,14 @@ def _ap_bring_up() -> Tuple[bool, str]:
 
 
 def _ap_bring_down() -> Tuple[bool, str]:
-    """完整关闭 AP 并恢复 wlan0 的 station 模式（对齐 ap_control.sh stop_ap）。"""
+    """完整关闭 AP 并恢复 wlan0 的 station 模式（对齐 ap_control.sh stop_ap）。
+
+    修复（2026-08-28）：原实现只 restart NetworkManager，未显式恢复 wlan0 的
+    NM 管控（bring_up 曾 nmcli managed no 释放）、未校验重启结果、未确认重连，
+    曾导致关热点后设备不自动重连 WiFi 而离线。现补齐对称恢复 + 校验 + 轮询 + 兜底。
+    """
     try:
+        # 1) 停 hostapd / dnsmasq
         subprocess.run(
             ["sudo", "-n", "systemctl", "stop", "hostapd"],
             capture_output=True, text=True, timeout=30,
@@ -893,23 +899,53 @@ def _ap_bring_down() -> Tuple[bool, str]:
             ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
         )
-        # 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
+        # 2) 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
         subprocess.run(
             ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
             capture_output=True, text=True, timeout=10,
         )
-        # 删除 AP 的 dnsmasq 配置：避免下次开机 dnsmasq（系统 enabled）自动带起
-        # 在 wlan0 上的 DHCP 服务，干扰正常 station 模式的网络。
+        # 3) 删除 AP 的 dnsmasq 配置：避免下次开机 dnsmasq（系统 enabled）自动带起
+        #    在 wlan0 上的 DHCP 服务，干扰正常 station 模式的网络。
         subprocess.run(
-            ["sudo", "-n", "rm", "-f", "/etc/dnsmasq.d/ap.conf"],
+            ["sudo", "-n", "rm", "-f", DNSMASQ_AP_CONF],
             capture_output=True, text=True, timeout=10,
         )
-        # 重启 NetworkManager：交还 wlan0 管理权并触发自动重连（最可靠的恢复方式）
+        # 4) 显式恢复 wlan0 管控（bring_up 曾 nmcli managed no 释放；对称恢复）
         subprocess.run(
+            ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "yes"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # 5) 重启 NetworkManager：交还 wlan0 管理权并触发自动重连，校验返回码
+        r_nm = subprocess.run(
             ["sudo", "-n", "systemctl", "restart", "NetworkManager"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r_nm.returncode != 0:
+            return False, f"NetworkManager 重启失败: {(r_nm.stderr or '').strip()[:120]}"
+
+        # 6) 轮询等待 wlan0 恢复连接（最多 30s）
+        for _i in range(15):
+            time.sleep(2)
+            r = subprocess.run(
+                ["nmcli", "-t", "-f", "DEVICE,STATE", "dev", "status"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "wlan0:connected" in r.stdout:
+                return True, "AP 已停止，wlan0 已重连"
+
+        # 7) 兜底：显式激活 wlan0（NM 自动连接未触发时拉起已保存连接）
+        subprocess.run(
+            ["sudo", "-n", "nmcli", "device", "connect", "wlan0"],
             capture_output=True, text=True, timeout=30,
         )
-        return True, "AP 已停止"
+        time.sleep(3)
+        r2 = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,STATE", "dev", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if "wlan0:connected" in r2.stdout:
+            return True, "AP 已停止，wlan0 已重连（兜底拉起）"
+        return False, "AP 已停止但 wlan0 未能重连（NM 重启 + 兜底拉起均失败，需人工检查网络）"
     except Exception as e:
         return False, f"停止 AP 失败: {e}"
 
@@ -929,31 +965,40 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
         )
-        if r.stdout.strip() == "active":
+        # activating（启动中）也视为运行中：only_cleanup 时跳过，避免打断并发 bring_up
+        hostapd_state = r.stdout.strip()
+        if hostapd_state in ("active", "activating"):
             if only_cleanup:
-                return True, "AP 运行中，跳过（由网络正常分支负责关闭）"
+                return True, "AP 运行中/启动中，跳过（由网络正常分支负责关闭）"
             return _ap_bring_down()
 
         # hostapd 未运行：清理残留配置，防止 dnsmasq 以 AP 配置在
         # station 模式下干扰 DHCP / 开机自动带起
-        if not os.path.exists(DNSMASQ_AP_CONF):
-            return True, "AP 已处于关闭状态"
-        r_rm = subprocess.run(
-            ["sudo", "-n", "rm", "-f", DNSMASQ_AP_CONF],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r_rm.returncode != 0:
-            return False, f"删除 {DNSMASQ_AP_CONF} 失败: {(r_rm.stderr or '').strip()[:120]}"
-        subprocess.run(
-            ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
-            capture_output=True, text=True, timeout=30,
-        )
-        # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）
-        subprocess.run(
+        cleaned = False
+        if os.path.exists(DNSMASQ_AP_CONF):
+            r_rm = subprocess.run(
+                ["sudo", "-n", "rm", "-f", DNSMASQ_AP_CONF],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r_rm.returncode != 0:
+                return False, f"删除 {DNSMASQ_AP_CONF} 失败: {(r_rm.stderr or '').strip()[:120]}"
+            cleaned = True
+        if cleaned:
+            r_dns = subprocess.run(
+                ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r_dns.returncode != 0:
+                return False, f"停止 dnsmasq 失败: {(r_dns.stderr or '').strip()[:120]}"
+        # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）。
+        # 无残留时也执行：覆盖 bring_up 中途崩溃导致 wlan0 保持 unmanaged 的残留态。
+        r_nm = subprocess.run(
             ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "yes"],
             capture_output=True, text=True, timeout=10,
         )
-        return True, "AP 残留已清理"
+        if r_nm.returncode != 0:
+            return False, f"恢复 wlan0 管控失败: {(r_nm.stderr or '').strip()[:120]}"
+        return True, "AP 残留已清理" if cleaned else "AP 已处于关闭状态"
     except Exception as e:
         return False, f"清理 AP 残留失败: {e}"
 

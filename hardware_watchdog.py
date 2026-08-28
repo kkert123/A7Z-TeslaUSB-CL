@@ -248,7 +248,7 @@ class HardwareWatchdog:
         try:
             result = subprocess.run(
                 ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                 f"http://localhost:{port}/", "--connect-timeout", "8", "--max-time", "8"],
+                 f"http://localhost:{port}/", "--connect-timeout", "5", "--max-time", "5"],
                 capture_output=True,
                 text=True,
                 timeout=RESPONSE_TIMEOUT,
