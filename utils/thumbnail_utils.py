@@ -72,7 +72,11 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
                 pass
         else:
             # SentryClips/SavedClips：事件文件夹结构不会被回收，mtime 比较可靠
+            # 🟡2：追加 size>0 保护——历史遗留 0 字节缩略图（断电中断/旧代码直接写）
+            #      mtime 命中后会永久缓存，需跳过重新生成
             try:
+                if os.path.getsize(thumbnail_file) <= 0:
+                    raise OSError  # 0 字节视为无效缓存，走重新生成
                 if video_files:
                     newest_mtime = max((os.path.getmtime(vf) for vf in video_files), default=0)
                 else:
@@ -321,8 +325,16 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
         # 8) 保存（原子写：temp + os.replace，防止并发生成写坏最终文件）
         grid_rgb = grid.convert('RGB')
         tmp_path = thumbnail_file + ".tmp"
-        grid_rgb.save(tmp_path, 'JPEG', quality=82)
-        os.replace(tmp_path, thumbnail_file)
+        try:
+            grid_rgb.save(tmp_path, 'JPEG', quality=82)
+            os.replace(tmp_path, thumbnail_file)
+        finally:
+            # 🟡3：save/replace 异常时清理 tmp 残留（避免残渣堆积）
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
         
         size_kb = os.path.getsize(thumbnail_file) // 1024
         print(f"[Thumbnail] {event_id} \u56db\u5bab\u683c\u751f\u6210\u5b8c\u6210 ({size_kb}KB)")
