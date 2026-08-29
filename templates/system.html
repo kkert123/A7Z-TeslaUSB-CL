@@ -1068,7 +1068,8 @@ function startRollback() {
   var sel = document.getElementById('rollback-select');
   var target = sel ? sel.value : '';
   if (!target) return;
-  if (!confirm('确定回退到 v' + target + '？\n\n回退将切换版本目录并重启服务（配置数据保留）。')) return;
+  // S5：跨大版本回退提示（版本差异大时配置 schema 可能不兼容）
+  if (!confirm('确定回退到 v' + target + '？\n\n回退将切换版本目录并重启服务。\n⚠ 若目标版本与当前差异较大，配置格式可能不兼容，建议回退前导出配置。')) return;
   var prog = document.getElementById('upgrade-progress');
   prog.style.display = 'block'; prog.textContent = '回退中...\n';
   fetch('/api/version/rollback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: target }) })

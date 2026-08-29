@@ -944,12 +944,21 @@ class AutoCleaner:
         deploy_base = "/opt/radxa_data"
         pattern = re.compile(r'^teslausb-v(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$')
 
+        # S1：升级/回退进行中（进度文件存在）→ 跳过本轮版本清理，避免并发删目录
+        if os.path.exists("/var/run/upgrade_progress.json"):
+            logger.info("版本目录清理: 升级/回退进行中，跳过")
+            return 0
+
         try:
             if not os.path.isdir(deploy_base):
                 return 0
-            # 当前 symlink 指向（保护目标）
+            # 当前 symlink 指向（保护目标）；S2 fail-safe：symlink 异常/损坏时
+            # 无法确定当前版本 → 跳过本轮清理，绝不冒险删版本目录
             current_link = os.path.join(deploy_base, "teslausb")
-            current_real = os.path.realpath(current_link) if os.path.islink(current_link) else ""
+            if not os.path.islink(current_link):
+                logger.warning("版本目录清理: 当前版本 symlink 异常，跳过本轮（fail-safe）")
+                return 0
+            current_real = os.path.realpath(current_link)
         except Exception as e:
             logger.warning("版本目录清理: 前置检查失败 %s", e)
             return 0

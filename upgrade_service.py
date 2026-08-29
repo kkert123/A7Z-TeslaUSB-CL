@@ -270,6 +270,8 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 
     _write_progress("等待重启生效", 98)
     steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
+    # S4：成功返回前清除进度文件（防残留 98% 脏状态导致 progress API 误报 running）
+    _clear_progress()
     return True, "\n".join(steps)
 
 
@@ -382,6 +384,10 @@ def do_rollback(version=None):
         current = get_current_version_dir()
         if current and os.path.realpath(target_dir) == os.path.realpath(current):
             return False, f"当前已是 v{version}，无需回退"
+        # S3：校验目标目录完整性（防回退到解压中断残留的损坏目录 → 服务起不来）
+        missing = [f for f in ("app.py", "config.py", "requirements.txt") if not os.path.exists(os.path.join(target_dir, f))]
+        if missing:
+            return False, f"目标版本 v{version} 目录不完整（缺少 {', '.join(missing)}），拒绝回退"
         record_sha = ""
     else:
         # ── 旧逻辑：回退到上一版本 ──

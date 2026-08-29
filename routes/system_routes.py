@@ -923,6 +923,34 @@ def api_version_rollback():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def _extract_version_from_tarball(tarball_path: str):
+    """从升级包内 config.py 提取 APP_VERSION（B3 修复：手动上传识别真实版本）。
+
+    读取 tar 内 config.py（可能带目录前缀），正则提取 APP_VERSION = "x.y.z"。
+    返回版本字符串（如 "0.3.1.34"）或 None。
+    """
+    import re as _re
+    import tarfile as _tf
+    try:
+        with _tf.open(tarball_path, 'r:*') as t:
+            for m in t.getmembers():
+                if not m.isfile():
+                    continue
+                name = m.name.replace('\\', '/')
+                if name.split('/')[-1] != 'config.py':
+                    continue
+                try:
+                    content = t.extractfile(m).read().decode('utf-8', 'replace')
+                except Exception:
+                    continue
+                match = _re.search(r'APP_VERSION\s*=\s*["\']([\d.]+)["\']', content)
+                if match and _re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', match.group(1)):
+                    return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
 @system_bp.route('/api/version/upgrade-upload', methods=['POST'])
 def api_version_upgrade_upload():
     """手动上传 .tar.gz 升级包并安装"""
@@ -960,7 +988,16 @@ def api_version_upgrade_upload():
                     }), 400
             
             import upgrade_service
-            ok, msg = upgrade_service.do_upgrade_from_tarball(tmp_path, 'manual-upload')
+            # v0.3.1.34 B3 修复：从 tar 包内 config.py 提取真实版本号
+            # （原硬编码 'manual-upload' 不匹配版本号白名单 → 手动升级必失败）
+            real_version = _extract_version_from_tarball(tmp_path)
+            if not real_version:
+                os.unlink(tmp_path)
+                return jsonify({
+                    'success': False,
+                    'error': '无法从升级包中识别版本号（config.py 的 APP_VERSION 缺失或格式非法）'
+                }), 400
+            ok, msg = upgrade_service.do_upgrade_from_tarball(tmp_path, real_version)
             if ok:
                 _schedule_restart()
                 return jsonify({
