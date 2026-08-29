@@ -4,7 +4,10 @@ import json
 import subprocess
 import time
 import threading
+import tempfile
 from datetime import datetime
+
+from PIL import Image, ImageDraw, ImageFont
 
 import video_service
 from video_service import THUMBNAIL_DIR, THUMBNAIL_SIZE, _FONT_CN, _FONT_EN
@@ -39,9 +42,6 @@ def _generate_thumbnail(event_path, event_id, video_files=None, folder_type=None
     Returns:
         str: 缩略图 URL 路径，失败返回 None
     """
-    from PIL import Image, ImageDraw, ImageFont
-    import tempfile
-    
     if not os.path.exists(THUMBNAIL_DIR):
         os.makedirs(THUMBNAIL_DIR, exist_ok=True)
     
