@@ -128,10 +128,21 @@
     <div class="detail-item"><span class="label">AP SSID</span><span class="value" id="ap-ssid">加载中...</span></div>
     <div class="detail-item"><span class="label">状态</span><span class="value" id="ap-active-text">加载中...</span></div>
   </div>
-  <div class="btn-group">
+  <div class="btn-group" style="margin-bottom:var(--s3)">
     <button class="btn btn-primary btn-sm" onclick="apAction('start')">▶ 开启</button>
     <button class="btn btn-danger btn-sm" onclick="apAction('stop')">⏹ 关闭</button>
-    <button class="btn btn-ghost btn-sm" onclick="editApConfig()">⚙️ 配置</button>
+  </div>
+  <!-- v0.3.1.31：AP 配置显式表单（替代原 prompt 弹窗，解决"找不到密码设置入口"） -->
+  <div style="border:1px solid var(--border-color);border-radius:8px;padding:var(--s3);background:var(--bg-card)">
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2)">⚙️ AP 配置</div>
+    <div id="ap-default-warning" style="display:none;background:rgba(255,193,7,.15);border:1px solid #f0b429;color:var(--text-warn,#b8860b);border-radius:6px;padding:6px 10px;font-size:var(--text-xs);margin-bottom:var(--s2)">⚠️ 正在使用默认密码 <code>teslausb123</code>，建议修改（AP 热点对周围可见，弱密码易被连入）。</div>
+    <div class="detail-grid" style="margin-bottom:var(--s2)">
+      <div class="detail-item"><span class="label">SSID</span><span class="value"><input id="ap-ssid-input" type="text" maxlength="32" placeholder="TeslaUSB-Setup" style="width:100%;max-width:280px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+      <div class="detail-item"><span class="label">密码</span><span class="value"><input id="ap-pass-input" type="password" maxlength="63" placeholder="8-63 字符，留空不修改" autocomplete="new-password" style="width:100%;max-width:280px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
+    </div>
+    <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s2)">加密方式：WPA2-PSK（AES/CCMP）。密码留空则保持当前密码不变。</div>
+    <button class="btn btn-primary btn-sm" onclick="saveApConfig()">💾 保存配置</button>
+    <span id="ap-save-status" style="font-size:var(--text-sm);color:var(--text-muted);margin-left:var(--s2)"></span>
   </div>
 </div>
 
@@ -206,9 +217,13 @@ function loadApStatus(){
     document.getElementById('ap-status-text').textContent=active?'AP 开启':'AP 关闭';
     document.getElementById('ap-status-text').className='status '+(active?'status-ok':'status-muted');
   }).catch(()=>{});
-  // 获取 AP 配置
+  // 获取 AP 配置（v0.3.1.31：填充表单 + 默认密码提醒）
   fetch('/api/ap/config').then(r=>r.json()).then(d=>{
     document.getElementById('ap-ssid').textContent=d.ssid||'—';
+    const ssidInput=document.getElementById('ap-ssid-input');
+    if(ssidInput)ssidInput.value=d.ssid||'TeslaUSB-Setup';
+    const warn=document.getElementById('ap-default-warning');
+    if(warn)warn.style.display=d.is_default_passphrase?'block':'none';
   }).catch(()=>{});
   // 获取 AP 模式
   fetch('/api/ap/mode?t='+Date.now()).catch(()=>{}); // 读取模式（如果有 GET 接口）
@@ -235,14 +250,30 @@ function updateApBadge(){
   badge.textContent=AP_MODE_LABELS[currentApMode]||currentApMode;
   badge.className='badge '+(AP_MODE_CLASSES[currentApMode]||'');
 }
-function editApConfig(){
-  const curSsid=document.getElementById('ap-ssid').textContent;
-  const newSsid=prompt('AP SSID:', curSsid==='—'?'TeslaUSB-Setup':curSsid);
-  if(newSsid===null)return;
-  const newPass=prompt('AP 密码（8-63字符，留空不修改）:');
-  if(newPass===null)return;
-  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:newSsid,passphrase:newPass})})
-  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message||'保存失败');}).catch(()=>alert('请求失败'));
+// v0.3.1.31：AP 配置显式表单保存（替代原 editApConfig 的 prompt 弹窗）
+function saveApConfig(){
+  const ssid=(document.getElementById('ap-ssid-input').value||'').trim();
+  const pass=document.getElementById('ap-pass-input').value;
+  if(!ssid){alert('SSID 不能为空');return;}
+  if(pass&&(pass.length<8||pass.length>63)){alert('密码必须为 8-63 字符（留空则不修改）');return;}
+  const statusEl=document.getElementById('ap-save-status');
+  statusEl.textContent='保存中...';
+  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,passphrase:pass})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){
+      statusEl.textContent='✓ 已保存（下次开启 AP 生效）';
+      document.getElementById('ap-ssid').textContent=ssid;
+      // 保存成功后刷新密码状态提醒
+      fetch('/api/ap/config').then(r=>r.json()).then(c=>{
+        const warn=document.getElementById('ap-default-warning');
+        if(warn)warn.style.display=c.is_default_passphrase?'block':'none';
+      }).catch(()=>{});
+      setTimeout(()=>{statusEl.textContent='';document.getElementById('ap-pass-input').value='';},3000);
+    }else{
+      statusEl.textContent='';
+      alert(d.message||'保存失败');
+    }
+  }).catch(()=>{statusEl.textContent='';alert('请求失败');});
 }
 
 /* ── WiFi 连接管理 ── */

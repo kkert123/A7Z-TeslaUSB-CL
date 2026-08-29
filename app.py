@@ -102,12 +102,13 @@ if __name__ == '__main__':
     app.logger.info("系统监控守护线程已启动")
 
     # ── TeslaCam 只读挂载缓存一致性任务（修复 Present 模式货不对板）──
-    # Present 模式下 /mnt/teslacam 与 Gadget 可写 LUN 共享 nvme0n1p2，
-    # 本地 ro 挂载的 VFS 缓存不会随特斯拉写入失效，需周期性丢弃以读到最新内容。
+    # v0.3.1.31：由"每 30s 无条件全刷"改为"读取驱动 + 后台 60s mtime 兜底"。
+    # 读取即时性由各读取入口调用 ensure_fresh() 保证；后台任务仅 stat mtime，
+    # 车机在写才刷（无写入零开销），消除 8-28 的 drop_caches 风暴。
     try:
         from utils.cache_coherency import start_cache_coherency_task
-        start_cache_coherency_task(interval=30)
-        app.logger.info("TeslaCam 缓存一致性任务已启动")
+        start_cache_coherency_task(interval=60)
+        app.logger.info("TeslaCam 缓存一致性兜底任务已启动")
     except Exception as e:
         app.logger.warning("缓存一致性任务启动失败（不影响主服务）: %s", e)
     

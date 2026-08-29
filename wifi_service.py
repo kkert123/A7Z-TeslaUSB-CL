@@ -25,6 +25,17 @@ AP_CONFIG_FILE = "/opt/radxa_data/teslausb/config/ap_config.json"
 FORCE_MODE_FILE = "/tmp/teslausb_ap_force_mode"
 AP_CONTROL_SCRIPT = "/opt/radxa_data/teslausb/ap_control.sh"
 
+# AP 生命周期安全护栏（v0.3.1.31，防 8-28 同类事故）
+AP_TRANSITION_FILE = "/var/run/teslausb-ap-transition"   # R6: AP 起停进行中标记（Web/timer 并发互斥）
+AP_TRANSITION_TTL = 120                                   # transition 标记最长有效秒数（覆盖 NM restart 60s+轮询 30s 慢路径）
+AP_START_TIME_FILE = "/var/run/teslausb-ap-start-time"    # R5: AP 启动时间戳（宽限期防震荡）
+AP_GRACE_PERIOD_SEC = 900                                 # R5: AP 启动后 15min 内不自动关闭
+AP_BACKOFF_FILE = "/var/run/teslausb-ap-backoff"          # 自愈退避分钟数（持久化，timer 新进程可见）
+AP_LAST_TRY_FILE = "/var/run/teslausb-ap-last-try"        # 自愈上次探测时间戳
+AP_BACKOFF_INIT = 5                                       # 退避起点 5min（S7：2min 过激进，减少 NM restart 断网窗口）
+AP_BACKOFF_MAX = 30                                       # 退避上限 30min
+DNSMASQ_AP_CONF = "/etc/dnsmasq.d/ap.conf"                # M46: AP 的 dnsmasq 配置（条件启动保护）
+
 
 # ─────────────────────────────────────────────
 # WiFi 状态文件（切换结果持久化）
@@ -695,7 +706,10 @@ def set_ap_config(ssid: str, passphrase: str) -> dict:
         _ensure_ap_config_exists()
         config = get_ap_config()
         config["ssid"] = ssid
-        config["passphrase"] = passphrase
+        # B2：密码留空 = 保持当前密码不变（前端"留空不修改"承诺），
+        # 不得覆盖为空（空密码会在 bring_up 时回退默认 teslausb123，且 UI 警告失效）
+        if passphrase:
+            config["passphrase"] = passphrase
         with open(AP_CONFIG_FILE, "w") as f:
             json.dump(config, f, indent=2)
         return {"success": True, "message": "AP 配置已更新"}
@@ -750,8 +764,6 @@ def set_ap_force_mode(mode: str) -> dict:
 
 # AP 静态 IP 与子网（与 ap_control.sh 保持一致）
 AP_STATIC_IP = "192.168.42.1"
-# AP 模式下 dnsmasq 的 DHCP 配置文件（systemd drop-in 条件启动 + 残留清理均依赖此路径）
-DNSMASQ_AP_CONF = "/etc/dnsmasq.d/ap.conf"
 
 
 def _write_hostapd_conf() -> bool:
@@ -779,7 +791,6 @@ ignore_broadcast_ssid=0
 wpa=2
 wpa_passphrase={passphrase}
 wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
 rsn_pairwise=CCMP
 """
     try:
@@ -804,25 +815,164 @@ rsn_pairwise=CCMP
             pass
 
 
+# ── AP 生命周期安全护栏辅助（v0.3.1.31） ──
+
+def _set_ap_transition():
+    """标记 AP 起/停进行中（R6：Web 手动操作与 timer quick_check 的并发互斥）。
+
+    quick_check 的 only_cleanup 自愈见到此标记（60s 内）即跳过，
+    避免在 Web bring_up 的配置阶段（hostapd 仍 inactive）抢回 wlan0。
+    """
+    try:
+        with open(AP_TRANSITION_FILE, "w") as f:
+            f.write(str(int(time.time())))
+    except Exception:
+        pass
+
+
+def _clear_ap_transition():
+    try:
+        if os.path.exists(AP_TRANSITION_FILE):
+            os.remove(AP_TRANSITION_FILE)
+    except Exception:
+        pass
+
+
+def _ap_transition_active() -> bool:
+    """AP 起/停是否正在进行（60s 内有效，防陈旧标记长期阻塞自愈）"""
+    try:
+        if os.path.exists(AP_TRANSITION_FILE):
+            ts = int(open(AP_TRANSITION_FILE).read().strip())
+            return (time.time() - ts) < AP_TRANSITION_TTL
+    except Exception:
+        pass
+    return False
+
+
+def _record_ap_start_time():
+    """记录 AP 启动时间戳（R5：宽限期防 fallback 震荡）"""
+    try:
+        with open(AP_START_TIME_FILE, "w") as f:
+            f.write(str(int(time.time())))
+    except Exception:
+        pass
+
+
+def _ap_grace_period_elapsed() -> bool:
+    """AP 启动是否已过宽限期（900s）。无记录时视为已过（保守，允许关闭）"""
+    try:
+        if os.path.exists(AP_START_TIME_FILE):
+            ts = int(open(AP_START_TIME_FILE).read().strip())
+            return (time.time() - ts) >= AP_GRACE_PERIOD_SEC
+    except Exception:
+        pass
+    return True
+
+
+def _rollback_wlan0_station():
+    """bring_up 失败时的回滚：恢复 wlan0 管控 + 重启 NM（R1，8-28 事故同类防护）。
+
+    bring_up 曾执行 nmcli managed no + stop wpa_supplicant，任何后续失败
+    都必须恢复 wlan0 到 station 模式，否则设备彻底断网。
+    """
+    try:
+        subprocess.run(
+            ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "yes"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", "NetworkManager"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        pass
+
+
+def _read_backoff() -> int:
+    """读取自愈退避分钟数（持久化 /var/run，timer 每次新进程可见）"""
+    try:
+        if os.path.exists(AP_BACKOFF_FILE):
+            return max(AP_BACKOFF_INIT, int(open(AP_BACKOFF_FILE).read().strip()))
+    except Exception:
+        pass
+    return AP_BACKOFF_INIT
+
+
+def _write_backoff(minutes: int):
+    try:
+        with open(AP_BACKOFF_FILE, "w") as f:
+            f.write(str(min(max(minutes, AP_BACKOFF_INIT), AP_BACKOFF_MAX)))
+    except Exception:
+        pass
+
+
+def _ap_last_try_elapsed(backoff_min: int) -> bool:
+    """距上次自愈探测是否已过退避间隔"""
+    try:
+        if os.path.exists(AP_LAST_TRY_FILE):
+            ts = int(open(AP_LAST_TRY_FILE).read().strip())
+            return (time.time() - ts) >= backoff_min * 60
+    except Exception:
+        pass
+    return True
+
+
+def _record_ap_try():
+    try:
+        with open(AP_LAST_TRY_FILE, "w") as f:
+            f.write(str(int(time.time())))
+    except Exception:
+        pass
+
+
 def _ap_bring_up() -> Tuple[bool, str]:
     """完整启动 AP 热点（对齐 ap_control.sh，补齐原实现缺失的关键步骤）。
 
     关键：必须先释放 NetworkManager/wpa_supplicant 对 wlan0 的 station 管控，
     否则 hostapd 无法把 wlan0 切换到 AP(master) 模式，导致 AP 不广播、手机搜不到。
+
+    安全护栏（v0.3.1.31，防 8-28 同类事故）：
+    - R6: 全程持有 transition 标记，防止 timer quick_check 并发抢回 wlan0
+    - Y2: 先校验 hostapd 单元存在且未 mask，避免无谓释放 wlan0
+    - R1: 任何失败路径立即回滚（_rollback_wlan0_station），不留"无主"断网窗口
+    - R2: _write_hostapd_conf 返回值检查（写失败即失败，不静默用旧配置）
+    - R3: dnsmasq 失败即失败，verify 同时校验 hostapd + dnsmasq
     """
+    _set_ap_transition()
     try:
+        # 0) 前置校验：hostapd 单元必须存在且未 mask（Y2）
+        r_unit = subprocess.run(
+            ["systemctl", "is-enabled", "hostapd"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "masked" in r_unit.stdout or "masked" in (r_unit.stderr or ""):
+            _clear_ap_transition()
+            return False, "hostapd 单元被 mask，无法启动 AP"
+        if r_unit.returncode != 0 and "not-found" in (r_unit.stderr or "").lower():
+            _clear_ap_transition()
+            return False, "hostapd 单元不存在，无法启动 AP"
+
         # 1) 释放 station 管控 + 停止 wpa_supplicant（避免与 hostapd 争抢 wlan0）
-        subprocess.run(
+        r_nm = subprocess.run(
             ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "no"],
             capture_output=True, text=True, timeout=10,
         )
+        if r_nm.returncode != 0:
+            _clear_ap_transition()
+            return False, f"释放 wlan0 管控失败: {(r_nm.stderr or '').strip()[:120]}"
         subprocess.run(
             ["sudo", "-n", "systemctl", "stop", "wpa_supplicant"],
             capture_output=True, text=True, timeout=10,
         )
 
-        # 2) 重写 hostapd.conf（始终按当前 AP 配置）
-        _write_hostapd_conf()
+        # 2) 重写 hostapd.conf（始终按当前 AP 配置；失败立即回滚）
+        if not _write_hostapd_conf():
+            _rollback_wlan0_station()
+            _clear_ap_transition()
+            return False, "写 hostapd.conf 失败（已回滚 wlan0 管控）"
 
         # 3) 启动 hostapd（把 wlan0 置为 AP 模式并广播 SSID）
         r_hap = subprocess.run(
@@ -831,7 +981,7 @@ def _ap_bring_up() -> Tuple[bool, str]:
         )
         time.sleep(2)
 
-        # 4) 静态 IP
+        # 4) 静态 IP（失败仅告警；dnsmasq 依赖此地址，若失败后续会暴露）
         subprocess.run(
             ["sudo", "-n", "ip", "addr", "add", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
             capture_output=True, text=True, timeout=10,
@@ -867,18 +1017,34 @@ def _ap_bring_up() -> Tuple[bool, str]:
             ["sudo", "-n", "systemctl", "restart", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
         )
-        if r_dns.returncode != 0:
-            print(f"[AP] dnsmasq 重启失败: {(r_dns.stderr or '').strip()[:200]}", file=sys.stderr)
 
-        # 6) 校验 hostapd 是否真的起来
-        verify = subprocess.run(
+        # 6) 校验 hostapd + dnsmasq 是否真的起来（R3：dnsmasq 失败不再静默）
+        verify_hap = subprocess.run(
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
         )
-        if verify.stdout.strip() == "active":
+        hap_ok = verify_hap.stdout.strip() == "active"
+        dns_ok = r_dns.returncode == 0
+        if dns_ok:
+            verify_dns = subprocess.run(
+                ["systemctl", "is-active", "dnsmasq"],
+                capture_output=True, text=True, timeout=5,
+            )
+            dns_ok = verify_dns.stdout.strip() == "active"
+
+        if hap_ok and dns_ok:
+            _record_ap_start_time()   # R5: 记录启动时间，宽限期内不自动关闭
+            _clear_ap_transition()
             return True, "AP 已启动"
-        return False, f"hostapd 未 active: {(r_hap.stderr or '').strip()[:200]}"
+        # 任一失败 → 回滚（R1：不留无主断网窗口）
+        _rollback_wlan0_station()
+        _clear_ap_transition()
+        if not hap_ok:
+            return False, f"hostapd 未 active: {(r_hap.stderr or '').strip()[:200]}"
+        return False, f"dnsmasq 未 active: {(r_dns.stderr or '').strip()[:200]}"
     except Exception as e:
+        _rollback_wlan0_station()
+        _clear_ap_transition()
         return False, f"启动 AP 失败: {e}"
 
 
@@ -888,7 +1054,11 @@ def _ap_bring_down() -> Tuple[bool, str]:
     修复（2026-08-28）：原实现只 restart NetworkManager，未显式恢复 wlan0 的
     NM 管控（bring_up 曾 nmcli managed no 释放）、未校验重启结果、未确认重连，
     曾导致关热点后设备不自动重连 WiFi 而离线。现补齐对称恢复 + 校验 + 轮询 + 兜底。
+
+    v0.3.1.31 增强：R6 transition 标记防并发；Y1 轮询追加 IP 确认（L2 connected
+    但 DHCP 未完成不再误报"已重连"）。
     """
+    _set_ap_transition()
     try:
         # 1) 停 hostapd / dnsmasq
         subprocess.run(
@@ -923,7 +1093,7 @@ def _ap_bring_down() -> Tuple[bool, str]:
         if r_nm.returncode != 0:
             return False, f"NetworkManager 重启失败: {(r_nm.stderr or '').strip()[:120]}"
 
-        # 6) 轮询等待 wlan0 恢复连接（最多 30s）
+        # 6) 轮询等待 wlan0 恢复连接 + 获取 IP（最多 30s；Y1：L2 connected + DHCP 完成才算重连）
         for _i in range(15):
             time.sleep(2)
             r = subprocess.run(
@@ -931,7 +1101,13 @@ def _ap_bring_down() -> Tuple[bool, str]:
                 capture_output=True, text=True, timeout=10,
             )
             if "wlan0:connected" in r.stdout:
-                return True, "AP 已停止，wlan0 已重连"
+                r_ip = subprocess.run(
+                    ["ip", "-4", "addr", "show", "dev", "wlan0"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if "inet " in r_ip.stdout:
+                    _clear_ap_transition()
+                    return True, "AP 已停止，wlan0 已重连并获取 IP"
 
         # 7) 兜底：显式激活 wlan0（NM 自动连接未触发时拉起已保存连接）
         subprocess.run(
@@ -944,9 +1120,19 @@ def _ap_bring_down() -> Tuple[bool, str]:
             capture_output=True, text=True, timeout=10,
         )
         if "wlan0:connected" in r2.stdout:
-            return True, "AP 已停止，wlan0 已重连（兜底拉起）"
+            r_ip2 = subprocess.run(
+                ["ip", "-4", "addr", "show", "dev", "wlan0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if "inet " in r_ip2.stdout:
+                _clear_ap_transition()
+                return True, "AP 已停止，wlan0 已重连（兜底拉起）"
+            _clear_ap_transition()
+            return False, "AP 已停止但 wlan0 无 IP（L2 已连、DHCP 未完成，请检查网络）"
+        _clear_ap_transition()
         return False, "AP 已停止但 wlan0 未能重连（NM 重启 + 兜底拉起均失败，需人工检查网络）"
     except Exception as e:
+        _clear_ap_transition()
         return False, f"停止 AP 失败: {e}"
 
 
@@ -961,6 +1147,10 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
       用于开机/每次检测前的低风险自愈，避免强制关 AP 造成 fallback 震荡。
     """
     try:
+        # R6：AP 起/停进行中（Web 手动操作）→ 跳过，避免并发干扰
+        if _ap_transition_active():
+            return True, "AP 起停进行中，跳过自愈"
+
         r = subprocess.run(
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
@@ -990,6 +1180,11 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
             )
             if r_dns.returncode != 0:
                 return False, f"停止 dnsmasq 失败: {(r_dns.stderr or '').strip()[:120]}"
+            # Y3: 清理 bring_up 残留的 AP 静态 IP（存在才删；不存在时 ip addr del 返回非 0，忽略）
+            subprocess.run(
+                ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
+                capture_output=True, text=True, timeout=10,
+            )
         # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）。
         # 无残留时也执行：覆盖 bring_up 中途崩溃导致 wlan0 保持 unmanaged 的残留态。
         r_nm = subprocess.run(
@@ -1001,6 +1196,22 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
         return True, "AP 残留已清理" if cleaned else "AP 已处于关闭状态"
     except Exception as e:
         return False, f"清理 AP 残留失败: {e}"
+
+
+def _ap_has_clients() -> bool:
+    """AP 是否有手机客户端连接（iw station dump；需 root）。
+
+    客户端感知：有手机连着 AP 时不得打断（用户可能正在配置）。
+    """
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "iw", "dev", WIFI_INTERFACE, "station", "dump"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # 输出含 "Station <mac>" 行即表示有已关联客户端
+        return "Station " in r.stdout
+    except Exception:
+        return True  # 查询失败时保守处理：视为有客户端，不打断
 
 
 def start_ap() -> dict:
@@ -1371,6 +1582,13 @@ class WifiSmartSwitch:
         except Exception:
             pass
 
+        # v0.3.1.31 AP 自愈：AP 运行中按退避周期探测可回连网络
+        # （客户端感知：有手机连接时不打断；扫描驱动：确认已知 WiFi 才让出）
+        try:
+            self._ap_self_heal()
+        except Exception:
+            pass
+
         if self._check_connectivity():
             # 网络正常，重置失败计数
             try:
@@ -1420,6 +1638,20 @@ class WifiSmartSwitch:
     def full_check(self) -> None:
         """完整 WiFi 检测与优化切换"""
         self.log.info("开始完整检测...")
+
+        # v0.3.1.31 AP 模式降频：hostapd 运行中且距启动 <15min → 跳过本轮
+        # 全量探测（减少子进程风暴，8-28 僵死叠加因素）。启动 >15min 后允许
+        # 周期重试，网络恢复则回连退出 AP，由 quick_check 正常分支负责关闭。
+        try:
+            r_hap = subprocess.run(
+                ["systemctl", "is-active", "hostapd"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r_hap.stdout.strip() == "active" and not _ap_grace_period_elapsed():
+                self.log.info("AP 运行中且距启动 <15min（降频窗口），跳过本轮全量探测")
+                return
+        except Exception:
+            pass
 
         cur_ssid = self._get_current_ssid()
         is_connected = self._check_connectivity()
@@ -1523,6 +1755,95 @@ class WifiSmartSwitch:
                 self.log.error("AP 启动失败: %s", msg)
         except Exception as e:
             self.log.error("启动 AP 失败: %s", e)
+
+    def _ap_self_heal(self) -> None:
+        """AP 运行中的自愈探测（v0.3.1.31，解决「AP 开了出不来」的核心痛点）。
+
+        流程（客户端感知 + 扫描驱动探测 + 指数退避）：
+          1. force-on / hostapd 未运行 / 起停进行中 / 退避期内 → 跳过
+          2. 客户端感知：有手机连着 AP → 跳过（配置中的用户不被踢断）
+          3. 让出探测：完整 bring_down（恢复 wlan0）→ nmcli rescan（5s）→
+             「已知 WiFi（NM 已保存）∩ 扫描结果」→ 有才尝试连接
+               - 连上 → AP 保持关闭 ✅（重置退避）
+               - 无已知 WiFi / 连接失败 → 立即重启 AP + 退避加倍（2→30min cap）
+        """
+        try:
+            if get_ap_force_mode() == "force-on":
+                return
+            r = subprocess.run(
+                ["systemctl", "is-active", "hostapd"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.stdout.strip() != "active":
+                return
+            # R5/B1：AP 启动 15min 宽限期内不自愈让出（手动刚开的 AP 不得被自动关闭）
+            if not _ap_grace_period_elapsed():
+                return
+            # R6：AP 起停进行中（可能 Web 正在操作）→ 跳过
+            if _ap_transition_active():
+                return
+            # S2：切换冷却期内不让出（避免 _switch_to 被冷却挡住 → 误判失败重启 AP）
+            if not self._can_switch():
+                return
+            # 退避检查：距上次探测不足退避间隔 → 跳过（指数退避 2→30min）
+            backoff = _read_backoff()
+            if not _ap_last_try_elapsed(backoff):
+                return
+            # 客户端感知：有手机连着 AP → 不打断（但记录尝试时间，避免忙等）
+            if _ap_has_clients():
+                self.log.info("AP 有客户端连接，跳过自愈探测（不打断配置）")
+                _record_ap_try()
+                return
+            # 让出探测：完整关闭 AP（含恢复 wlan0 station 管控）
+            self.log.info("AP 无客户端，让出探测已知 WiFi...")
+            ok, msg = _ap_bring_down()
+            if not ok:
+                # bring_down 失败（wlan0 未恢复）→ 立即重启 AP 兜底，避免断网
+                self.log.warning("AP 自愈: bring_down 失败(%s)，立即重启 AP 兜底", msg)
+                _ap_bring_up()
+                _write_backoff(min(backoff * 2, AP_BACKOFF_MAX))
+                _record_ap_try()
+                return
+            # 主动扫描（5s 等待 NM 扫描完成；S6：不再调 _scan_available 避免双重 rescan）
+            subprocess.run(
+                ["nmcli", "dev", "wifi", "rescan"],
+                capture_output=True, text=True, timeout=15,
+            )
+            time.sleep(5)
+            # S1：全量扫描结果 ∩ NM 已保存连接（含未配置优先级的已保存 WiFi，
+            # 避免 _scan_available 只返回优先级网络 → 误判"无可回连网络"）
+            saved = set(self._get_saved_connections())
+            r_list = subprocess.run(
+                ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list"],
+                capture_output=True, text=True, timeout=10,
+            )
+            scanned = set()
+            for line in r_list.stdout.splitlines():
+                ssid = line.rsplit(":", 1)[0].replace("\\:", ":").strip() if ":" in line else line.strip()
+                if ssid:
+                    scanned.add(ssid)
+            known = [ssid for ssid in saved if ssid in scanned]
+            if known:
+                self.log.info("AP 自愈: 发现已知 WiFi %s，尝试回连", known)
+                for ssid in known:
+                    if self._switch_to(ssid):
+                        _write_backoff(AP_BACKOFF_INIT)  # 成功：重置退避
+                        _record_ap_try()
+                        self.log.info("AP 自愈: 已回连 %s，AP 保持关闭", ssid)
+                        return
+            # 无已知 WiFi 或连接失败 → 立即重启 AP（不等 NM 空等 30s），退避加倍
+            self.log.info("AP 自愈: 无可回连网络，重启 AP + 退避加倍(%d→%dmin)",
+                          backoff, min(backoff * 2, AP_BACKOFF_MAX))
+            _ap_bring_up()
+            _write_backoff(min(backoff * 2, AP_BACKOFF_MAX))
+            _record_ap_try()
+        except Exception as e:
+            self.log.warning("AP 自愈异常: %s", e)
+            try:
+                _record_ap_try()
+                _write_backoff(min(_read_backoff() * 2, AP_BACKOFF_MAX))
+            except Exception:
+                pass
 
     # ── 入口 ──
 

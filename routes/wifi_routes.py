@@ -159,8 +159,16 @@ def ap_config_api():
     """API: 获取/设置 AP 配置"""
     if request.method == 'GET':
         config = wifi_service.get_ap_config()
-        return jsonify({"success": True, "ssid": config.get("ssid"), "enabled": config.get("enabled", True)})
-    
+        passphrase = config.get("passphrase", "") or ""
+        # v0.3.1.31：不返回明文密码，仅返回状态供前端显示提醒
+        return jsonify({
+            "success": True,
+            "ssid": config.get("ssid"),
+            "enabled": config.get("enabled", True),
+            "has_passphrase": bool(passphrase),
+            "is_default_passphrase": passphrase == "teslausb123",
+        })
+
     data = request.get_json() or {}
     ssid = data.get("ssid", "").strip()
     passphrase = data.get("passphrase", "")

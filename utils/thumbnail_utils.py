@@ -141,16 +141,16 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
         'right': ('右摄像头', True),
     }
     
-    # ── Present 模式 VFS 缓存一致性：生成前强制刷新只读挂载的 dentry/inode 缓存 ──
+    # ── Present 模式 VFS 缓存一致性：生成前按需刷新只读挂载的 dentry/inode 缓存 ──
     # RecentClips 文件名被 Tesla 循环回收，只读挂载 /mnt/teslacam 的 VFS 缓存
     # （文件名→簇的映射）在 Tesla 写入后不会自动失效。若此处不刷新，
     # 下方 ffmpeg 会抽到「旧簇」的帧 → 缩略图货不对板，且因 >=10KB 被永久缓存。
-    # 仅在 RecentClips（会被回收的文件名）触发；复用 cache_coherency.drop_vfs_caches()
-    # （web / bg_preview 以 root 运行，直接写 /proc/sys/vm/drop_caches 生效）。
+    # 仅在 RecentClips（会被回收的文件名）触发；统一走 ensure_fresh()（30s TTL
+    # 节流 + mtime 指纹，避免多入口并发裸 drop_caches 造成系统 IO 风暴）。
     if folder_type == 'RecentClips':
         try:
-            from utils.cache_coherency import drop_vfs_caches
-            drop_vfs_caches()
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
         except Exception:
             # 刷新失败不影响生成主流程，仅可能仍读到陈旧帧
             pass

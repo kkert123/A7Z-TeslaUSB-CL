@@ -25,6 +25,15 @@ def videos_page():
     elif folder_type not in video_service.VIDEO_FOLDERS:
         folder_type = _get_best_default_folder()
 
+    # v0.3.1.31 读取驱动：RecentClips 列表扫描前按需刷新 VFS 缓存（30s 节流），
+    # 保证读到车机最新写入（文件名回收 → 货不对板高危区）；SavedClips 文件名稳定无需刷
+    if folder_type == 'RecentClips':
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
+        except Exception:
+            pass
+
     # 使用缓存避免每次请求全量扫描（尤其是 RecentClips 几百个文件导致 CPU/内存拉满）
     events, stats = _get_cached_video_scan(folder_type)
     if events is None:
@@ -100,6 +109,14 @@ def api_videos_list():
         folder_type = _get_best_default_folder()
     elif folder_type not in video_service.VIDEO_FOLDERS:
         return jsonify({'success': False, 'error': '无效的文件夹类型'}), 400
+
+    # v0.3.1.31 读取驱动：RecentClips 列表扫描前按需刷新 VFS 缓存
+    if folder_type == 'RecentClips':
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
+        except Exception:
+            pass
 
     # 使用缓存避免 API 轮询导致频繁全量扫描
     events, _stats = _get_cached_video_scan(folder_type)
@@ -313,6 +330,14 @@ def video_play(folder_type, file_path):
     if not folder_config:
         return "无效的文件夹类型", 404
 
+    # v0.3.1.31 读取驱动：RecentClips 播放前按需刷新 VFS 缓存（防读到旧簇帧）
+    if folder_type == 'RecentClips':
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
+        except Exception:
+            pass
+
     # 安全检查
     if '..' in file_path:
         return "无效的文件路径", 400
@@ -377,6 +402,13 @@ def stream_video(filepath):
     # 确定视频所在文件夹
     if sanitized[0] in video_service.VIDEO_FOLDERS:
         folder = sanitized[0]
+        # v0.3.1.31 读取驱动：RecentClips 流播放前按需刷新 VFS 缓存（S5：seek 主路径）
+        if folder == 'RecentClips':
+            try:
+                from utils.cache_coherency import ensure_fresh
+                ensure_fresh()
+            except Exception:
+                pass
         sub_path = '/'.join(sanitized[1:]) if len(sanitized) > 1 else ''
         base = video_service.VIDEO_FOLDERS[folder]['path']
         video_path = os.path.join(base, sub_path) if sub_path else None
@@ -449,6 +481,14 @@ def fetch_video_for_sei(filepath):
         return "无效路径", 404
 
     folder = sanitized[0]
+    # v0.3.1.31 读取驱动：RecentClips SEI 解析前按需刷新 VFS 缓存
+    if folder == 'RecentClips':
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
+        except Exception:
+            pass
+
     sub_path = '/'.join(sanitized[1:]) if len(sanitized) > 1 else ''
     base = video_service.VIDEO_FOLDERS[folder]['path']
     video_path = os.path.join(base, sub_path) if sub_path else os.path.join(base, *sanitized[1:])
@@ -485,6 +525,14 @@ def api_sei_telemetry(folder_type, event_id, camera):
     服务端 SEI 遥测提取 API —— 直接扫描 NAL 单元（和 dashcam-mp4.js 一致）。
     """
     import struct
+
+    # v0.3.1.31 读取驱动：RecentClips SEI 解析前按需刷新 VFS 缓存（防读到旧簇遥测）
+    if folder_type == 'RecentClips':
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
+        except Exception:
+            pass
 
     # camera 映射
     valid = {'front', 'back', 'left', 'right', 'left_repeater', 'right_repeater'}
@@ -562,6 +610,14 @@ def video_download(folder_type, file_path):
     folder_config = video_service.VIDEO_FOLDERS.get(folder_type)
     if not folder_config:
         return "无效的文件夹类型", 404
+
+    # v0.3.1.31 读取驱动：RecentClips 下载前按需刷新 VFS 缓存
+    if folder_type == 'RecentClips':
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh()
+        except Exception:
+            pass
 
     # 安全检查
     if '..' in file_path:
