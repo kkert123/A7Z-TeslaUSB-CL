@@ -138,42 +138,44 @@ def api_videos_list():
 
 
 def _apply_mvhd_clock_correction(events, folder_type):
-    """对 RecentClips 事件应用 mvhd 时钟修正。
+    """对 RecentClips 事件应用 mvhd 时钟修正（v0.3.1.32 B′ 版）。
 
-    从每个事件的 front.mp4 读取 mvhd atom 中的 GPS 校准 UTC 时间，
-    如果与文件名中的时间偏差超过 2 分钟，标注为已修正并显示真实时间。
+    不再逐事件读文件：用全局时钟偏差缓存（get_clock_skew_cached）统一修正——
+    车钟正常时零 IO；车钟偏 N 秒时所有事件统一偏移。
+    P0-2：修正后按真实时间重新排序（原实现只改显示名不重排，车钟偏时顺序错乱）。
     """
     if folder_type != 'RecentClips' or not events:
         return
-    import os
-    base = '/mnt/teslacam/TeslaCam/RecentClips'
+    from utils.mvhd_timestamp import get_clock_skew_cached, _parse_filename_time
+    from datetime import timedelta
+    skew = get_clock_skew_cached()
+    if skew is None or skew == 0:
+        return  # 无法判定或车钟准：不做修正（零 IO）
+
+    corrected = False
     for e in events:
         eid = e.get('id', '')
-        if not eid:
+        file_time = _parse_filename_time(eid)
+        if file_time is None:
             continue
-        try:
-            front_mp4 = os.path.join(base, f'{eid}-front.mp4')
-            if not os.path.isfile(front_mp4):
-                continue
-            from utils.mvhd_timestamp import extract_mvhd_timestamp
-            real_time = extract_mvhd_timestamp(front_mp4)
-            if real_time is None:
-                continue
-            # 解析文件名时间
-            from datetime import datetime
+        real_time = file_time + timedelta(seconds=skew)
+        # id 保持原始前缀（用于文件匹配），显示名标注修正后的时间
+        e['name'] = f"{eid.replace('_', ' ')} ⚡→ {real_time.strftime('%Y-%m-%d %H:%M:%S')}"
+        e['clock_corrected'] = True
+        e['_real_ts'] = real_time
+        corrected = True
+
+    if corrected:
+        # P0-2：按真实时间重排序（未修正事件用文件名时间兜底）
+        def _sort_key(x):
+            if x.get('_real_ts'):
+                return x['_real_ts']
             try:
-                file_time = datetime.strptime(eid, '%Y-%m-%d_%H-%M-%S')
+                from datetime import datetime as _dt
+                return _dt.strptime(x.get('id', ''), '%Y-%m-%d_%H-%M-%S')
             except ValueError:
-                continue
-            # 偏差 < 120 秒 → 文件名时间可信
-            if abs((real_time - file_time).total_seconds()) < 120:
-                continue
-            # 时钟偏差 → 修正显示名
-            corrected = real_time.strftime('%Y-%m-%d %H:%M:%S')
-            e['name'] = f"{eid.replace('_', ' ')} ⚡→ {corrected}"
-            e['clock_corrected'] = True
-        except Exception:
-            pass
+                return datetime.min
+        events.sort(key=_sort_key, reverse=True)
 
 
 def _detect_camera_angle(filename: str) -> str:
@@ -248,6 +250,81 @@ def _check_thumbnail_fresh(folder_type: str, event_id: str) -> bool:
             return tn_mtime >= max_vid_mtime
     except OSError:
         return True  # 出错时保守返回 True
+
+
+def _check_thumbnails_batch(folder_type: str, event_ids: list) -> dict:
+    """批量检查缩略图新鲜度（v0.3.1.32 P1-8：反转循环）。
+
+    原实现逐事件 os.listdir 整个目录（RecentClips 724 文件 × N 事件 = 13 万次
+    条目遍历），改为：一次 os.scandir 目录 → 按前缀分组算每个事件的最大视频
+    mtime → 逐事件比对缩略图 mtime。O(目录文件数) 替代 O(N×目录文件数)。
+
+    仅支持平铺结构（RecentClips）；文件夹结构事件数少，保留逐事件路径。
+    Returns:
+        {event_id: has_thumbnail}；事件不在扫描结果中时保守 True
+    """
+    import os
+    if folder_type != 'RecentClips' or not event_ids:
+        return {eid: True for eid in event_ids}
+    import re as _re  # 🟢4：函数级 import（scandir 循环内复用）
+    prefix = video_service._THUMB_PREFIX.get(folder_type, 'UNK_')
+    tn_dir = video_service.THUMBNAIL_DIR  # 🟢5：引用常量防漂移
+    info = video_service.VIDEO_FOLDERS.get(folder_type)
+    if not info:
+        return {eid: True for eid in event_ids}
+    folder_path = info['path']
+    if not os.path.isdir(folder_path):
+        return {eid: True for eid in event_ids}
+
+    # 一次 scandir：按前缀分组算最大视频 mtime
+    max_vid_mtime = {}
+    try:
+        for entry in os.scandir(folder_path):
+            if not entry.is_file():
+                continue
+            fname = entry.name
+            if not fname.lower().endswith('.mp4'):
+                continue
+            m = _re.match(
+                r'^(.+?)-(front|back|left_repeater|right_repeater|left_pillar|right_pillar)\.mp4$',
+                fname, _re.IGNORECASE
+            )
+            if not m:
+                continue
+            eid = m.group(1)
+            try:
+                mt = entry.stat().st_mtime
+            except OSError:
+                continue
+            if mt > max_vid_mtime.get(eid, 0):
+                max_vid_mtime[eid] = mt
+    except OSError:
+        return {eid: True for eid in event_ids}
+
+    result = {}
+    for eid in event_ids:
+        tn_path = f'{tn_dir}/{prefix}{eid}_grid.jpg'
+        old_path = f'{tn_dir}/{eid}_grid.jpg'
+        tn_mtime = None
+        if os.path.exists(tn_path):
+            try:
+                tn_mtime = os.path.getmtime(tn_path)
+            except OSError:
+                pass
+        elif os.path.exists(old_path):
+            try:
+                tn_mtime = os.path.getmtime(old_path)
+            except OSError:
+                pass
+        if tn_mtime is None:
+            result[eid] = False
+            continue
+        vid_mt = max_vid_mtime.get(eid, 0)
+        if vid_mt == 0:
+            result[eid] = True  # 视频已被旋转删除，缩略图是唯一的记录
+        else:
+            result[eid] = tn_mtime >= vid_mt
+    return result
 
 
 @video_bp.route('/videos/event/<folder_type>/<event_id>')
@@ -863,24 +940,25 @@ def api_player_events():
 
             # 按时间倒序，限制数量
             sorted_prefixes = sorted(sessions.keys(), reverse=True)[:limit]
+            # P1-8：批量检查缩略图新鲜度（一次 scandir 替代逐事件 listdir 整个目录）
+            fresh_map = _check_thumbnails_batch('RecentClips', sorted_prefixes)
+            # 🟢6：一次获取全局偏差，循环应用（避免逐事件拿锁/IO）
+            from utils.mvhd_timestamp import get_clock_skew_cached, _parse_filename_time
+            from datetime import timedelta as _td
+            _skew = get_clock_skew_cached(base)
             for prefix in sorted_prefixes:
                 sess = sessions[prefix]
-                # ═══ mvhd 时钟修正 ═══
-                # Tesla 车载时钟可能不准，文件名时间戳不等于真实录制时间。
-                # 从 front.mp4 的 mvhd atom 读取 GPS 校准的 UTC 录制时间。
-                # id 保持原始前缀（用于文件匹配），显示名标注修正后的时间。
+                # ═══ mvhd 时钟修正（B′：全局偏差缓存，零逐文件读取）═══
                 display_name = prefix
                 clock_corrected = False
-                try:
-                    real_time = get_real_event_time(prefix, base)
-                    if real_time is not None:
-                        corrected_str = real_time.strftime('%Y-%m-%d %H:%M:%S')
-                        display_name = f"{prefix} ⚡→ {corrected_str}"
+                if _skew not in (None, 0):
+                    _ft = _parse_filename_time(prefix)
+                    if _ft is not None:
+                        _rt = _ft + _td(seconds=_skew)
+                        display_name = f"{prefix} ⚡→ {_rt.strftime('%Y-%m-%d %H:%M:%S')}"
                         clock_corrected = True
-                except Exception:
-                    pass
 
-                has_thumbnail = _check_thumbnail_fresh('RecentClips', prefix)
+                has_thumbnail = fresh_map.get(prefix, True)
                 events.append({
                     'id': prefix,
                     'name': display_name,
@@ -889,7 +967,11 @@ def api_player_events():
                     'video_files': sess['files'],
                     'thumbnail': f'/thumbnails/REC_{prefix}_grid.jpg' if has_thumbnail else None,
                     'clock_corrected': clock_corrected,
+                    '_real_ts': _rt if (_skew not in (None, 0) and clock_corrected) else None,
                 })
+            # 🟡2：修正后按真实时间重排（与 videos_page 的 P0-2 保持一致）
+            if _skew not in (None, 0) and any(e.get('_real_ts') for e in events):
+                events.sort(key=lambda x: x.get('_real_ts') or x['id'], reverse=True)
         else:
             # ═══ SentryClips / SavedClips: 事件文件夹结构 ═══
             entries = sorted(os.listdir(base), reverse=True)[:limit]
