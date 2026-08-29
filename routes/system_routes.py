@@ -869,6 +869,19 @@ def api_version_upgrade():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@system_bp.route('/api/version/upgrade/progress')
+def api_version_upgrade_progress():
+    """查询升级真实进度（v0.3.1.34：前端轮询替代模拟进度）"""
+    try:
+        import upgrade_service
+        prog = upgrade_service.get_upgrade_progress()
+        if prog is None:
+            return jsonify({'success': True, 'running': False})
+        return jsonify({'success': True, 'running': True, **prog})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @system_bp.route('/api/version/rollback-info')
 def api_version_rollback_info():
     """查询是否可回退、回退到哪个版本"""
@@ -884,12 +897,25 @@ def api_version_rollback_info():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@system_bp.route('/api/version/rollback', methods=['POST'])
-def api_version_rollback():
-    """执行回退"""
+@system_bp.route('/api/version/rollback/options')
+def api_version_rollback_options():
+    """列出所有本地可回退版本（v0.3.1.34：回退下拉选项）"""
     try:
         import upgrade_service
-        ok, msg = upgrade_service.do_rollback()
+        options = upgrade_service.get_rollback_options()
+        return jsonify({'success': True, 'options': options})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/version/rollback', methods=['POST'])
+def api_version_rollback():
+    """执行回退（v0.3.1.34：支持指定版本，兼容旧的无参调用）"""
+    try:
+        import upgrade_service
+        data = request.get_json(silent=True) or {}
+        version = (data.get('version') or '').strip() or None
+        ok, msg = upgrade_service.do_rollback(version)
         if ok:
             return jsonify({'success': True, 'message': msg})
         return jsonify({'success': False, 'error': msg}), 500

@@ -117,7 +117,11 @@
     <div class="btn-row" style="margin-bottom:6px;flex-wrap:wrap;gap:8px">
       <button class="btn btn-sm btn-primary" onclick="checkVersionNow()">检查更新</button>
       <button class="btn btn-primary btn-sm" id="btn-upgrade" onclick="startUpgrade()" style="display:none">升级到 <span id="upgrade-target"></span></button>
-      <button class="btn btn-sm btn-outline" id="btn-rollback" onclick="startRollback()" style="display:none">回退到 <span id="rollback-target"></span></button>
+      <!-- v0.3.1.34：回退版本下拉选择（任意本地保留版本） -->
+      <span id="rollback-group" style="display:none">
+        <select id="rollback-select" style="font-size:.72rem;padding:3px 6px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base);max-width:150px"></select>
+        <button class="btn btn-sm btn-outline" onclick="startRollback()">回退</button>
+      </span>
       <span id="ver-status-badge" style="display:none;padding:2px 8px;border-radius:10px;background:rgba(231,76,60,.15);color:#e74c3c;font-size:.7rem;font-weight:600">⚠ 有新版本</span>
     </div>
     <div id="upgrade-progress" style="display:none;margin-top:6px;font-size:0.72rem;font-family:monospace;white-space:pre-wrap;color:var(--text-muted);max-height:200px;overflow-y:auto"></div>
@@ -993,11 +997,8 @@ function checkVersionNow() {
 }
 
 function loadRollbackInfo() {
-  fetch('/api/version/rollback-info').then(r => r.json()).then(d => {
-    var btn = document.getElementById('btn-rollback'), te = document.getElementById('rollback-target');
-    if (d.can_rollback && btn) { btn.style.display = ''; te.textContent = 'v' + d.rollback_info.version; }
-    else if (btn) btn.style.display = 'none';
-  });
+  // v0.3.1.34：改用回退选项列表（任意本地保留版本下拉）
+  loadRollbackOptions();
 }
 
 let _upgradeData = null;
@@ -1006,26 +1007,26 @@ function startUpgrade() {
   var btn = document.getElementById('btn-upgrade'), prog = document.getElementById('upgrade-progress'), res = document.getElementById('upgrade-result');
   var barWrap = document.getElementById('upgrade-progressbar-wrap'), bar = document.getElementById('upgrade-bar'), pct = document.getElementById('upgrade-pct'), stage = document.getElementById('upgrade-stage');
   btn.disabled = true; prog.style.display = 'block'; prog.textContent = '升级中...\n'; res.style.display = 'none';
-  barWrap.style.display = 'block'; setBar(8, '1/4 备份当前版本');
+  barWrap.style.display = 'block'; setBar(5, '准备中');
   var body = { version: _upgradeData.latest, asset_url: _upgradeData.asset_url, sha256: _upgradeData.sha256 || '', sig_url: _upgradeData.sig_url || '' };
   if (!body.sha256) { prog.textContent += '\n发布页未找到 SHA-256 校验码，升级中止。'; btn.disabled = false; barWrap.style.display = 'none'; return; }
-  // 模拟进度（实际后端是同步的无法实时推送，前端按时间估算）
+  // v0.3.1.34：真实进度轮询（服务端写 /var/run/upgrade_progress.json，替代模拟进度）
   var progTimer = setInterval(function(){
-    var cur = parseInt(bar.style.width) || 0;
-    if (cur < 35) setBar(cur + 3, '1/4 备份当前版本');
-    else if (cur < 45) setBar(cur + 2, '2/4 下载升级包');
-    else if (cur < 75) setBar(cur + 1, '2/4 下载升级包');
-    else if (cur < 90) setBar(cur + 1, '3/4 校验 SHA-256 + Ed25519');
-  }, 800);
+    fetch('/api/version/upgrade/progress?t=' + Date.now())
+      .then(r => r.json()).then(d => {
+        if (d && d.running) setBar(d.progress || 0, d.step || '处理中');
+      }).catch(() => {});
+  }, 1000);
   fetch('/api/version/upgrade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(r => r.json()).then(d => {
       clearInterval(progTimer);
       prog.textContent += (d.message || d.error || '') + '\n'; prog.scrollTop = prog.scrollHeight;
       if (d.success) {
-        setBar(95, '4/4 安装并重启服务');
+        setBar(98, '4/4 等待重启');
         res.style.display = 'block'; res.innerHTML = '<span style="color:#27ae60">升级完成！正在重启...</span>';
         setTimeout(() => { setBar(100, '完成'); setTimeout(() => location.reload(), 1500); }, 600);
       } else {
+        setBar(0, '升级失败');
         res.style.display = 'block'; res.innerHTML = '<span style="color:#e74c3c">升级失败: ' + (d.error || '未知错误') + '</span>';
         barWrap.style.display = 'none';
       }
@@ -1043,14 +1044,38 @@ function setBar(pct, stage) {
   if (s && stage) s.textContent = stage;
 }
 
+// v0.3.1.34：加载回退版本选项（任意本地保留版本）
+function loadRollbackOptions() {
+  fetch('/api/version/rollback/options?t=' + Date.now()).then(r => r.json()).then(d => {
+    var group = document.getElementById('rollback-group'), sel = document.getElementById('rollback-select');
+    if (!group || !sel) return;
+    if (d.success && d.options && d.options.length) {
+      sel.innerHTML = '';
+      d.options.forEach(o => {
+        var opt = document.createElement('option');
+        opt.value = o.version;
+        opt.textContent = 'v' + o.version + (o.from_backup ? ' (备份)' : '');
+        sel.appendChild(opt);
+      });
+      group.style.display = '';
+    } else {
+      group.style.display = 'none';
+    }
+  }).catch(() => {});
+}
+
 function startRollback() {
-  if (!confirm('确定回退到上一版本？')) return;
+  var sel = document.getElementById('rollback-select');
+  var target = sel ? sel.value : '';
+  if (!target) return;
+  if (!confirm('确定回退到 v' + target + '？\n\n回退将切换版本目录并重启服务（配置数据保留）。')) return;
   var prog = document.getElementById('upgrade-progress');
   prog.style.display = 'block'; prog.textContent = '回退中...\n';
-  fetch('/api/version/rollback', { method: 'POST' }).then(r => r.json()).then(d => {
-    prog.textContent += (d.message || d.error) + '\n';
-    if (d.success) setTimeout(() => location.reload(), 3000);
-  });
+  fetch('/api/version/rollback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: target }) })
+    .then(r => r.json()).then(d => {
+      prog.textContent += (d.message || d.error || '') + '\n';
+      if (d.success) setTimeout(() => location.reload(), 3000);
+    }).catch(e => { prog.textContent += '错误: ' + e + '\n'; });
 }
 
 // ═══ Manual upgrade upload ═══

@@ -8,6 +8,7 @@
 
 import os
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,36 @@ DEPLOY_BASE = "/opt/radxa_data"
 SYMLINK = os.path.join(DEPLOY_BASE, "teslausb")
 BACKUP_DIR = os.path.join(DEPLOY_BASE, "teslausb-backups")
 VERSION_FILE = os.path.join(config.DATA_DIR, "version_history.json")
+
+# 升级进度文件（v0.3.1.34：前端轮询真实进度，替代模拟进度）
+UPGRADE_PROGRESS_FILE = "/var/run/upgrade_progress.json"
+
+
+def _write_progress(step: str, pct: int):
+    """写入升级进度（前端每 1s 轮询展示真实步骤）"""
+    try:
+        with open(UPGRADE_PROGRESS_FILE, "w") as f:
+            json.dump({"step": step, "progress": pct}, f)
+    except Exception:
+        pass
+
+
+def _clear_progress():
+    """升级结束（成功/失败）清除进度文件"""
+    try:
+        if os.path.exists(UPGRADE_PROGRESS_FILE):
+            os.remove(UPGRADE_PROGRESS_FILE)
+    except Exception:
+        pass
+
+
+def get_upgrade_progress():
+    """读取当前升级进度（供 GET /api/version/upgrade/progress）"""
+    try:
+        with open(UPGRADE_PROGRESS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def _run(cmd_args, timeout=120):
@@ -116,30 +147,37 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     tarball = os.path.join(tempfile.gettempdir(), f"upgrade-v{new_version}.tar.gz")
     sig_file = None
     try:
+        _write_progress("下载升级包并校验 SHA-256", 12)
         steps.append("下载并校验 SHA-256...")
         _download(asset_url, tarball, sha256_expected)
         steps[-1] = "下载完成，SHA-256 校验通过"
+        _write_progress("SHA-256 校验通过", 35)
 
         if sig_url:
             sig_file = tarball + ".sig"
             _download(sig_url, sig_file)
     except Exception as e:
+        _clear_progress()
         _cleanup(tarball, sig_file)
         return False, f"下载或校验失败: {e}"
 
     # ── 2. 双保险：显式 SHA-256 校验（sha256_expected 为空时跳过）──
     if sha256_expected:
+        _write_progress("SHA-256 复核", 45)
         ok, msg = _verify_sha256(tarball, sha256_expected)
         if not ok:
+            _clear_progress()
             _cleanup(tarball, sig_file)
             return False, f"SHA-256 校验失败: {msg}"
         steps.append(f"SHA-256 复核通过 ({msg[:12]}...)")
 
     # ── 3. Ed25519 签名验证 ──
     if sig_url and sig_file and os.path.exists(sig_file):
+        _write_progress("Ed25519 签名验证", 52)
         steps.append("签名验证...")
         ok, msg = _verify_ed25519(tarball, sig_file)
         if not ok:
+            _clear_progress()
             _cleanup(tarball, sig_file)
             return False, f"签名验证失败: {msg}"
         steps[-1] = "签名验证通过"
@@ -147,6 +185,7 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
         steps.append("(无签名文件，跳过验签)")
 
     # ── 4. 备份当前版本 ──
+    _write_progress("备份当前版本", 60)
     steps.append("备份当前版本...")
     ok, msg = _backup_current()
     if not ok:
@@ -155,10 +194,12 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
         steps[-1] = f"已备份到 {msg}"
 
     # ── 5. 保存旧版本数据（升级后恢复，避免 config/wecom.json 等丢失）──
+    _write_progress("保存配置", 66)
     steps.append("保存配置...")
     saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
 
     # ── 6. 解压并安装 ──
+    _write_progress("解压安装", 72)
     steps.append("解压安装...")
     # 直接内联 tar + 系统 pip3，不调用 _extract_and_setup
     # 原因：运行中的进程可能使用旧版 upgrade_service，_extract_and_setup 可能还走 venv 路径
@@ -170,11 +211,13 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
             for _m in _t.getmembers():
                 _m_path = _m.name.replace('\\', '/')
                 if _m_path.startswith('/') or '..' in _m_path.split('/'):
+                    _clear_progress()
                     _cleanup(tarball, sig_file)
                     shutil.rmtree(new_dir, ignore_errors=True)
                     return False, f"升级包包含非法路径: {_m_path!r}，已中止"
             _t.extractall(new_dir)
     except Exception as _e:
+        _clear_progress()
         _cleanup(tarball, sig_file)
         shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"解压失败: {_e}"
@@ -192,6 +235,7 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     if os.path.isdir(_legacy_venv):
         shutil.rmtree(_legacy_venv, ignore_errors=True)
     # 用系统 pip3 安装依赖（失败不阻塞——Flask 已在系统 python3 预装）
+    _write_progress("安装依赖", 84)
     _req = os.path.join(new_dir, "requirements.txt")
     if os.path.exists(_req):
         _pip = shutil.which("pip3") or shutil.which("pip") or "python3 -m pip"
@@ -202,11 +246,13 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
         if _r != 0:
             steps.append(f"pip 警告: {_e[:120] if _e else 'unknown'}（系统 python3 已预装核心依赖）")
     steps[-1] = "安装完成"
+    _write_progress("安装完成", 90)
 
     # ── 恢复旧版本配置 ──
     _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
 
     # ── 6. 切换 symlink ──
+    _write_progress("切换版本", 94)
     steps.append("切换版本...")
     if os.path.islink(SYMLINK):
         os.unlink(SYMLINK)
@@ -222,6 +268,7 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     # 清理旧备份（保留最近 2 个）
     _prune_backups(keep=2)
 
+    _write_progress("等待重启生效", 98)
     steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
     return True, "\n".join(steps)
 
@@ -309,34 +356,102 @@ def do_upgrade_from_tarball(tarball_path, new_version):
 # 回退流程
 # ═══════════════════════════════════════════════════════════════
 
-def do_rollback():
-    """回退到上一个版本"""
-    history = _read_version_history()
-    if len(history) < 2:
-        return False, "仅有当前版本，无可回退版本"
+def do_rollback(version=None):
+    """回退到指定版本（v0.3.1.34：支持任意本地保留版本）。
 
-    prev = history[-2]
-    prev_version = prev["version"]
-    prev_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{prev_version}")
+    Args:
+        version: 目标版本号（如 "0.3.1.30"）；None 时回退到上一版本（兼容旧调用）
 
-    # 也检查备份目录
-    if not os.path.isdir(prev_dir):
-        backup_dir = os.path.join(BACKUP_DIR, f"teslausb-v{prev_version}")
-        if os.path.isdir(backup_dir):
-            prev_dir = backup_dir
-        else:
-            return False, f"版本目录不存在: {prev_dir}"
+    Returns:
+        (success, message)
+    """
+    import re as _re
+
+    if version:
+        # ── 指定版本路径 ──
+        if not _re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', str(version)):
+            return False, f"非法版本号: {version!r}"
+        target_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{version}")
+        # 主目录不存在 → 尝试备份目录
+        if not os.path.isdir(target_dir):
+            backup_dir = os.path.join(BACKUP_DIR, f"teslausb-v{version}")
+            if os.path.isdir(backup_dir):
+                target_dir = backup_dir
+            else:
+                return False, f"版本目录不存在: v{version}（该版本可能已被清理）"
+        current = get_current_version_dir()
+        if current and os.path.realpath(target_dir) == os.path.realpath(current):
+            return False, f"当前已是 v{version}，无需回退"
+        record_sha = ""
+    else:
+        # ── 旧逻辑：回退到上一版本 ──
+        history = _read_version_history()
+        if len(history) < 2:
+            return False, "仅有当前版本，无可回退版本"
+        prev = history[-2]
+        version = prev["version"]
+        target_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{version}")
+        if not os.path.isdir(target_dir):
+            backup_dir = os.path.join(BACKUP_DIR, f"teslausb-v{version}")
+            if os.path.isdir(backup_dir):
+                target_dir = backup_dir
+            else:
+                return False, f"版本目录不存在: {target_dir}"
+        record_sha = prev.get("sha256", "")
 
     # 切 symlink
     if os.path.islink(SYMLINK):
         os.unlink(SYMLINK)
     elif os.path.isdir(SYMLINK):
         shutil.rmtree(SYMLINK)
-    os.symlink(prev_dir, SYMLINK)
+    os.symlink(target_dir, SYMLINK)
 
-    _record_version(prev_version, prev.get("sha256", ""), "rollback")
+    _record_version(version, record_sha, "rollback")
 
-    return True, f"已回退到 v{prev_version}（重启后生效）"
+    return True, f"已回退到 v{version}（重启后生效）"
+
+
+def get_rollback_options():
+    """列出所有本地可回退版本（v0.3.1.34）。
+
+    扫描 DEPLOY_BASE/teslausb-v* + 备份目录，排除当前 symlink 指向的版本，
+    按版本号降序返回。回退选项与版本目录保留策略（auto_cleanup keep=5）联动——
+    只显示设备上实际存在的版本目录。
+
+    Returns:
+        [{"version": "0.3.1.32", "dir": "/opt/radxa_data/teslausb-v0.3.1.32", "from_backup": False}, ...]
+    """
+    import re as _re
+    pattern = _re.compile(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)$')
+    current = get_current_version_dir()
+    current_real = os.path.realpath(current) if current else ""
+
+    options = []
+    seen = set()
+    for base in (DEPLOY_BASE, BACKUP_DIR):
+        if not os.path.isdir(base):
+            continue
+        try:
+            for name in os.listdir(base):
+                m = pattern.match(name)
+                if not m:
+                    continue
+                ver = m.group(1)
+                d = os.path.join(base, name)
+                if not os.path.isdir(d) or os.path.islink(d):
+                    continue
+                if current_real and os.path.realpath(d) == current_real:
+                    continue  # 排除当前版本
+                if ver in seen:
+                    continue
+                seen.add(ver)
+                options.append({"version": ver, "dir": d, "from_backup": base == BACKUP_DIR})
+        except OSError:
+            continue
+
+    # 按版本号降序（新 → 旧）
+    options.sort(key=lambda x: [int(p) for p in x["version"].split(".")], reverse=True)
+    return options
 
 
 def get_rollback_info():
