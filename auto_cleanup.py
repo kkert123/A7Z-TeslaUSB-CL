@@ -925,17 +925,20 @@ class AutoCleaner:
     # 版本目录保留策略（v0.3.1.34，1A）
     # ═════════════════════════════════════════════════════════
 
-    def cleanup_old_versions(self, keep: int = 5) -> int:
+    def cleanup_old_versions(self, keep: int = 2) -> int:
         """清理旧版本目录：保留当前 + 最近 keep-1 个历史版本，其余删除。
 
         v0.3.1.34 新增：设备曾堆 10 个 teslausb-v* 目录（磁盘浪费 + 混乱）。
-        与回退功能联动——回退选项只显示保留的版本目录。
+        v0.3.1.35 收紧：主目录仅保留当前 + 1（历史全部由 teslausb-bak 压缩包
+        接管——用户确认），且**删除前先确保 bak 有对应压缩包**（无则先打包
+        再删，删前留后路闭环，回退选项不丢失）。
 
         安全护栏（防误删事故）：
         1. 只匹配严格格式 `teslausb-v<数字.数字.数字(.数字)>`
         2. 永不删除 symlink 指向的目录（当前运行版本）
         3. 保留按版本号降序最大的 keep 个（含当前）
-        4. dry_run 模式只报告不删除（与其他清理方法一致）
+        4. 删前 bak 打包失败 → 保留目录并记录错误（不冒险删）
+        5. dry_run 模式只报告不删除（与其他清理方法一致）
 
         Returns:
             删除的目录数
@@ -991,13 +994,26 @@ class AutoCleaner:
 
         deleted = 0
         for ver, d in to_delete:
+            ver_str = ".".join(str(x) for x in ver)
             if self.dry_run:
-                logger.info("[DRY RUN] 将删除旧版本目录: %s (v%s)", d, ".".join(str(x) for x in ver))
+                logger.info("[DRY RUN] 将删除旧版本目录: %s (v%s)", d, ver_str)
                 deleted += 1
                 continue
             try:
+                # ── v0.3.1.35：删前留后路——确保 teslausb-bak 有该版本压缩包 ──
+                from upgrade_service import BAK_DIR as _bak_dir
+                from upgrade_service import _pack_version_dir as _pack_bak
+                bak_tar = os.path.join(_bak_dir, f"teslausb-v{ver_str}.tar.gz")
+                if not os.path.isfile(bak_tar):
+                    ok_pack, _msg = _pack_bak(d, ver_str)
+                    if not ok_pack:
+                        self.stats.setdefault("errors", []).append(
+                            f"删除版本目录前备份失败，保留目录: {d} ({_msg})")
+                        logger.error("删除前打包备份失败，保留: %s (%s)", d, _msg)
+                        continue  # 备份失败 → 保留目录，不冒险删
+                    logger.info("已先打包备份 v%s → teslausb-bak（删前留后路）", ver_str)
                 _shutil.rmtree(d, ignore_errors=False)
-                logger.info("已删除旧版本目录: %s (v%s)", d, ".".join(str(x) for x in ver))
+                logger.info("已删除旧版本目录: %s (v%s)", d, ver_str)
                 deleted += 1
             except Exception as e:
                 self.stats.setdefault("errors", []).append(f"删除版本目录失败 {d}: {e}")
@@ -1039,7 +1055,7 @@ class AutoCleaner:
         freed_preview = self.cleanup_previews()
         freed_temp = self.cleanup_temp_files()
         freed_logs = self.cleanup_logs()
-        deleted_versions = self.cleanup_old_versions(keep=5)
+        deleted_versions = self.cleanup_old_versions(keep=2)  # v0.3.1.35：主目录仅保留当前+1，历史由 teslausb-bak 接管
 
         for label, freed in [("预览图", freed_preview), ("临时文件", freed_temp), ("日志文件", freed_logs)]:
             if freed > 0:

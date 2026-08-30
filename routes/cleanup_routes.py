@@ -314,8 +314,8 @@ def api_cleanup_execute():
         freed_preview = cleaner.cleanup_previews()
         freed_temp = cleaner.cleanup_temp_files()
         freed_logs = cleaner.cleanup_logs()
-        # v0.3.1.34：版本目录保留策略（保留当前 + 最近 4 历史 = 5 个）
-        deleted_versions = cleaner.cleanup_old_versions(keep=5)
+        # v0.3.1.35：版本目录保留策略（主目录仅保留当前 + 1 = 2 个，历史由 teslausb-bak 接管）
+        deleted_versions = cleaner.cleanup_old_versions(keep=2)
 
         non_video_freed = freed_preview + freed_temp + freed_logs
         for label, f in [("预览图", freed_preview), ("临时文件", freed_temp), ("日志文件", freed_logs)]:

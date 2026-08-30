@@ -102,9 +102,11 @@ if __name__ == '__main__':
     app.logger.info("系统监控守护线程已启动")
 
     # ── TeslaCam 只读挂载缓存一致性任务（修复 Present 模式货不对板）──
-    # v0.3.1.31：由"每 30s 无条件全刷"改为"读取驱动 + 后台 60s mtime 兜底"。
-    # 读取即时性由各读取入口调用 ensure_fresh() 保证；后台任务仅 stat mtime，
-    # 车机在写才刷（无写入零开销），消除 8-28 的 drop_caches 风暴。
+    # v0.3.1.31：由"每 30s 无条件全刷"改为"读取驱动 + 后台 60s 兜底"。
+    # v0.3.1.35：写入检测由 stat mtime（被 inode 缓存冻结，8-30 实锤失效）
+    # 改为 listdir 指纹（文件数+最新文件名，dentry miss 强制读盘可靠）。
+    # 读取即时性由各读取入口调用 ensure_fresh() 保证；后台任务仅 listdir 指纹
+    # 检测，车机在写才刷（无写入零开销），消除 8-28 的 drop_caches 风暴。
     try:
         from utils.cache_coherency import start_cache_coherency_task
         start_cache_coherency_task(interval=60)

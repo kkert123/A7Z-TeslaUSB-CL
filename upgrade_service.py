@@ -8,7 +8,9 @@
 
 import os
 import json
-import os
+import re
+import hashlib
+import tarfile
 import shutil
 import subprocess
 import tempfile
@@ -18,8 +20,15 @@ import config
 
 DEPLOY_BASE = "/opt/radxa_data"
 SYMLINK = os.path.join(DEPLOY_BASE, "teslausb")
-BACKUP_DIR = os.path.join(DEPLOY_BASE, "teslausb-backups")
+BACKUP_DIR = os.path.join(DEPLOY_BASE, "teslausb-backups")  # 旧版目录级备份（v0.3.1.35 起废弃，仅迁移/兼容扫描）
+BAK_DIR = os.path.join(DEPLOY_BASE, "teslausb-bak")         # v0.3.1.35：运行版本压缩包备份（tar.gz + .sha256）
+BAK_KEEP = 10                                                # teslausb-bak 保留压缩包数量
 VERSION_FILE = os.path.join(config.DATA_DIR, "version_history.json")
+
+# 备份打包时排除的运行时产物（白名单：仅打包代码 + config + data）
+BACKUP_EXCLUDE_DIRS = {"__pycache__", "venv", ".git", "thumbnails", "logs", "gif_cache", "backups", "_deploy"}
+BACKUP_EXCLUDE_EXT = {".pyc", ".log", ".tmp"}
+BACKUP_EXCLUDE_FILES = {".DS_Store", "thumbs.db"}
 
 # 升级进度文件（v0.3.1.34：前端轮询真实进度，替代模拟进度）
 UPGRADE_PROGRESS_FILE = "/var/run/upgrade_progress.json"
@@ -265,8 +274,8 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 
     _cleanup(tarball, sig_file)
 
-    # 清理旧备份（保留最近 2 个）
-    _prune_backups(keep=2)
+    # 清理旧备份（bak 保留最近 BAK_KEEP 个）
+    _prune_bak()
 
     _write_progress("等待重启生效", 98)
     steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
@@ -348,7 +357,7 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     os.symlink(new_dir, SYMLINK)
 
     _record_version(new_version, "", "manual-upload")
-    _prune_backups(keep=2)
+    _prune_bak()
 
     steps.append("等待重启生效")
     return True, "\n".join(steps)
@@ -358,8 +367,31 @@ def do_upgrade_from_tarball(tarball_path, new_version):
 # 回退流程
 # ═══════════════════════════════════════════════════════════════
 
+def _find_rollback_dir(version):
+    """三级查找回退目标目录（v0.3.1.35）：
+
+    ① 主目录 /opt/radxa_data/teslausb-vX 存在 → 直接用
+    ② 无 → teslausb-bak 压缩包：SHA256 校验 → 解压到主目录 → 完整性检查
+    ③ 都无 → 旧 teslausb-backups 目录（迁移兼容）
+
+    Returns: (success, target_dir_or_msg)
+    """
+    version = str(version)
+    target_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{version}")
+    if os.path.isdir(target_dir):
+        return True, target_dir
+    # 二级：teslausb-bak 压缩包（校验 → 解压 → 完整性）
+    if os.path.isfile(os.path.join(BAK_DIR, f"teslausb-v{version}.tar.gz")):
+        return _restore_from_bak(version)
+    # 三级：旧 backups 目录（迁移兼容）
+    backup_dir = os.path.join(BACKUP_DIR, f"teslausb-v{version}")
+    if os.path.isdir(backup_dir):
+        return True, backup_dir
+    return False, f"版本不可用: v{version}（主目录/teslausb-bak/旧备份均无，可从 GitHub Release 重新下载）"
+
+
 def do_rollback(version=None):
-    """回退到指定版本（v0.3.1.34：支持任意本地保留版本）。
+    """回退到指定版本（v0.3.1.34：支持任意本地保留版本；v0.3.1.35：三级查找含 bak 压缩包恢复）。
 
     Args:
         version: 目标版本号（如 "0.3.1.30"）；None 时回退到上一版本（兼容旧调用）
@@ -369,22 +401,21 @@ def do_rollback(version=None):
     """
     import re as _re
 
+    # 触发旧 backups 一次性归档迁移（幂等，失败不阻塞）
+    _migrate_legacy_backups()
+
     if version:
         # ── 指定版本路径 ──
         if not _re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', str(version)):
             return False, f"非法版本号: {version!r}"
-        target_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{version}")
-        # 主目录不存在 → 尝试备份目录
-        if not os.path.isdir(target_dir):
-            backup_dir = os.path.join(BACKUP_DIR, f"teslausb-v{version}")
-            if os.path.isdir(backup_dir):
-                target_dir = backup_dir
-            else:
-                return False, f"版本目录不存在: v{version}（该版本可能已被清理）"
+        ok, res = _find_rollback_dir(version)
+        if not ok:
+            return False, res
+        target_dir = res
         current = get_current_version_dir()
         if current and os.path.realpath(target_dir) == os.path.realpath(current):
             return False, f"当前已是 v{version}，无需回退"
-        # S3：校验目标目录完整性（防回退到解压中断残留的损坏目录 → 服务起不来）
+        # 完整性校验（防回退到解压中断残留的损坏目录 → 服务起不来）
         missing = [f for f in ("app.py", "config.py", "requirements.txt") if not os.path.exists(os.path.join(target_dir, f))]
         if missing:
             return False, f"目标版本 v{version} 目录不完整（缺少 {', '.join(missing)}），拒绝回退"
@@ -396,13 +427,10 @@ def do_rollback(version=None):
             return False, "仅有当前版本，无可回退版本"
         prev = history[-2]
         version = prev["version"]
-        target_dir = os.path.join(DEPLOY_BASE, f"teslausb-v{version}")
-        if not os.path.isdir(target_dir):
-            backup_dir = os.path.join(BACKUP_DIR, f"teslausb-v{version}")
-            if os.path.isdir(backup_dir):
-                target_dir = backup_dir
-            else:
-                return False, f"版本目录不存在: {target_dir}"
+        ok, res = _find_rollback_dir(version)
+        if not ok:
+            return False, res
+        target_dir = res
         record_sha = prev.get("sha256", "")
 
     # 切 symlink
@@ -418,28 +446,33 @@ def do_rollback(version=None):
 
 
 def get_rollback_options():
-    """列出所有本地可回退版本（v0.3.1.34）。
+    """列出所有本地可回退版本（v0.3.1.34；v0.3.1.35 合并 teslausb-bak 压缩包）。
 
-    扫描 DEPLOY_BASE/teslausb-v* + 备份目录，排除当前 symlink 指向的版本，
-    按版本号降序返回。回退选项与版本目录保留策略（auto_cleanup keep=5）联动——
-    只显示设备上实际存在的版本目录。
+    扫描主目录 teslausb-v* + teslausb-bak 压缩包 + 旧 backups 目录，排除当前
+    symlink 指向的版本，按版本号降序返回。回退选项与版本保留策略联动——
+    主目录（keep=2）+ bak 压缩包（keep=10）+ 旧 backups 迁移兼容。
 
     Returns:
-        [{"version": "0.3.1.32", "dir": "/opt/radxa_data/teslausb-v0.3.1.32", "from_backup": False}, ...]
+        [{"version": "0.3.1.32", "dir": "...", "from_backup": bool, "from_bak": bool}, ...]
     """
     import re as _re
-    pattern = _re.compile(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)$')
+    # 触发旧 backups 一次性归档迁移（幂等，失败不阻塞）
+    _migrate_legacy_backups()
+
+    pattern_dir = _re.compile(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)$')
+    pattern_bak = _re.compile(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)\.tar\.gz$')
     current = get_current_version_dir()
     current_real = os.path.realpath(current) if current else ""
 
     options = []
     seen = set()
+    # 1) 主目录 + 旧 backups 目录
     for base in (DEPLOY_BASE, BACKUP_DIR):
         if not os.path.isdir(base):
             continue
         try:
             for name in os.listdir(base):
-                m = pattern.match(name)
+                m = pattern_dir.match(name)
                 if not m:
                     continue
                 ver = m.group(1)
@@ -451,9 +484,26 @@ def get_rollback_options():
                 if ver in seen:
                     continue
                 seen.add(ver)
-                options.append({"version": ver, "dir": d, "from_backup": base == BACKUP_DIR})
+                options.append({"version": ver, "dir": d,
+                                "from_backup": base == BACKUP_DIR, "from_bak": False})
         except OSError:
             continue
+    # 2) teslausb-bak 压缩包（主目录已覆盖的版本跳过）
+    if os.path.isdir(BAK_DIR):
+        try:
+            for name in os.listdir(BAK_DIR):
+                m = pattern_bak.match(name)
+                if not m:
+                    continue
+                ver = m.group(1)
+                if ver in seen:
+                    continue
+                seen.add(ver)
+                options.append({"version": ver,
+                                "dir": os.path.join(BAK_DIR, name),
+                                "from_backup": False, "from_bak": True})
+        except OSError:
+            pass
 
     # 按版本号降序（新 → 旧）
     options.sort(key=lambda x: [int(p) for p in x["version"].split(".")], reverse=True)
@@ -461,7 +511,7 @@ def get_rollback_options():
 
 
 def get_rollback_info():
-    """返回可回退的版本信息（含备份检测）"""
+    """返回可回退的版本信息（含备份检测：旧 backups 目录 + teslausb-bak 压缩包）"""
     history = _read_version_history()
 
     # 初始化版本历史（首次安装）
@@ -471,15 +521,28 @@ def get_rollback_info():
             _record_version(current_ver, '', 'init')
         return None
 
-    # 检查备份目录中是否有可回退版本
-    if len(history) < 2 and os.path.isdir(BACKUP_DIR):
-        backups = sorted(
-            [d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))],
-            reverse=True
-        )
-        if backups:
-            ver = backups[0].replace('teslausb-v', '')
-            return {"version": ver, "installed_at": "", "from_backup": True}
+    # 检查备份来源是否有可回退版本（旧 backups 目录 + teslausb-bak 压缩包）
+    if len(history) < 2:
+        # 旧 backups 目录
+        if os.path.isdir(BACKUP_DIR):
+            backups = sorted(
+                [d for d in os.listdir(BACKUP_DIR) if os.path.isdir(os.path.join(BACKUP_DIR, d))],
+                reverse=True
+            )
+            if backups:
+                ver = backups[0].replace('teslausb-v', '')
+                return {"version": ver, "installed_at": "", "from_backup": True}
+        # 🟡7：teslausb-bak 压缩包
+        if os.path.isdir(BAK_DIR):
+            import re as _re
+            bak_vers = sorted(
+                [m.group(1) for f in os.listdir(BAK_DIR)
+                 for m in [_re.match(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)\.tar\.gz$', f)]
+                 if m],
+                key=lambda v: [int(p) for p in v.split('.')], reverse=True,
+            )
+            if bak_vers:
+                return {"version": bak_vers[0], "installed_at": "", "from_backup": True, "from_bak": True}
 
     if len(history) < 2:
         return None
@@ -601,15 +664,190 @@ def _verify_ed25519(data_file, sig_file):
             os.unlink(tmp_allowed)
 
 
+def _pack_version_dir(src_dir, version):
+    """提取 src_dir 运行版本文件 → 打包 teslausb-v{version}.tar.gz + SHA256 → 原子落位 BAK_DIR。
+
+    v0.3.1.35：备份从「copytree 全量目录」（几百 MB）改为「白名单压缩包」（~1MB）。
+    排除运行时产物（pycache/venv/thumbnails/logs/gif_cache），保留代码 + config + data。
+    包内结构 = 相对 src_dir 的路径（与官方升级包一致，解压后可直接运行）。
+    返回 (success, message)。
+    """
+    try:
+        os.makedirs(BAK_DIR, exist_ok=True)
+        version = str(version)
+        # 🟡4：tmp 名加 pid 防并发写同一 tmp（cleanup 删前打包 vs 迁移打包同版本）
+        tmp_tar = os.path.join(BAK_DIR, f".tmp-{version}-{os.getpid()}.tar.gz")
+        final_tar = os.path.join(BAK_DIR, f"teslausb-v{version}.tar.gz")
+        with tarfile.open(tmp_tar, "w:gz") as tar:
+            for root, dirs, files in os.walk(src_dir):
+                dirs[:] = [d for d in dirs if d not in BACKUP_EXCLUDE_DIRS]
+                rel_root = os.path.relpath(root, src_dir)
+                for f in files:
+                    if f in BACKUP_EXCLUDE_FILES or f.endswith(tuple(BACKUP_EXCLUDE_EXT)):
+                        continue
+                    full = os.path.join(root, f)
+                    arcname = os.path.join(rel_root, f) if rel_root != "." else f
+                    try:
+                        tar.add(full, arcname=arcname)
+                    except OSError:
+                        continue  # 单个文件读取失败跳过（如运行中被替换）
+        # SHA256
+        digest = _sha256_file(tmp_tar)
+        # 原子落位
+        os.replace(tmp_tar, final_tar)
+        with open(final_tar + ".sha256", "w") as f:
+            f.write(f"{digest}  {os.path.basename(final_tar)}\n")
+        return True, final_tar
+    except Exception as e:
+        try:
+            if os.path.exists(tmp_tar):
+                os.unlink(tmp_tar)
+        except Exception:
+            pass
+        return False, f"备份打包失败: {e}"
+
+
+def _sha256_file(path):
+    """计算文件 SHA256（分块，避免大文件全量入内存）"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_bak_sha256(tar_path):
+    """校验 bak 压缩包 SHA256（.sha256 存在则比对；缺失则现场计算补写）"""
+    sha_file = tar_path + ".sha256"
+    if not os.path.isfile(sha_file):
+        # 缺 .sha256（老备份）→ 现场计算补写
+        try:
+            digest = _sha256_file(tar_path)
+            with open(sha_file, "w") as f:
+                f.write(f"{digest}  {os.path.basename(tar_path)}\n")
+            return True
+        except Exception:
+            return True  # 补写失败不阻塞（本地备份，防损坏由存在性兜底）
+    try:
+        expected = open(sha_file).read().strip().split()[0]
+        if len(expected) != 64:
+            return False  # .sha256 内容非法 → 拒绝（防校验静默失效）
+    except Exception:
+        # .sha256 读取失败 → 现场重算写回（修复损坏的 .sha256 后视为一致）
+        try:
+            digest = _sha256_file(tar_path)
+            with open(sha_file, "w") as f:
+                f.write(f"{digest}  {os.path.basename(tar_path)}\n")
+            return True
+        except Exception:
+            return False
+    return _sha256_file(tar_path) == expected
+
+
+def _restore_from_bak(version):
+    """从 teslausb-bak 恢复：SHA256 校验 → 解压到 DEPLOY_BASE/teslausb-vX → 完整性检查。
+
+    返回 (success, target_dir_or_msg)。
+    """
+    version = str(version)
+    tar_path = os.path.join(BAK_DIR, f"teslausb-v{version}.tar.gz")
+    if not os.path.isfile(tar_path):
+        return False, f"teslausb-bak 无该版本压缩包: v{version}"
+    # SHA256 校验（损坏拒绝恢复）
+    if not _verify_bak_sha256(tar_path):
+        return False, f"v{version} 备份 SHA256 校验失败，拒绝回退（备份可能损坏）"
+    # 解压到目标目录
+    target = os.path.join(DEPLOY_BASE, f"teslausb-v{version}")
+    if os.path.isdir(target):
+        shutil.rmtree(target, ignore_errors=True)
+    os.makedirs(target, exist_ok=True)
+    try:
+        with tarfile.open(tar_path, "r:gz") as tf:
+            for m in tf.getmembers():
+                p = m.name.replace("\\", "/")
+                if p.startswith("/") or ".." in p.split("/"):
+                    shutil.rmtree(target, ignore_errors=True)
+                    return False, f"备份包含非法路径: {p!r}，已中止"
+                # 🟡3：拒绝符号链接/硬链接成员（防解压逃逸到包外路径）
+                if m.issym() or m.islnk():
+                    shutil.rmtree(target, ignore_errors=True)
+                    return False, f"备份包含链接成员（拒绝）: {p!r}，已中止"
+            tf.extractall(target)
+    except Exception as e:
+        shutil.rmtree(target, ignore_errors=True)
+        return False, f"备份解压失败: {e}"
+    # 完整性检查（防解压中断残留 → 服务起不来）
+    missing = [f for f in ("app.py", "config.py", "requirements.txt") if not os.path.exists(os.path.join(target, f))]
+    if missing:
+        shutil.rmtree(target, ignore_errors=True)
+        return False, f"v{version} 恢复后不完整（缺少 {', '.join(missing)}），已回滚删除"
+    return True, target
+
+
 def _backup_current():
+    """备份当前运行版本（v0.3.1.35：打包压缩包存 teslausb-bak，替代 copytree 全量目录）"""
     current = get_current_version_dir()
     if not current or not os.path.isdir(current):
         return False, "当前部署目录不存在"
-    dest = os.path.join(BACKUP_DIR, os.path.basename(current))
-    if os.path.exists(dest):
-        shutil.rmtree(dest)
-    shutil.copytree(current, dest, symlinks=True)
-    return True, dest
+    version = os.path.basename(current).replace("teslausb-v", "")
+    ok, msg = _pack_version_dir(current, version)
+    if ok:
+        return True, f"teslausb-bak/{os.path.basename(msg)}"
+    return False, msg
+
+
+def _prune_bak(keep=BAK_KEEP):
+    """清理 teslausb-bak 多余压缩包（保留 keep 个最新的）。
+
+    按版本号数字序排序（字符串序会把 .9 排在 .35 前面 → 误删最新备份）。
+    """
+    if not os.path.isdir(BAK_DIR):
+        return
+    try:
+        tars = [f for f in os.listdir(BAK_DIR)
+                if re.match(r'^teslausb-v\d+\.\d+\.\d+(\.\d+)?\.tar\.gz$', f)]
+        tars.sort(key=lambda f: [int(p) for p in
+                                 re.sub(r'^teslausb-v|\.tar\.gz$', '', f).split('.')],
+                  reverse=True)
+        for f in tars[keep:]:
+            for p in (os.path.join(BAK_DIR, f), os.path.join(BAK_DIR, f + ".sha256")):
+                try:
+                    if os.path.exists(p):
+                        os.unlink(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _migrate_legacy_backups():
+    """一次性迁移：旧 teslausb-backups 目录级备份 → 打包归档到 teslausb-bak → 删除目录（幂等）。
+
+    用户确认（v0.3.1.35）：旧备份一次性打包归档后废弃。
+    幂等：bak 已有同版本压缩包则直接删旧目录；无则打包成功才删，失败保留。
+    """
+    if not os.path.isdir(BACKUP_DIR):
+        return
+    try:
+        for name in os.listdir(BACKUP_DIR):
+            d = os.path.join(BACKUP_DIR, name)
+            if not os.path.isdir(d) or os.path.islink(d):
+                continue
+            # 🟡5：收紧正则，仅迁移标准版本目录（防 teslausb-vfoo 等非法名）
+            m = re.match(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)$', name)
+            if not m:
+                continue
+            ver = m.group(1)
+            bak_tar = os.path.join(BAK_DIR, f"teslausb-v{ver}.tar.gz")
+            if os.path.isfile(bak_tar):
+                shutil.rmtree(d, ignore_errors=True)  # 已有备份 → 直接删旧目录
+                continue
+            ok, _ = _pack_version_dir(d, ver)
+            if ok:
+                shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        # 迁移失败不阻塞主流程（旧目录仍可被兼容扫描使用）
+        pass
 
 
 def _extract_and_setup(tarball, target_dir):
@@ -663,6 +901,7 @@ def _read_version_history():
 
 
 def _prune_backups(keep=2):
+    """兼容旧入口：新备份走 teslausb-bak（_prune_bak），此处仅清理旧 backups 遗留目录"""
     if not os.path.isdir(BACKUP_DIR):
         return
     dirs = sorted(os.listdir(BACKUP_DIR), reverse=True)

@@ -20,16 +20,18 @@ cache_coherency.py — TeslaCam 只读挂载的 VFS 缓存一致性修复
 
   重构后两条路径（严格遵守 Mount Safety：禁止 umount/remount，仅 drop_caches=2）：
     1. 主保障（读取驱动 ensure_fresh）：所有 teslacam 读取入口（缩略图/
-       播放/SEI/列表）在读取前调用 ensure_fresh() —— 30s TTL 节流 + 目录
-       mtime 指纹检测。读取时刻 = 刷新时刻 → 用户看到的必然最新（满足
+       播放/SEI/列表）在读取前调用 ensure_fresh() —— 30s TTL 节流 + listdir
+       指纹检测（文件数+最新文件名；8-30 实测 stat mtime 被 inode 缓存冻结
+       不可用，listdir 因 dentry miss 强制读盘可实时感知特斯拉新文件）。
+       读取时刻 = 刷新时刻 → 用户看到的必然最新（满足
        "任何时刻读取都最新"的原始需求，且优于原周期方案的 30s 滞后窗口）。
-    2. 兜底（后台 60s 检测）：后台线程每 60s stat RecentClips 目录 mtime，
-       车机在写（mtime 变化）才刷，无写入时零开销（仅一次 stat），
+    2. 兜底（后台 60s 检测）：后台线程每 60s listdir 指纹检测 RecentClips，
+       车机在写（指纹变化）才刷，无写入时零开销（仅一次 listdir），
        覆盖漏接 ensure_fresh 的读取入口（如后台缩略图扫描）。
 
   开销对比（业务堆积的根治）：
     - 车机写 + 有人读：读取时刷一次（30s 节流）≈ 原方案
-    - 车机写 + 无人读：60s stat 检测，mtime 变化才刷（原方案每 30s 全刷）
+    - 车机写 + 无人读：60s 指纹检测，变化才刷（原方案每 30s 全刷）
     - 车机不写：零 drop_caches（原方案每 30s 全刷 → 3332 次/天风暴消除）
 """
 
@@ -52,7 +54,13 @@ RECENTCLIPS_DIR = "/mnt/teslacam/TeslaCam/RecentClips"
 # 30s 内只允许一次 drop_caches：读取连发/后台兜底高频触发时防抖。
 ENSURE_TTL_SEC = 30
 
-# 后台兜底检测间隔（秒）：仅 stat mtime，车机在写才刷，无写入零开销。
+# S3 兜底：指纹检测失效场景（如「同名文件覆盖重写」O_TRUNC，文件名集合
+# 不变）的最长不刷新窗口。超过该时长即使指纹未变也强制刷一次。
+# 8-30 实测：Present 模式 stat 目录 mtime 被 inode 缓存冻结，指纹已改用
+# listdir（可靠），此兜底仅覆盖指纹感知不到的罕见场景。
+S3_FORCE_TTL_SEC = 120
+
+# 后台兜底检测间隔（秒）：仅 listdir 指纹检测，车机在写才刷，无写入零开销。
 DEFAULT_REFRESH_INTERVAL = 60
 
 # ── 可观测性状态（供 /api/system/cache-coherency 上报，确认任务真实运行）──
@@ -67,9 +75,9 @@ _state = {
 }
 _state_lock = threading.Lock()
 
-# ensure_fresh 节流状态（TTL + mtime 指纹）
+# ensure_fresh 节流状态（TTL + listdir 指纹）
 _ensure_lock = threading.Lock()
-_ensure_state = {"last_ts": 0.0, "last_freshness": 0.0}
+_ensure_state = {"last_ts": 0.0, "last_fingerprint": None}
 
 
 def get_coherency_status() -> dict:
@@ -141,17 +149,23 @@ def drop_vfs_caches() -> bool:
     return False
 
 
-def _get_freshness(path: str) -> float:
-    """返回目录 mtime 作为"写入指纹"。
+def _dir_fingerprint(path: str):
+    """目录写入指纹：文件数 + 最新文件名。
 
-    车机循环写入 RecentClips 必然创建/删除文件（文件名含时间戳，新视频
-    新文件名）→ 目录 mtime 更新。同名重写场景（mtime 不变）由读取驱动
-    的 30s TTL 内首次读取兜住。
+    8-30 实测（特斯拉活跃写入窗口）：
+      - stat 目录 mtime 走 VFS inode 缓存 → 被 drop_caches 失效的对象 → 写入后
+        不失效 → 永远返回旧值（mtime 指纹检测"鸡生蛋"失效，货不对板复燃根因）
+      - listdir 因新文件名的 dentry miss 会强制读盘 → 能实时感知特斯拉新文件
+    特斯拉 RecentClips 每次录制产生新文件名（时间戳），故用
+    「文件数 + 最新文件名」作指纹，变化即代表有新写入。
+
+    返回 (文件数, 最新文件名)；目录不可读时返回 None（调用方保守触发刷新）。
     """
     try:
-        return os.path.getmtime(path)
+        files = sorted(f for f in os.listdir(path) if f.lower().endswith('.mp4'))
+        return (len(files), files[-1]) if files else (0, "")
     except Exception:
-        return 0.0
+        return None
 
 
 def ensure_fresh(path: Optional[str] = None) -> bool:
@@ -159,7 +173,9 @@ def ensure_fresh(path: Optional[str] = None) -> bool:
 
     主保障（读取驱动）：
       - 30s TTL 节流：距上次刷新不足 30s 直接跳过（缓存仍新鲜）
-      - mtime 指纹：目录 mtime 未变（车机未写）→ 跳过，零开销
+      - listdir 指纹：文件集合未变（车机未写）→ 跳过，零开销
+      - S3 兜底：距上次刷新 >120s 即使指纹未变也强制刷一次
+        （覆盖「同名覆盖重写」等指纹感知不到的罕见场景）
       - 仅 Present 模式生效（Edit 模式 rw 挂载、缓存随磁盘重建，无需刷）
     返回是否执行了刷新（供调用方/日志参考）。
     """
@@ -173,12 +189,12 @@ def ensure_fresh(path: Optional[str] = None) -> bool:
         # 30s TTL：节流窗口内不重复刷
         if now - _ensure_state["last_ts"] < ENSURE_TTL_SEC:
             return False
-        freshness = _get_freshness(target)
-        # mtime 指纹未变且已刷过 → 无新写入，跳过。
-        # S3 兜底：距上次刷新 >300s 时即使 mtime 未变也强制刷一次——
-        # 覆盖「同名文件覆盖重写」（O_TRUNC，目录 mtime 不变）的漏刷场景。
-        if _ensure_state["last_ts"] > 0 and freshness <= _ensure_state["last_freshness"] \
-                and (now - _ensure_state["last_ts"]) < 300:
+        fp = _dir_fingerprint(target)
+        # listdir 指纹未变（车机未写新文件）且距上次刷新 < S3 兜底时长 → 跳过。
+        # fp 为 None（目录不可读）→ 保守视为有变化，触发刷新。
+        if fp is not None and _ensure_state["last_ts"] > 0 \
+                and fp == _ensure_state["last_fingerprint"] \
+                and (now - _ensure_state["last_ts"]) < S3_FORCE_TTL_SEC:
             return False
         if not drop_vfs_caches():
             _record_error("drop_vfs_caches 返回失败")
@@ -186,7 +202,7 @@ def ensure_fresh(path: Optional[str] = None) -> bool:
         # 同时让视频扫描元数据缓存失效，避免事件列表陈旧
         _invalidate_video_scan_cache()
         _ensure_state["last_ts"] = now
-        _ensure_state["last_freshness"] = freshness
+        _ensure_state["last_fingerprint"] = fp
         _record_success()
         return True
 
@@ -202,7 +218,8 @@ def _coherency_loop(interval: int):
             with _state_lock:
                 _state["present_mode"] = present
             if present:
-                # ensure_fresh 内部自带 30s TTL + mtime 指纹：无写入时仅一次 stat，零开销
+                # ensure_fresh 内部自带 30s TTL + listdir 指纹：无写入时仅一次
+                # listdir，零开销
                 ensure_fresh()
         except Exception as e:
             _record_error(str(e))

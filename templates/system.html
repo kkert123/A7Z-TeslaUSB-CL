@@ -1054,7 +1054,7 @@ function loadRollbackOptions() {
       d.options.forEach(o => {
         var opt = document.createElement('option');
         opt.value = o.version;
-        opt.textContent = 'v' + o.version + (o.from_backup ? ' (备份)' : '');
+        opt.textContent = 'v' + o.version + (o.from_backup ? ' (备份)' : o.from_bak ? ' (bak)' : '');
         sel.appendChild(opt);
       });
       group.style.display = '';
