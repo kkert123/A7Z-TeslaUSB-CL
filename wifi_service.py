@@ -7,6 +7,7 @@ TeslaUSB A7Z - WiFi 服务模块
 """
 
 import json
+import logging
 import os
 import re
 import socket
@@ -28,13 +29,21 @@ AP_CONTROL_SCRIPT = "/opt/radxa_data/teslausb/ap_control.sh"
 # AP 生命周期安全护栏（v0.3.1.31，防 8-28 同类事故）
 AP_TRANSITION_FILE = "/var/run/teslausb-ap-transition"   # R6: AP 起停进行中标记（Web/timer 并发互斥）
 AP_TRANSITION_TTL = 120                                   # transition 标记最长有效秒数（覆盖 NM restart 60s+轮询 30s 慢路径）
-AP_START_TIME_FILE = "/var/run/teslausb-ap-start-time"    # R5: AP 启动时间戳（宽限期防震荡）
-AP_GRACE_PERIOD_SEC = 900                                 # R5: AP 启动后 15min 内不自动关闭
+AP_START_TIME_FILE = "/var/run/teslausb-ap-start-time"    # R5: AP 启动时间戳（宽限期防震荡）；内容 JSON {ts, manual}
+AP_GRACE_PERIOD_SEC = 900                                 # R5: fallback 自动开启 AP 的宽限期 15min（防震荡）
+AP_MANUAL_GRACE_PERIOD_SEC = 180                          # v0.3.1.36: 手动开启 AP 的宽限期 3min（用户主动开，无震荡风险）
 AP_BACKOFF_FILE = "/var/run/teslausb-ap-backoff"          # 自愈退避分钟数（持久化，timer 新进程可见）
 AP_LAST_TRY_FILE = "/var/run/teslausb-ap-last-try"        # 自愈上次探测时间戳
+AP_HAD_CLIENTS_FILE = "/var/run/teslausb-ap-had-clients"  # v0.3.1.36: 上次探测时是否有客户端（断开事件检测）
 AP_BACKOFF_INIT = 5                                       # 退避起点 5min（S7：2min 过激进，减少 NM restart 断网窗口）
 AP_BACKOFF_MAX = 30                                       # 退避上限 30min
 DNSMASQ_AP_CONF = "/etc/dnsmasq.d/ap.conf"                # M46: AP 的 dnsmasq 配置（条件启动保护）
+
+# captive portal（v0.3.1.36）：AP 模式下 dnsmasq 提供 DNS（任意域名 → AP 网关）
+# + iptables 将 80 端口重定向到 Web 5000，手机连 AP 开任意网页自动跳 A7Z 配置页。
+AP_PORTAL_IPTABLES = ["iptables", "-t", "nat", "-A", "PREROUTING", "-i", "wlan0",
+                      "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", "5000"]
+AP_WEB_PORT = 5000
 
 
 # ─────────────────────────────────────────────
@@ -849,24 +858,114 @@ def _ap_transition_active() -> bool:
     return False
 
 
-def _record_ap_start_time():
-    """记录 AP 启动时间戳（R5：宽限期防 fallback 震荡）"""
+def _record_ap_start_time(manual: bool = False):
+    """记录 AP 启动时间戳（R5：宽限期防 fallback 震荡；v0.3.1.36：区分手动/自动）。"""
     try:
         with open(AP_START_TIME_FILE, "w") as f:
-            f.write(str(int(time.time())))
+            json.dump({"ts": int(time.time()), "manual": bool(manual)}, f)
     except Exception:
         pass
 
 
 def _ap_grace_period_elapsed() -> bool:
-    """AP 启动是否已过宽限期（900s）。无记录时视为已过（保守，允许关闭）"""
+    """AP 启动是否已过宽限期。手动开启 3min / fallback 15min。无记录时视为已过。"""
     try:
         if os.path.exists(AP_START_TIME_FILE):
-            ts = int(open(AP_START_TIME_FILE).read().strip())
-            return (time.time() - ts) >= AP_GRACE_PERIOD_SEC
+            with open(AP_START_TIME_FILE) as f:
+                data = json.load(f)
+            ts = int(data.get("ts", 0))
+            manual = bool(data.get("manual", False))
+            grace = AP_MANUAL_GRACE_PERIOD_SEC if manual else AP_GRACE_PERIOD_SEC
+            return (time.time() - ts) >= grace
     except Exception:
         pass
     return True
+
+
+def _read_had_clients() -> bool:
+    """读取上次探测时的客户端状态（v0.3.1.36 断开事件检测）"""
+    try:
+        if os.path.exists(AP_HAD_CLIENTS_FILE):
+            return open(AP_HAD_CLIENTS_FILE).read().strip() == "1"
+    except Exception:
+        pass
+    return False
+
+
+def _write_had_clients(has: bool):
+    try:
+        with open(AP_HAD_CLIENTS_FILE, "w") as f:
+            f.write("1" if has else "0")
+    except Exception:
+        pass
+
+
+def _ap_stop_resolved() -> bool:
+    """AP 模式下暂停 systemd-resolved（释放 53 端口给 dnsmasq 提供 DNS）。
+    返回是否成功停止（成功才启用 dnsmasq DNS + captive portal）。
+    """
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "systemctl", "stop", "systemd-resolved"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _ap_restore_resolved():
+    """恢复 systemd-resolved（AP 关闭/回滚时调用，幂等）"""
+    try:
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "start", "systemd-resolved"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        pass
+
+
+def _ap_add_portal_iptables():
+    """添加 captive portal 端口重定向（80 → Web 5000）。幂等：先删再加。"""
+    try:
+        subprocess.run(AP_PORTAL_IPTABLES[:2] + ["-D"] + AP_PORTAL_IPTABLES[2:],
+                       capture_output=True, text=True, timeout=10)
+        subprocess.run(AP_PORTAL_IPTABLES, capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _ap_del_portal_iptables():
+    """删除 captive portal 端口重定向（AP 关闭/回滚时调用）"""
+    try:
+        subprocess.run(AP_PORTAL_IPTABLES[:2] + ["-D"] + AP_PORTAL_IPTABLES[2:],
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _ap_probe_self() -> bool:
+    """AP 启动自检：本机 curl AP 网关 Web 端口，确认 Web 监听可用。
+    偶发不稳定窗口重试 3 次；全部失败仅告警（不阻塞 AP，captive portal
+    全链路「域名→80→REDIRECT→5000」需真机手机验证，此处只探 Web 存活）。
+    """
+    last_err = ""
+    for i in range(3):
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "3",
+                 f"http://{AP_STATIC_IP}:{AP_WEB_PORT}/"],
+                capture_output=True, text=True, timeout=6,
+            )
+            if r.stdout.strip() == "200":
+                return True
+            last_err = f"code={r.stdout.strip()!r} err={r.stderr.strip()[:80]}"
+        except Exception as e:
+            last_err = str(e)[:80]
+        time.sleep(2)
+    logging.getLogger("WifiSmartSwitch").warning(
+        "AP 自检: %s:%d 未响应（%s）", AP_STATIC_IP, AP_WEB_PORT, last_err)
+    return False
 
 
 def _rollback_wlan0_station():
@@ -928,7 +1027,7 @@ def _record_ap_try():
         pass
 
 
-def _ap_bring_up() -> Tuple[bool, str]:
+def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
     """完整启动 AP 热点（对齐 ap_control.sh，补齐原实现缺失的关键步骤）。
 
     关键：必须先释放 NetworkManager/wpa_supplicant 对 wlan0 的 station 管控，
@@ -940,6 +1039,11 @@ def _ap_bring_up() -> Tuple[bool, str]:
     - R1: 任何失败路径立即回滚（_rollback_wlan0_station），不留"无主"断网窗口
     - R2: _write_hostapd_conf 返回值检查（写失败即失败，不静默用旧配置）
     - R3: dnsmasq 失败即失败，verify 同时校验 hostapd + dnsmasq
+
+    v0.3.1.36（manual 参数 + captive portal）：
+    - manual=True：Web 手动开启（退避已由 start_ap 重置、宽限期 3min）
+    - captive portal：停 systemd-resolved 释放 53 → dnsmasq 提供 DNS
+      （任意域名 → AP 网关）+ iptables 80→5000，手机连 AP 开任意网页跳 A7Z Web
     """
     _set_ap_transition()
     try:
@@ -987,16 +1091,29 @@ def _ap_bring_up() -> Tuple[bool, str]:
             capture_output=True, text=True, timeout=10,
         )
 
-        # 5) dnsmasq DHCP（网段前缀按 AP 静态 IP 推导，避免字符串替换陷阱）
-        #    port=0：dnsmasq 仅做 DHCP 不做 DNS —— 设备上 53 端口被 systemd-resolved
-        #    占用导致 dnsmasq 启动失败（曾使 AP 完全不可用），纯 DHCP 可绕开冲突。
+        # 5) dnsmasq DHCP + captive portal DNS（v0.3.1.36）
+        #    M46 背景：53 端口被 systemd-resolved 占用导致 dnsmasq 启动失败（曾使 AP
+        #    完全不可用）。v0.3.1.36 改为「按需停 resolved 释放 53」：成功则 dnsmasq
+        #    提供 DNS（任意域名 → AP 网关，手机开网页自动跳配置页）；失败则回退
+        #    port=0 纯 DHCP（仅保证手机拿 IP，域名解析不可用但不阻塞 AP）。
         _ap_prefix = ".".join(AP_STATIC_IP.split(".")[:3])
-        dnsmasq_conf = (
-            "port=0\n"
-            "interface=wlan0\n"
-            f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
-            f"dhcp-option=3,{AP_STATIC_IP}\n"
-        )
+        dns_resolved = _ap_stop_resolved()
+        if dns_resolved:
+            dnsmasq_conf = (
+                "bind-interfaces\n"                      # Y3：DNS/DHCP 仅绑 wlan0，隔离其他网口
+                "interface=wlan0\n"
+                f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
+                f"dhcp-option=3,{AP_STATIC_IP}\n"
+                f"dhcp-option=6,{AP_STATIC_IP}\n"          # 手机 DNS = AP 网关
+                f"address=/#/{AP_STATIC_IP}\n"             # captive portal：任意域名 → AP 网关
+            )
+        else:
+            dnsmasq_conf = (
+                "port=0\n"                                  # 回退：纯 DHCP 不做 DNS（resolved 未能停）
+                "interface=wlan0\n"
+                f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
+                f"dhcp-option=3,{AP_STATIC_IP}\n"
+            )
         try:
             with open("/tmp/ap-dnsmasq.conf.tmp", "w") as f:
                 f.write(dnsmasq_conf)
@@ -1004,10 +1121,13 @@ def _ap_bring_up() -> Tuple[bool, str]:
                 ["sudo", "-n", "mkdir", "-p", "/etc/dnsmasq.d"],
                 capture_output=True, timeout=10,
             )
-            subprocess.run(
+            r_cp = subprocess.run(
                 ["sudo", "-n", "cp", "/tmp/ap-dnsmasq.conf.tmp", DNSMASQ_AP_CONF],
                 capture_output=True, timeout=10,
             )
+            if r_cp.returncode != 0:
+                # Y1：cp 失败（磁盘满/权限）→ 不能继续用旧/空配置启动 dnsmasq
+                raise OSError(f"写入 {DNSMASQ_AP_CONF} 失败: rc={r_cp.returncode}")
         finally:
             try:
                 os.unlink("/tmp/ap-dnsmasq.conf.tmp")
@@ -1033,16 +1153,24 @@ def _ap_bring_up() -> Tuple[bool, str]:
             dns_ok = verify_dns.stdout.strip() == "active"
 
         if hap_ok and dns_ok:
-            _record_ap_start_time()   # R5: 记录启动时间，宽限期内不自动关闭
+            # captive portal 端口重定向（80 → Web 5000）+ 启动自检（v0.3.1.36）
+            if dns_resolved:
+                _ap_add_portal_iptables()
+            _ap_probe_self()
+            _record_ap_start_time(manual=manual)  # R5: 记录启动时间，宽限期内不自动关闭
             _clear_ap_transition()
             return True, "AP 已启动"
         # 任一失败 → 回滚（R1：不留无主断网窗口）
+        _ap_restore_resolved()       # v0.3.1.36: 恢复被停的 resolved
+        _ap_del_portal_iptables()    # v0.3.1.36: 清理 captive portal 规则
         _rollback_wlan0_station()
         _clear_ap_transition()
         if not hap_ok:
             return False, f"hostapd 未 active: {(r_hap.stderr or '').strip()[:200]}"
         return False, f"dnsmasq 未 active: {(r_dns.stderr or '').strip()[:200]}"
     except Exception as e:
+        _ap_restore_resolved()
+        _ap_del_portal_iptables()
         _rollback_wlan0_station()
         _clear_ap_transition()
         return False, f"启动 AP 失败: {e}"
@@ -1069,6 +1197,10 @@ def _ap_bring_down() -> Tuple[bool, str]:
             ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
         )
+        # 1.5) v0.3.1.36：恢复被停的 systemd-resolved + 清理 captive portal 规则（幂等）
+        _ap_restore_resolved()
+        _ap_del_portal_iptables()
+        _write_had_clients(False)  # AP 关闭 → 重置客户端状态（断开事件检测基准）
         # 2) 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
         subprocess.run(
             ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
@@ -1185,6 +1317,10 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
                 ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
                 capture_output=True, text=True, timeout=10,
             )
+        # v0.3.1.36：AP 异常退出残留场景 → 恢复 resolved + 清理 captive portal 规则（幂等）
+        _ap_restore_resolved()
+        _ap_del_portal_iptables()
+        _write_had_clients(False)
         # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）。
         # 无残留时也执行：覆盖 bring_up 中途崩溃导致 wlan0 保持 unmanaged 的残留态。
         r_nm = subprocess.run(
@@ -1202,12 +1338,17 @@ def _ap_has_clients() -> bool:
     """AP 是否有手机客户端连接（iw station dump；需 root）。
 
     客户端感知：有手机连着 AP 时不得打断（用户可能正在配置）。
+    安全语义（v0.3.1.36 B1 修复）：任何查询失败（sudo 无免密/iw 瞬时错误/
+    接口抖动）一律保守返回 True（视为有客户端），绝不误判"无客户端"——
+    否则配合断开事件检测会把正在配置的手机踢断。
     """
     try:
         r = subprocess.run(
             ["sudo", "-n", "iw", "dev", WIFI_INTERFACE, "station", "dump"],
             capture_output=True, text=True, timeout=10,
         )
+        if r.returncode != 0:
+            return True  # B1：查询失败（sudo 无免密等）→ 保守视为有客户端，不打断
         # 输出含 "Station <mac>" 行即表示有已关联客户端
         return "Station " in r.stdout
     except Exception:
@@ -1215,8 +1356,21 @@ def _ap_has_clients() -> bool:
 
 
 def start_ap() -> dict:
-    """手动启动 AP（完整 bring-up）"""
-    ok, msg = _ap_bring_up()
+    """手动启动 AP（完整 bring-up）。
+
+    v0.3.1.36（2B）：手动开启 = 用户主动操作（无 fallback 震荡风险）→
+    重置自愈退避到初始值 + 宽限期缩短（manual 标记，_ap_grace_period_elapsed 读取）。
+    否则设备在断网 fallback 期间退避可能已积累到 30min，手动开 AP 后
+    手机断开也要等满退避 → "不切回 WiFi"。
+    """
+    _write_backoff(AP_BACKOFF_INIT)   # 2B：手动开 AP 退避归 5min
+    _write_had_clients(False)         # 重置客户端状态（断开事件检测基准）
+    try:
+        if os.path.exists(AP_LAST_TRY_FILE):
+            os.remove(AP_LAST_TRY_FILE)  # 🟢2：清上次探测时间戳，避免宽限期后仍等旧退避
+    except Exception:
+        pass
+    ok, msg = _ap_bring_up(manual=True)
     return {"success": ok, "message": msg}
 
 
@@ -1776,23 +1930,46 @@ class WifiSmartSwitch:
             )
             if r.stdout.strip() != "active":
                 return
-            # R5/B1：AP 启动 15min 宽限期内不自愈让出（手动刚开的 AP 不得被自动关闭）
-            if not _ap_grace_period_elapsed():
-                return
             # R6：AP 起停进行中（可能 Web 正在操作）→ 跳过
             if _ap_transition_active():
+                return
+            # ── 客户端感知（v0.3.1.36 前置：断开事件优先处理）──
+            has_clients = _ap_has_clients()
+            client_just_left = _read_had_clients() and not has_clients
+            _write_had_clients(has_clients)
+            if has_clients:
+                # 有手机连着 AP → 不打断配置（2C：不记录 try，避免"断开后仍等满退避"）
+                self.log.info("AP 有客户端连接，跳过自愈探测（不打断配置）")
+                return
+            if client_just_left:
+                # 2A：客户端「有→无」断开事件 = 用户配置完成/放弃 → 立即让出回连
+                # （跳过宽限期/退避/冷却：bring_down 已含 NM restart+轮询确认 wlan0
+                #   connected，依赖 NM 自动连接已保存 WiFi，不调 _switch_to 免冷却干扰）
+                self.log.info("AP 客户端已断开，立即让出探测回连 WiFi...")
+                ok, msg = _ap_bring_down()
+                if ok:
+                    _write_backoff(AP_BACKOFF_INIT)   # 成功回连：退避重置
+                    _record_ap_try()
+                    self.log.info("AP 自愈: 客户端断开后已回连，AP 保持关闭")
+                else:
+                    # 让出失败（wlan0 未恢复）→ 立即重启 AP 兜底，避免断网
+                    # Y2：兜底重启带 manual=True（保持手动语义，宽限期 3min 而非 15min，
+                    #     避免问题 2"断开不切回"复发窗口）
+                    self.log.warning("AP 自愈: 断开后 bring_down 失败(%s)，重启 AP 兜底", msg)
+                    _ap_bring_up(manual=True)
+                    _write_backoff(min(_read_backoff() * 2, AP_BACKOFF_MAX))
+                    _record_ap_try()
+                return
+            # ── 常规路径（无客户端、非断开事件）：宽限期 → 冷却 → 退避 ──
+            # R5/B1：AP 启动宽限期内不自愈让出（手动 3min / fallback 15min）
+            if not _ap_grace_period_elapsed():
                 return
             # S2：切换冷却期内不让出（避免 _switch_to 被冷却挡住 → 误判失败重启 AP）
             if not self._can_switch():
                 return
-            # 退避检查：距上次探测不足退避间隔 → 跳过（指数退避 2→30min）
+            # 退避检查：距上次探测不足退避间隔 → 跳过（指数退避 5→30min）
             backoff = _read_backoff()
             if not _ap_last_try_elapsed(backoff):
-                return
-            # 客户端感知：有手机连着 AP → 不打断（但记录尝试时间，避免忙等）
-            if _ap_has_clients():
-                self.log.info("AP 有客户端连接，跳过自愈探测（不打断配置）")
-                _record_ap_try()
                 return
             # 让出探测：完整关闭 AP（含恢复 wlan0 station 管控）
             self.log.info("AP 无客户端，让出探测已知 WiFi...")
