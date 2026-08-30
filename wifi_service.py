@@ -41,9 +41,23 @@ DNSMASQ_AP_CONF = "/etc/dnsmasq.d/ap.conf"                # M46: AP 的 dnsmasq 
 
 # captive portal（v0.3.1.36）：AP 模式下 dnsmasq 提供 DNS（任意域名 → AP 网关）
 # + iptables 将 80 端口重定向到 Web 5000，手机连 AP 开任意网页自动跳 A7Z 配置页。
-AP_PORTAL_IPTABLES = ["iptables", "-t", "nat", "-A", "PREROUTING", "-i", "wlan0",
-                      "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", "5000"]
+# DNS 方案（8-30 实测优化）：**不触碰 systemd-resolved**（stop/start 有 D-Bus 竞态
+# + Restart=always 触发 start-limit 限流），dnsmasq 用 8053 端口 + iptables
+# 53→8053 REDIRECT（仅 wlan0 入站），与 resolved 的 127.0.0.53:53 完全隔离。
 AP_WEB_PORT = 5000
+AP_DNS_PORT = 8053                                        # dnsmasq DNS 端口（避开 53/5353）
+# captive portal 规则集（list-of-lists，每条是完整 iptables 参数）：
+AP_PORTAL_IPTABLES = [
+    ["iptables", "-t", "nat", "-A", "PREROUTING", "-i", "wlan0", "-p", "tcp",
+     "--dport", "80", "-j", "REDIRECT", "--to-ports", "5000"],
+]
+# DNS 转发规则：手机 → 42.1:53 → dnsmasq 8053（UDP + TCP）
+AP_DNS_IPTABLES = [
+    ["iptables", "-t", "nat", "-A", "PREROUTING", "-i", "wlan0", "-p", "udp",
+     "--dport", "53", "-j", "REDIRECT", "--to-ports", str(AP_DNS_PORT)],
+    ["iptables", "-t", "nat", "-A", "PREROUTING", "-i", "wlan0", "-p", "tcp",
+     "--dport", "53", "-j", "REDIRECT", "--to-ports", str(AP_DNS_PORT)],
+]
 
 
 # ─────────────────────────────────────────────
@@ -900,48 +914,61 @@ def _write_had_clients(has: bool):
         pass
 
 
-def _ap_stop_resolved() -> bool:
-    """AP 模式下暂停 systemd-resolved（释放 53 端口给 dnsmasq 提供 DNS）。
-    返回是否成功停止（成功才启用 dnsmasq DNS + captive portal）。
-    """
-    try:
-        r = subprocess.run(
-            ["sudo", "-n", "systemctl", "stop", "systemd-resolved"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-def _ap_restore_resolved():
-    """恢复 systemd-resolved（AP 关闭/回滚时调用，幂等）"""
-    try:
-        subprocess.run(
-            ["sudo", "-n", "systemctl", "start", "systemd-resolved"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception:
-        pass
-
-
 def _ap_add_portal_iptables():
-    """添加 captive portal 端口重定向（80 → Web 5000）。幂等：先删再加。"""
+    """添加 captive portal 规则：80→5000（Web 跳转）+ 53→8053（DNS 转发）。幂等。"""
     try:
-        subprocess.run(AP_PORTAL_IPTABLES[:2] + ["-D"] + AP_PORTAL_IPTABLES[2:],
-                       capture_output=True, text=True, timeout=10)
-        subprocess.run(AP_PORTAL_IPTABLES, capture_output=True, text=True, timeout=10)
+        for rule in AP_PORTAL_IPTABLES + AP_DNS_IPTABLES:
+            # 先删再加（幂等）：[:3] 保留 -t nat，[4:] 跳过 -A
+            subprocess.run(rule[:3] + ["-D"] + rule[4:],
+                           capture_output=True, text=True, timeout=10)
+        for rule in AP_PORTAL_IPTABLES + AP_DNS_IPTABLES:
+            subprocess.run(rule, capture_output=True, text=True, timeout=10)
     except Exception:
         pass
 
 
 def _ap_del_portal_iptables():
-    """删除 captive portal 端口重定向（AP 关闭/回滚时调用）"""
+    """删除 captive portal 规则（AP 关闭/回滚时调用）"""
     try:
-        subprocess.run(AP_PORTAL_IPTABLES[:2] + ["-D"] + AP_PORTAL_IPTABLES[2:],
-                       capture_output=True, text=True, timeout=10)
+        for rule in AP_PORTAL_IPTABLES + AP_DNS_IPTABLES:
+            subprocess.run(rule[:3] + ["-D"] + rule[4:],
+                           capture_output=True, text=True, timeout=10)
     except Exception:
         pass
+
+
+def _ap_ensure_resolved() -> bool:
+    """保险：确保 systemd-resolved 正常运行（仅 failed 时修复，幂等）。
+
+    v0.3.1.36 DNS 方案 dnsmasq 用 8053 端口 + iptables 53→8053 转发，
+    与 resolved 的 127.0.0.53:53 完全隔离——开/关 AP 本不应影响 resolved。
+    此函数仅清理**历史遗留**的 failed/start-limit 状态（8-30 调试期实测：
+    resolved 单元 Restart=always + 反复 start 失败会触发 systemd 限流，该状态
+    持久存在，只有 reset-failed 或成功 start 才能清除）。
+    调用点：_ap_bring_up 开头（开 AP 前）+ _ap_bring_down 末尾（NM 稳定后）。
+    """
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", "systemd-resolved"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.stdout.strip() == "active":
+            return True  # 正常运行：零开销跳过
+        subprocess.run(
+            ["sudo", "-n", "systemctl", "reset-failed", "systemd-resolved"],
+            capture_output=True, text=True, timeout=15,
+        )
+        for _i in range(3):
+            r2 = subprocess.run(
+                ["sudo", "-n", "systemctl", "start", "systemd-resolved"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r2.returncode == 0:
+                return True
+            time.sleep(2)
+        return False
+    except Exception:
+        return False
 
 
 def _ap_probe_self() -> bool:
@@ -969,10 +996,12 @@ def _ap_probe_self() -> bool:
 
 
 def _rollback_wlan0_station():
-    """bring_up 失败时的回滚：恢复 wlan0 管控 + 重启 NM（R1，8-28 事故同类防护）。
+    """bring_up 失败时的回滚：恢复 wlan0 管控 + 触发重连（R1，8-28 事故同类防护）。
 
     bring_up 曾执行 nmcli managed no + stop wpa_supplicant，任何后续失败
     都必须恢复 wlan0 到 station 模式，否则设备彻底断网。
+    v0.3.1.36：不重启 NetworkManager（8-30 实测 NM restart 打断 resolved 的
+    D-Bus → resolved 崩溃 → start-limit 限流），改用 nmcli device connect 局部重连。
     """
     try:
         subprocess.run(
@@ -983,11 +1012,14 @@ def _rollback_wlan0_station():
         pass
     try:
         subprocess.run(
-            ["sudo", "-n", "systemctl", "restart", "NetworkManager"],
-            capture_output=True, text=True, timeout=60,
+            ["sudo", "-n", "nmcli", "device", "connect", "wlan0"],
+            capture_output=True, text=True, timeout=30,
         )
     except Exception:
         pass
+    # v0.3.1.36：保险（仅 failed 时修复历史遗留 resolved 状态）+ 清理 portal 规则
+    _ap_ensure_resolved()
+    _ap_del_portal_iptables()
 
 
 def _read_backoff() -> int:
@@ -1047,6 +1079,9 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
     """
     _set_ap_transition()
     try:
+        # v0.3.1.36：开 AP 前确保 resolved 正常（dnsmasq 8053 与 resolved 隔离，
+        # 仅修复历史遗留的 failed/start-limit 状态）
+        _ap_ensure_resolved()
         # 0) 前置校验：hostapd 单元必须存在且未 mask（Y2）
         r_unit = subprocess.run(
             ["systemctl", "is-enabled", "hostapd"],
@@ -1092,28 +1127,19 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
         )
 
         # 5) dnsmasq DHCP + captive portal DNS（v0.3.1.36）
-        #    M46 背景：53 端口被 systemd-resolved 占用导致 dnsmasq 启动失败（曾使 AP
-        #    完全不可用）。v0.3.1.36 改为「按需停 resolved 释放 53」：成功则 dnsmasq
-        #    提供 DNS（任意域名 → AP 网关，手机开网页自动跳配置页）；失败则回退
-        #    port=0 纯 DHCP（仅保证手机拿 IP，域名解析不可用但不阻塞 AP）。
+        #    DNS 方案：不触碰 systemd-resolved（stop/start 有 D-Bus 竞态 + Restart=always
+        #    触发 start-limit 限流，8-30 实测），dnsmasq 用 port=8053 + iptables
+        #    53→8053 REDIRECT（仅 wlan0 入站）→ 手机 DNS 查询转发到 dnsmasq。
         _ap_prefix = ".".join(AP_STATIC_IP.split(".")[:3])
-        dns_resolved = _ap_stop_resolved()
-        if dns_resolved:
-            dnsmasq_conf = (
-                "bind-interfaces\n"                      # Y3：DNS/DHCP 仅绑 wlan0，隔离其他网口
-                "interface=wlan0\n"
-                f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
-                f"dhcp-option=3,{AP_STATIC_IP}\n"
-                f"dhcp-option=6,{AP_STATIC_IP}\n"          # 手机 DNS = AP 网关
-                f"address=/#/{AP_STATIC_IP}\n"             # captive portal：任意域名 → AP 网关
-            )
-        else:
-            dnsmasq_conf = (
-                "port=0\n"                                  # 回退：纯 DHCP 不做 DNS（resolved 未能停）
-                "interface=wlan0\n"
-                f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
-                f"dhcp-option=3,{AP_STATIC_IP}\n"
-            )
+        dnsmasq_conf = (
+            f"port={AP_DNS_PORT}\n"                        # DNS 端口 8053（避开 53/5353）
+            "bind-interfaces\n"                            # Y3：DNS/DHCP 仅绑 wlan0，隔离其他网口
+            "interface=wlan0\n"
+            f"dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h\n"
+            f"dhcp-option=3,{AP_STATIC_IP}\n"
+            f"dhcp-option=6,{AP_STATIC_IP}\n"              # 手机 DNS = AP 网关（iptables 转 8053）
+            f"address=/#/{AP_STATIC_IP}\n"                 # captive portal：任意域名 → AP 网关
+        )
         try:
             with open("/tmp/ap-dnsmasq.conf.tmp", "w") as f:
                 f.write(dnsmasq_conf)
@@ -1153,15 +1179,13 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
             dns_ok = verify_dns.stdout.strip() == "active"
 
         if hap_ok and dns_ok:
-            # captive portal 端口重定向（80 → Web 5000）+ 启动自检（v0.3.1.36）
-            if dns_resolved:
-                _ap_add_portal_iptables()
+            # captive portal 端口重定向（80→5000 + 53→8053）+ 启动自检（v0.3.1.36）
+            _ap_add_portal_iptables()
             _ap_probe_self()
             _record_ap_start_time(manual=manual)  # R5: 记录启动时间，宽限期内不自动关闭
             _clear_ap_transition()
             return True, "AP 已启动"
         # 任一失败 → 回滚（R1：不留无主断网窗口）
-        _ap_restore_resolved()       # v0.3.1.36: 恢复被停的 resolved
         _ap_del_portal_iptables()    # v0.3.1.36: 清理 captive portal 规则
         _rollback_wlan0_station()
         _clear_ap_transition()
@@ -1169,7 +1193,6 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
             return False, f"hostapd 未 active: {(r_hap.stderr or '').strip()[:200]}"
         return False, f"dnsmasq 未 active: {(r_dns.stderr or '').strip()[:200]}"
     except Exception as e:
-        _ap_restore_resolved()
         _ap_del_portal_iptables()
         _rollback_wlan0_station()
         _clear_ap_transition()
@@ -1197,8 +1220,9 @@ def _ap_bring_down() -> Tuple[bool, str]:
             ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
         )
-        # 1.5) v0.3.1.36：恢复被停的 systemd-resolved + 清理 captive portal 规则（幂等）
-        _ap_restore_resolved()
+        # 1.5) v0.3.1.36：清理 captive portal 规则 + 重置客户端状态。
+        #      （DNS 方案不触碰 systemd-resolved——dnsmasq 8053 + iptables 53→8053，
+        #        无需 stop/start resolved，8-30 实测消除 D-Bus 竞态与 start-limit）
         _ap_del_portal_iptables()
         _write_had_clients(False)  # AP 关闭 → 重置客户端状态（断开事件检测基准）
         # 2) 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
@@ -1217,13 +1241,15 @@ def _ap_bring_down() -> Tuple[bool, str]:
             ["sudo", "-n", "nmcli", "device", "set", "wlan0", "managed", "yes"],
             capture_output=True, text=True, timeout=10,
         )
-        # 5) 重启 NetworkManager：交还 wlan0 管理权并触发自动重连，校验返回码
-        r_nm = subprocess.run(
-            ["sudo", "-n", "systemctl", "restart", "NetworkManager"],
-            capture_output=True, text=True, timeout=60,
+        # 5) v0.3.1.36：不重启 NetworkManager（8-30 实测 NM restart 会打断
+        #    systemd-resolved 的 D-Bus 连接 → resolved 崩溃 → Restart=always 风暴
+        #    → start-limit 限流 → 设备本机 DNS 损坏）。改用 nmcli device connect
+        #    局部触发重连（NM 进程不重启，D-Bus 保持）。
+        subprocess.run(
+            ["sudo", "-n", "nmcli", "device", "connect", "wlan0"],
+            capture_output=True, text=True, timeout=30,
         )
-        if r_nm.returncode != 0:
-            return False, f"NetworkManager 重启失败: {(r_nm.stderr or '').strip()[:120]}"
+        time.sleep(3)
 
         # 6) 轮询等待 wlan0 恢复连接 + 获取 IP（最多 30s；Y1：L2 connected + DHCP 完成才算重连）
         for _i in range(15):
@@ -1238,6 +1264,7 @@ def _ap_bring_down() -> Tuple[bool, str]:
                     capture_output=True, text=True, timeout=5,
                 )
                 if "inet " in r_ip.stdout:
+                    _ap_ensure_resolved()  # v0.3.1.36: 保险（仅 failed 时修复历史遗留）
                     _clear_ap_transition()
                     return True, "AP 已停止，wlan0 已重连并获取 IP"
 
@@ -1318,7 +1345,6 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
                 capture_output=True, text=True, timeout=10,
             )
         # v0.3.1.36：AP 异常退出残留场景 → 恢复 resolved + 清理 captive portal 规则（幂等）
-        _ap_restore_resolved()
         _ap_del_portal_iptables()
         _write_had_clients(False)
         # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）。
