@@ -1,0 +1,25 @@
+# TeslaUSB A7Z — USB Gadget udev 规则（v0.3.1.39 修正版）
+# ============================================================
+# 背景：旧规则（2026-05-09 设备端手工部署）在任意 usb_device bind/unbind
+# 事件（含 AIC8800 WiFi/蓝牙插拔）时无条件执行：
+#   - unbind 分支：echo xhci2-controller > xhci-hcd/unbind（失败 exit 1，部分干扰）
+#   - bind  分支：echo xhci2-controller > .../UDC（无条件重绑，打断运行中 gadget）
+# 8-30 23:38 实证：gadget 重建期 ep1out "can't queue to disabled endpoint"。
+#
+# 修正（v0.3.1.39）：
+#   1. bind 分支加「UDC 未激活才重绑」守卫 —— 运行中绝不重绑打断车机
+#   2. 删除 unbind 分支的 xhci-hcd unbind/bind —— gadget 生命周期由
+#      present_usb.sh / usb_gadget_init.sh 全权管理，udev 无需干预
+#
+# 部署（设备端）：
+#   sudo cp udev/99-usb-gadget.rules /etc/udev/rules.d/99-usb-gadget.rules
+#   sudo chmod 644 /etc/udev/rules.d/99-usb-gadget.rules
+#   sudo udevadm control --reload-rules
+#
+# 说明：本文件为部署参考源（进 git 版本化）；不进升级包白名单，
+# 避免升级覆盖设备端的现场配置。
+
+# 当 USB 连接时，仅当 Gadget 未激活（UDC 文件为空）才执行绑定。
+# [ ! -s UDC ] = UDC 未绑定控制器（未激活）→ 才重绑；已激活则跳过（不打断）。
+SUBSYSTEM=="usb", ACTION=="bind", ENV{DEVTYPE}=="usb_device", \
+    RUN+="/bin/sh -c 'if [ -d /sys/kernel/config/usb_gadget/tesla_usb ] && [ ! -s /sys/kernel/config/usb_gadget/tesla_usb/UDC ]; then echo 6a00000.xhci2-controller > /sys/kernel/config/usb_gadget/tesla_usb/UDC; fi'"
