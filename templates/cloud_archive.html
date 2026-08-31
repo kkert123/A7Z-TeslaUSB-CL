@@ -228,19 +228,28 @@
 var curProvider='';
 var _providers={};
 
+// ── HTML / JS 转义（防 XSS：云端文件名/路径/消息为外部可控内容）──
+function escHtml(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function escJs(s){
+  // 用于 HTML 属性内 JS 字符串参数：& 与 " 走 HTML 实体（防属性提前闭合），\ 与 ' 走 JS 转义
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/\\/g,'\\\\').replace(/'/g,'\\\'');
+}
+
 async function loadProviders(){
   try{
     const r=await fetch('/api/cloud/providers/list');const d=await r.json();
     if(!d.success)return;
     _providers=d.providers;
     var sel=document.getElementById('providerSelect');
-    // 分组
-    var groups={oauth:[],s3:[],nas:[],custom:[]};
-    var cats=[];
+    // 分组（F1-2: OneDrive 与 Dropbox 走 Token 粘贴模式，仅 Google Drive 走 OAuth）
+    var groups={oauth:[],token:[],s3:[],nas:[],custom:[]};
     for(var k in _providers){
       var p=_providers[k];p.id=k;
       var t=p.type;
-      if(['drive','onedrive','dropbox'].includes(t)){groups.oauth.push(p);}
+      if(t==='drive'){groups.oauth.push(p);}
+      else if(t==='onedrive'||t==='dropbox'){groups.token.push(p);}
       else if(t==='s3'){groups.s3.push(p);}
       else if(t==='custom'){groups.custom.push(p);}
       else{groups.nas.push(p);}
@@ -252,6 +261,7 @@ async function loadProviders(){
       sel.appendChild(g);
     }
     addGroup('☁️ OAuth 云盘',groups.oauth);
+    addGroup('🎟 Token 粘贴',groups.token);
     addGroup('🗄 S3 兼容存储',groups.s3);
     addGroup('🏠 NAS / 服务器',groups.nas);
     addGroup('🔧 自定义',groups.custom);
@@ -302,15 +312,15 @@ function onProviderChange(){
   if(!curProvider)return;
   document.getElementById('btnDisconnect').style.display='inline-block';
   var t=(p||{}).type||'';
-  if(t==='drive'||t==='onedrive'){document.getElementById('cfg-oauth').classList.remove('hidden');}
-  else if(t==='dropbox'){document.getElementById('cfg-token').classList.remove('hidden');}
+  if(t==='drive'){document.getElementById('cfg-oauth').classList.remove('hidden');}
+  else if(t==='onedrive'||t==='dropbox'){document.getElementById('cfg-token').classList.remove('hidden');}
   else if(t==='s3'){document.getElementById('cfg-s3').classList.remove('hidden');}
   else if(t==='custom'){document.getElementById('cfg-custom').classList.remove('hidden');}
   else{document.getElementById('cfg-nas').classList.remove('hidden');}
 }
 
 function msg(elId,type,txt){
-  document.getElementById(elId).innerHTML='<div class="msg msg-'+type+'">'+txt+'</div>';
+  document.getElementById(elId).innerHTML='<div class="msg msg-'+type+'">'+escHtml(txt)+'</div>';
   if(type==='ok')setTimeout(function(){document.getElementById(elId).innerHTML='';},5000);
 }
 
@@ -319,7 +329,8 @@ async function startOAuth(){
   var cid=document.getElementById('oauthClientId').value.trim();
   var cse=document.getElementById('oauthClientSecret').value.trim();
   try{
-    const r=await fetch('/api/cloud/oauth/authorize',{method:'POST'});
+    // F1-1: 携带 Client ID/Secret，后端持久化后再生成授权链接
+    const r=await fetch('/api/cloud/oauth/authorize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:cid,client_secret:cse})});
     const d=await r.json();
     if(d.success){
       document.getElementById('authUrl').textContent=d.auth_url;
@@ -365,7 +376,7 @@ async function saveS3Config(){
     endpoint:document.getElementById('s3Endpoint').value.trim(),
     v2_auth:document.getElementById('s3V2Auth').checked,
   };
-  if(!cfg.access_key_id||!cfg.secret_access_key){msg('providerMsg','err','Access Key 和 Secret Key 不能为空');return;}
+  // F1-4: 凭证可留空（后端保留 rclone.conf 已保存的旧值），仅改 region/endpoint 时无需重填 key
   saveProviderConfig(cfg);
 }
 
@@ -437,9 +448,9 @@ function renderStatus(s){
   else{h+='<div class=\"status-row\"><span class=\"status-dot ok\"></span>云端文件数: '+s.files_in_cloud+'</div>';}
   if(s.last_sync)h+='<div class="status-row"><span class="status-dot ok"></span>上次同步: '+s.last_sync+'</div>';
   document.getElementById('statusContent').innerHTML=h;
-  // 按钮启用逻辑：OAuth 类型需授权，NAS/S3 类型只需 rclone.conf
+  // 按钮启用逻辑：仅 gdrive 需 OAuth 授权（onedrive/dropbox 走 Token 粘贴，token 已在 rclone.conf）
   var cp=s.configured_provider||{};
-  var isOauth=['gdrive','onedrive','dropbox'].includes(cp.provider_id);
+  var isOauth=cp.provider_id==='gdrive';
   document.getElementById('btnSyncAll').disabled=!s.remote_configured||(isOauth&&!s.oauth_authorized);
   // 更新云服务商标题状态
   var psEl=document.getElementById('cloudProviderStatus');
@@ -478,12 +489,12 @@ function updateBreadcrumb(){
   if(!el) return;
   if(!_cloudPath){ el.textContent = '/'; return; }
   var parts = _cloudPath.split('/').filter(Boolean);
-  var html = '<a href=\"#\" onclick=\"navigateCloudTo(\"\")\" style=\"color:var(--pri);text-decoration:none\">/</a>';
+  var html = '<a href=\"#\" onclick=\"navigateCloudTo(\'\')\" style=\"color:var(--pri);text-decoration:none\">/</a>';
   var acc = '';
   parts.forEach(function(p){
     acc += '/' + p;
     html += ' <span style=\"color:var(--text-muted)\">/</span> ';
-    html += '<a href=\"#\" onclick=\"navigateCloudTo(\''+acc.slice(1)+'\')\" style=\"color:var(--pri);text-decoration:none\">'+p+'</a>';
+    html += '<a href=\"#\" onclick=\"navigateCloudTo(\''+escJs(acc.slice(1))+'\')\" style=\"color:var(--pri);text-decoration:none\">'+escHtml(p)+'</a>';
   });
   el.innerHTML = html;
   document.getElementById('btnCloudUp').style.display = _cloudPath ? 'inline-block' : 'none';
@@ -509,13 +520,13 @@ async function refreshCloudFiles(){
     var h='<div class="file-list">';
     files.forEach(function(f){
       var icon = f.is_dir ? '📁' : '🎬';
-      var name = f.name;
+      var name = escHtml(f.name);
       var onclick = '';
       if(f.is_dir){
-        var subpath = _cloudPath ? _cloudPath + '/' + name : name;
-        onclick = ' onclick=\"navigateCloudTo(\'' + subpath.replace(/'/g, '\\\'') + '\')\"';
+        var subpath = _cloudPath ? _cloudPath + '/' + f.name : f.name;
+        onclick = ' onclick=\"navigateCloudTo(\'' + escJs(subpath) + '\')\"';
       }
-      h+='<div class="file-item"'+onclick+' style="'+(f.is_dir?'cursor:pointer':'')+'"><span class="file-name">'+icon+' '+name+'</span><span class="file-size">'+f.size_fmt+'</span></div>';
+      h+='<div class="file-item"'+onclick+' style="'+(f.is_dir?'cursor:pointer':'')+'"><span class="file-name">'+icon+' '+name+'</span><span class="file-size">'+escHtml(f.size_fmt)+'</span></div>';
     });
     h+='</div>';el.innerHTML=h;
   }catch(e){el.innerHTML='<div class="msg msg-err">获取文件失败</div>';}
@@ -524,6 +535,7 @@ async function refreshCloudFiles(){
 // ── 同步 ──
 var _syncPollTimer=null;
 var _syncRunning=false;
+var _lastQueueLoad=0;  // F1-6: 上传队列刷新节流时间戳（10s）
 
 function _stopSyncPoll(){
   if(_syncPollTimer){clearInterval(_syncPollTimer);_syncPollTimer=null;}
@@ -535,19 +547,20 @@ async function _pollSyncProgress(){
     if(!d.success)return;
     var p=Math.max(0,Math.min(100,d.progress||0));  // 限制 0-100 范围
     if(d.running){
-      // 更新按钮和上传队列
+      // 更新按钮和上传队列（F1-6: 队列数字 10s 节流，避免同步期间频繁全盘扫描）
       var btn=document.getElementById('btnSyncAll');
       btn.textContent='⏳ '+(p>=0&&p<100?p+'%':'同步中...');
       btn.disabled=true;
       document.getElementById('btnCancelSync').style.display='inline-block';
-      // 更新上传队列实时状态（进度条 + 消息）
-      loadUploadQueue();
+      var _now=Date.now();
+      if(_now-_lastQueueLoad>=10000){_lastQueueLoad=_now;loadUploadQueue();}
     }else{
       _stopSyncPoll();
       _syncRunning=false;
       var btn=document.getElementById('btnSyncAll');
       btn.disabled=false;btn.textContent='🔄 手动同步';
       document.getElementById('btnCancelSync').style.display='none';
+      _lastQueueLoad=0;  // 重置节流，结束后立即刷新
       loadSyncHistory();loadUploadQueue();refreshStatus();
     }
   }catch(e){}
@@ -606,10 +619,21 @@ async function toggleAutoSync(){
   var on=document.getElementById('autoSyncToggle').checked;
   var url=on?'/api/cloud/worker/start':'/api/cloud/worker/stop';
   try{const r=await fetch(url,{method:'POST'});const d=await r.json();
-    document.getElementById('workerStatus').textContent=d.message||(on?'运行中':'已停止');
-    document.getElementById('workerStatus').style.color=on?'var(--success)':'var(--text-muted)';
-    if(on)saveAutoSyncConfig(true);else saveAutoSyncConfig(false);
-  }catch(e){}
+    if(d.success){
+      document.getElementById('workerStatus').textContent=d.message||(on?'运行中':'已停止');
+      document.getElementById('workerStatus').style.color=on?'var(--success)':'var(--text-muted)';
+      if(on)saveAutoSyncConfig(true);else saveAutoSyncConfig(false);
+    }else{
+      // F1-5: 失败时回滚 checkbox，不写配置（避免配置显示开启但实际未运行）
+      document.getElementById('autoSyncToggle').checked=!on;
+      document.getElementById('workerStatus').textContent=d.message||(on?'启动失败':'停止失败');
+      document.getElementById('workerStatus').style.color='var(--danger)';
+    }
+  }catch(e){
+    document.getElementById('autoSyncToggle').checked=!on;
+    document.getElementById('workerStatus').textContent='操作失败';
+    document.getElementById('workerStatus').style.color='var(--danger)';
+  }
 }
 async function saveAutoSyncConfig(on){
   await fetch('/api/cloud/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_sync_enabled:on})});
@@ -632,8 +656,9 @@ async function saveBwlimit(){
 }
 // Patch refreshStatus to load bandwidth config too
 var _origRefreshStatus=refreshStatus;
-refreshStatus=function(fast){
-  _origRefreshStatus(fast);
+refreshStatus=async function(fast){
+  // F1-7: async 包装，等待完整状态返回后再拉文件列表（避免并发重复 lsjson）
+  await _origRefreshStatus(fast);
   loadWorkerStatus();
   try{
     fetch('/api/cloud/config').then(function(r){return r.json()}).then(function(d){
@@ -703,8 +728,8 @@ async function loadSyncHistory(){
         his.forEach(function(r){
           var cls=r.success?'hist-ok':'hist-err';
           var lbl=r.success?'✅ 成功':'❌ 失败';
-          var time=r.time||'';
-          h+='<div class="hist-item"><div class="hist-left"><div class="hist-time">'+time+'</div><div class="hist-detail">'+(r.message||'')+' · '+((r.files||0)+' 文件')+' · '+((r.duration_sec||0)+'s')+'</div></div><span class="hist-status '+cls+'">'+lbl+'</span></div>';
+          var time=escHtml(r.time||'');
+          h+='<div class="hist-item"><div class="hist-left"><div class="hist-time">'+time+'</div><div class="hist-detail">'+escHtml(r.message||'')+' · '+((r.files||0)+' 文件')+' · '+((r.duration_sec||0)+'s')+'</div></div><span class="hist-status '+cls+'">'+lbl+'</span></div>';
         });
       }
       document.getElementById('syncHistory').innerHTML=h;
@@ -792,8 +817,8 @@ async function loadUploadQueue(){
       var h='';
       recent.forEach(function(r){
         var lbl=r.success?'✅':'❌';
-        var time=r.time||'';
-        h+='<div class="hist-item"><div class="hist-left"><div class="hist-time">'+time+'</div><div class="hist-detail">'+lbl+' '+(r.message||'')+' · '+((r.files||0)+' 文件')+' · '+((r.duration_sec||0)+'s')+'</div></div></div>';
+        var time=escHtml(r.time||'');
+        h+='<div class="hist-item"><div class="hist-left"><div class="hist-time">'+time+'</div><div class="hist-detail">'+lbl+' '+escHtml(r.message||'')+' · '+((r.files||0)+' 文件')+' · '+((r.duration_sec||0)+'s')+'</div></div></div>';
       });
       el.innerHTML=h;
     }
@@ -825,14 +850,13 @@ loadUploadQueue();         // ~0.1s — 上传队列
 checkRunningSyncOnLoad();  // 检查是否有正在运行的同步
 // 步骤2: 状态快速检查（跳过 rclone about/lsjson，瞬间返回基本状态）
 refreshStatus(true);       // fast=true — 仅检查 rclone/config，不调用 S3
-// 步骤3: 异步加载完整状态（含 about/lsjson），然后加载文件列表
+// 步骤3: 异步加载完整状态（含 about/lsjson），返回后再加载文件列表
+// F1-7: 串行化 — 完整状态 resolve 后才拉文件列表，避免并发重复 lsjson
 setTimeout(function(){
-  refreshStatus();          // 完整状态（含 about/lsjson）
-  // 延迟加载文件列表 — 等状态确认后可自动展示
-  setTimeout(function(){
+  refreshStatus().then(function(){
     if(_lastStatus&&_lastStatus.remote_configured){refreshCloudFiles();}
     else{document.getElementById('cloudFiles').innerHTML='<div style="text-align:center;padding:20px;color:var(--text-muted)"><div style="font-size:2rem;margin-bottom:8px">☁️</div><p>未配置云服务商 — 请先在上方选择一个服务商并完成配置</p></div>';}
-  }, 500);
+  });
 }, 500);
 </script>
 {% endblock %}

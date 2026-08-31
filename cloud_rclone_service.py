@@ -66,14 +66,22 @@ DEFAULT_REMOTE = "gdrive"
 
 # ── rclone 检测与配置 ──────────────────────────────────
 
+# F2-4: rclone 安装检测缓存（30s TTL，避免每次状态轮询都起子进程）
+_rclone_check_cache = {"ts": 0, "installed": False, "version": ""}
+_RCLONE_CHECK_TTL = 30
+
 
 def check_rclone_installed() -> Tuple[bool, str]:
     """
-    检查 rclone 是否已安装。
+    检查 rclone 是否已安装（结果缓存 30 秒）。
 
     Returns:
         (installed, version_string)
     """
+    now = time.time()
+    if now - _rclone_check_cache["ts"] < _RCLONE_CHECK_TTL:
+        return _rclone_check_cache["installed"], _rclone_check_cache["version"]
+
     try:
         result = subprocess.run(
             ["rclone", "version"],
@@ -81,11 +89,15 @@ def check_rclone_installed() -> Tuple[bool, str]:
         )
         if result.returncode == 0:
             version = result.stdout.split('\n')[0] if result.stdout else "unknown"
+            _rclone_check_cache.update(ts=now, installed=True, version=version.strip())
             return True, version.strip()
+        _rclone_check_cache.update(ts=now, installed=False, version="rclone 返回错误")
         return False, "rclone 返回错误"
     except FileNotFoundError:
+        _rclone_check_cache.update(ts=now, installed=False, version="rclone 未安装")
         return False, "rclone 未安装"
     except Exception as e:
+        _rclone_check_cache.update(ts=now, installed=False, version=str(e))
         return False, str(e)
 
 
@@ -112,12 +124,13 @@ def configure_rclone(client_id: str, client_secret: str, access_token: str,
     try:
         os.makedirs(RCLONE_CONFIG_DIR, exist_ok=True)
 
-        # 构建 rclone 配置
+        # 构建 rclone 配置（F0: 修复 token 双重花括号 bug — 原 `{{{{...}}}}` 写出非法 JSON，
+        # 导致 rclone 无法解析 token，Google Drive OAuth 授权验证必然失败）
         config = f"""[{remote_name}]
 type = drive
 client_id = {client_id}
 client_secret = {client_secret}
-token = {{{{"access_token":"{access_token}","token_type":"Bearer","refresh_token":"{refresh_token}","expiry":"{datetime.fromtimestamp(expires_at).isoformat()}"}}}}
+token = {{"access_token":"{access_token}","token_type":"Bearer","refresh_token":"{refresh_token}","expiry":"{datetime.fromtimestamp(expires_at).isoformat()}"}}
 """
 
         with open(RCLONE_CONFIG_FILE, 'w') as f:
@@ -230,8 +243,16 @@ def configure_provider(provider_id: str, config_data: dict) -> Tuple[bool, str]:
             bucket = config_data.get("bucket", "")
             endpoint = config_data.get("endpoint", "").strip()
             use_v2 = config_data.get("v2_auth", False)
+            # F2-1: 凭证留空时保留 rclone.conf 已保存的旧值（与 NAS existing_pass 逻辑一致），
+            # 仅改 region/endpoint/bucket 时无需重填 key
             if not access_key or not secret_key:
-                return False, "缺少 Access Key 或 Secret Key"
+                saved = _read_saved_s3_keys(remote_name)
+                if not access_key:
+                    access_key = saved.get("access_key_id", "")
+                if not secret_key:
+                    secret_key = saved.get("secret_access_key", "")
+            if not access_key or not secret_key:
+                return False, "缺少 Access Key 或 Secret Key（且无已保存的旧值）"
 
             # 自动补全 https:// 前缀（用户可能只输入域名）
             if endpoint and not endpoint.startswith("http"):
@@ -355,6 +376,31 @@ def _s3_provider(provider_id: str) -> str:
         "wasabi": "Wasabi", "minio": "Minio",
         "s3compat": "Other",
     }.get(provider_id, "Other")
+
+
+def _read_saved_s3_keys(remote_name: str) -> dict:
+    """从现有 rclone.conf 读取已保存的 S3 access_key_id / secret_access_key（F2-1 凭证保留）"""
+    saved = {}
+    if not os.path.exists(RCLONE_CONFIG_FILE):
+        return saved
+    try:
+        with open(RCLONE_CONFIG_FILE, 'r') as f:
+            in_section = False
+            for line in f:
+                line = line.strip()
+                if line == f"[{remote_name}]":
+                    in_section = True
+                    continue
+                if in_section and line.startswith('['):
+                    break  # 进入下一个 section
+                if in_section and '=' in line:
+                    k, _, v = line.partition('=')
+                    k = k.strip().lower()
+                    if k in ('access_key_id', 'secret_access_key'):
+                        saved[k] = v.strip()
+    except Exception:
+        pass
+    return saved
 
 
 def _verify_config(remote_name: str, subpath: str = "") -> Tuple[bool, str]:
@@ -497,13 +543,15 @@ def get_configured_provider() -> dict:
 
 
 def list_remote_files(remote_name: str = DEFAULT_REMOTE,
-                      remote_path: str = "") -> Tuple[bool, list]:
+                      remote_path: str = "",
+                      max_depth: int = 0) -> Tuple[bool, list]:
     """
     列出云存储中的文件。
 
     Args:
         remote_name: rclone remote 名称
         remote_path: 远程路径（相对于 remote 根目录）
+        max_depth: 递归深度限制（0=无限，1=仅当前目录）。F2-3: 状态统计用 1 大幅提速。
 
     Returns:
         (success, file_list)
@@ -512,8 +560,14 @@ def list_remote_files(remote_name: str = DEFAULT_REMOTE,
     try:
         target = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
 
+        cmd = ["rclone", f"--config={RCLONE_CONFIG_FILE}", "--contimeout=10s"]
+        if max_depth > 0:
+            cmd.append(f"--max-depth={max_depth}")
+        cmd.append("lsjson")
+        cmd.append(target)
+
         result = subprocess.run(
-            ["rclone", f"--config={RCLONE_CONFIG_FILE}", "--contimeout=10s", "lsjson", target],
+            cmd,
             capture_output=True, text=True, timeout=45,
             env=get_rclone_env(),
         )
@@ -648,13 +702,12 @@ def upload_directory(local_dir: str, remote_name: str = DEFAULT_REMOTE,
         if bwlimit > 0:
             cmd.append(f"--bwlimit={bwlimit}K")
 
-        # 使用 Popen，捕获 stderr 用于实时进度解析
+        # 使用 Popen，捕获 stderr 用于实时进度解析（二进制模式，手工按 \r/\n 切行）
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # 行缓冲，确保实时读取
+            bufsize=0,
             env=get_rclone_env(),
         )
 
@@ -664,27 +717,59 @@ def upload_directory(local_dir: str, remote_name: str = DEFAULT_REMOTE,
         all_lines = []
         _stop_reader = [False]
 
+        def _handle_line(line: str):
+            """处理一行 stderr 输出：取消检查 + 进度解析"""
+            if _stop_reader[0]:
+                return
+            all_lines.append(line)
+            # 检查取消请求
+            if is_sync_cancelled() and proc.poll() is None:
+                try:
+                    proc.kill()
+                    if progress_callback:
+                        progress_callback(-1)
+                except Exception:
+                    pass
+                return
+            # 进度解析增强（F2-2）：优先 Transferred: N / M 计算跨文件百分比
+            m = re.search(r'Transferred:\s+(\d+)\s*/\s*(\d+)', line)
+            if m:
+                done, total = int(m.group(1)), int(m.group(2))
+                if total > 0:
+                    pct = int(done * 100 / total)
+                    if progress_callback:
+                        progress_callback(pct)
+                    return
+            # 回退：--progress 行中的百分比 "42%"
+            m = re.search(r'(\d+)%', line)
+            if m:
+                pct = int(m.group(1))
+                if progress_callback:
+                    progress_callback(pct)
+
         def _read_stderr():
             try:
-                for line in proc.stderr:
-                    if _stop_reader[0]:
+                # 逐块读取原始字节，按 \r 或 \n 切行（rclone --progress 用 \r 更新同一行，
+                # text 模式逐行迭代可能收不到未换行的进度行）
+                buf = b''
+                while True:
+                    chunk = proc.stderr.read(4096)
+                    if not chunk:
                         break
-                    all_lines.append(line)
-                    # 检查取消请求
-                    if is_sync_cancelled() and proc.poll() is None:
-                        try:
-                            proc.kill()
-                            if progress_callback:
-                                progress_callback(-1)
-                        except Exception:
-                            pass
-                        break
-                    # 解析百分比: rclone --progress 输出含 "42%, ..."
-                    m = re.search(r'(\d+)%', line)
-                    if m:
-                        pct = int(m.group(1))
-                        if progress_callback:
-                            progress_callback(pct)
+                    buf += chunk
+                    while True:
+                        idx = -1
+                        for sep in (b'\r', b'\n'):
+                            pos = buf.find(sep)
+                            if pos >= 0 and (idx < 0 or pos < idx):
+                                idx = pos
+                        if idx < 0:
+                            break
+                        line = buf[:idx].decode('utf-8', errors='replace')
+                        buf = buf[idx + 1:]
+                        _handle_line(line)
+                if buf:
+                    _handle_line(buf.decode('utf-8', errors='replace'))
             except Exception:
                 pass
 
@@ -714,13 +799,13 @@ def upload_directory(local_dir: str, remote_name: str = DEFAULT_REMOTE,
         if is_sync_cancelled():
             return False, "同步已被用户取消", {}
 
-        # 解析 stderr 获取最终统计
+        # 解析 stderr 获取最终统计（按 \r/\n 兼容切分）
         all_stderr = ''.join(all_lines)
         duration = (datetime.now() - start_time).total_seconds()
         files_synced = 0
         bytes_transferred = 0
 
-        for line in all_stderr.split('\n'):
+        for line in re.split(r'[\r\n]+', all_stderr):
             if 'Transferred:' in line:
                 m = re.search(r'Transferred:\s+(\d+)', line)
                 if m:

@@ -67,6 +67,8 @@ _sync_interval_sec = 3600  # 1 小时
 _sync_retry_count = 0
 SYNC_RETRY_MAX = 5
 SYNC_RETRY_DELAY = 60  # 重试间隔秒数
+# F3-8: worker 停止事件（wait 替代 sleep，stop 立即唤醒退出，防双线程）
+_worker_stop_event = threading.Event()
 
 # 实时同步状态（供前端轮询）
 _sync_state = {
@@ -76,19 +78,35 @@ _sync_state = {
     "started_at": None,  # Unix timestamp
     "cancelled": False,  # 是否被用户取消
 }
-_sync_lock = threading.Lock()
+_sync_lock = threading.Lock()          # 同步互斥（手动 vs 自动）
+_sync_state_lock = threading.Lock()    # F3-2: _sync_state 读写锁（进度回调跨线程）
+
+
+def _set_sync_state(**kw):
+    """线程安全地更新 _sync_state（F3-2）"""
+    with _sync_state_lock:
+        _sync_state.update(kw)
+
+
+def _get_sync_state() -> dict:
+    """线程安全地获取 _sync_state 快照（F3-2）"""
+    with _sync_state_lock:
+        return dict(_sync_state)
 
 def cancel_sync():
     """取消正在进行的同步"""
     from cloud_rclone_service import request_sync_cancel
-    if _sync_state.get("running"):
+    if _get_sync_state().get("running"):
         request_sync_cancel()
-        _sync_state["cancelled"] = True
+        _set_sync_state(cancelled=True)
         return True, "取消请求已发送，正在终止同步..."
     return False, "当前没有正在进行的同步"
 
 def _check_cloud_ready():
-    """检查云服务是否就绪（OAuth provider 检查授权，NAS/S3 provider 检查 rclone.conf）。
+    """检查云服务是否就绪（gdrive 检查 OAuth 授权；onedrive/dropbox/NAS/S3 检查 rclone.conf）。
+
+    v0.3.1.38: needs_oauth 仅限 gdrive — onedrive/dropbox 改走 Token 粘贴模式后，
+    token 已写入 rclone.conf，只需 remote_configured 检查（原逻辑会误拦导致无法同步）。
     
     Returns:
         (ready: bool, error_msg: str or None)
@@ -96,7 +114,7 @@ def _check_cloud_ready():
     from cloud_rclone_service import RCLONE_CONFIG_FILE
     cfg = load_cloud_config()
     provider = cfg.get("provider", "")
-    needs_oauth = provider in ("gdrive", "onedrive", "dropbox")
+    needs_oauth = provider == "gdrive"
     
     if needs_oauth:
         auth_info = get_oauth_status()
@@ -114,10 +132,19 @@ def _check_cloud_ready():
 
 
 def start_sync_worker():
-    """启动后台同步 Worker"""
+    """启动后台同步 Worker（F3-8: 防双线程 — 旧线程未完全退出则拒绝启动）"""
     global _sync_worker_running, _sync_worker_thread
     if _sync_worker_running:
         return False, "Worker 已在运行"
+    # 旧线程可能仍在退出中（stop 后 upload 未结束），先唤醒并等待退出
+    _worker_stop_event.set()
+    if _sync_worker_thread and _sync_worker_thread.is_alive():
+        _sync_worker_thread.join(timeout=3)
+        if _sync_worker_thread.is_alive():
+            # 上传尚未结束，立即启动会造成双 worker（旧循环会因 _sync_worker_running=True 复活）
+            _worker_stop_event.clear()
+            return False, "旧 Worker 仍在退出中（上传未结束），请稍后重试"
+    _worker_stop_event.clear()
     _sync_worker_running = True
     _sync_worker_thread = threading.Thread(target=_worker_loop, daemon=True, name="cloud-sync-worker")
     _sync_worker_thread.start()
@@ -126,15 +153,30 @@ def start_sync_worker():
 
 
 def stop_sync_worker():
-    """停止后台同步 Worker"""
+    """停止后台同步 Worker（F3-8: set 事件立即唤醒 sleep 中的线程）"""
     global _sync_worker_running
     _sync_worker_running = False
+    _worker_stop_event.set()
     logger.info("Cloud sync worker stopped")
     return True, "自动同步已停止"
 
 
 def is_worker_running() -> bool:
     return _sync_worker_running
+
+
+def init_auto_sync():
+    """应用启动时调用：按 cloud.json auto_sync_enabled 恢复自动同步 Worker（F3-7）。
+
+    解决 web 重启后自动同步静默丢失（配置显示开启但 worker 是进程内线程，重启即消失）。
+    """
+    try:
+        cfg = load_cloud_config()
+        if cfg.get("auto_sync_enabled") and not _sync_worker_running:
+            ok, msg = start_sync_worker()
+            logger.info(f"云归档自动同步恢复: {msg}")
+    except Exception as e:
+        logger.warning(f"云归档自动同步初始化失败: {e}")
 
 
 def _worker_loop():
@@ -145,87 +187,109 @@ def _worker_loop():
             # 检查配置
             cfg = load_cloud_config()
             if not cfg.get("auto_sync_enabled"):
-                time.sleep(_sync_interval_sec)
+                if _worker_stop_event.wait(_sync_interval_sec):
+                    break
                 continue
 
-            # 检查授权 — OAuth provider 需要授权，NAS provider 只需 rclone.conf
+            # 检查授权 — gdrive 需要 OAuth 授权；onedrive/dropbox(token 粘贴)/NAS/S3 只需 rclone.conf
             from cloud_rclone_service import RCLONE_CONFIG_FILE
             auth_info = get_oauth_status()
             remote_configured = os.path.exists(RCLONE_CONFIG_FILE)
             provider = cfg.get("provider", "")
-            # OAuth 类型 (drive/onedrive/dropbox) 需要授权；NAS/S3 类型只需要 rclone.conf
-            needs_oauth = provider in ("gdrive", "onedrive", "dropbox")
+            # v0.3.1.38: 仅 gdrive 需要 OAuth 状态；onedrive/dropbox 走 Token 粘贴已含 token
+            needs_oauth = provider == "gdrive"
             if needs_oauth and not auth_info.get("authorized"):
-                time.sleep(_sync_interval_sec)
+                if _worker_stop_event.wait(_sync_interval_sec):
+                    break
                 continue
             if not needs_oauth and not remote_configured:
-                time.sleep(_sync_interval_sec)
+                if _worker_stop_event.wait(_sync_interval_sec):
+                    break
                 continue
 
             installed, _ = check_rclone_installed()
             if not installed:
-                time.sleep(_sync_interval_sec)
+                if _worker_stop_event.wait(_sync_interval_sec):
+                    break
                 continue
 
             # 检查源目录
             if not os.path.exists(SOURCE_DIR):
-                time.sleep(_sync_interval_sec)
+                if _worker_stop_event.wait(_sync_interval_sec):
+                    break
                 continue
 
-            # 按配置的文件夹顺序同步（sync_order 定义优先级）
-            folders = cfg.get("sync_folders", ["SentryClips", "SavedClips", "ArchivedClips"])
-            sync_order = cfg.get("sync_order", ["SentryClips", "SavedClips", "ArchivedClips"])
-            # 按 sync_order 排序：order 中越靠前的优先级越高（先上传）
-            if sync_order and len(sync_order) > 0:
-                rank = {f: i for i, f in enumerate(sync_order)}
-                folders = sorted(folders, key=lambda f: rank.get(f, 999))
-            remote = cfg.get("remote_name", "gdrive")
-            remote_path = cfg.get("remote_path", "TeslaUSB/")
-            bwlimit = cfg.get("bandwidth_limit_kb", 0)  # 0 = 无限制
-
-            t0 = time.time()
-            total_files = 0
-            total_bytes = 0
-            all_ok = True
-
-            for folder in folders:
-                if not _sync_worker_running:
+            # F3-1: 与手动同步互斥 — 拿不到锁说明手动同步进行中，跳过本轮
+            if not _sync_lock.acquire(blocking=False):
+                logger.info("手动/其他同步进行中，自动同步跳过本轮")
+                if _worker_stop_event.wait(60):
                     break
-                src = os.path.join(SOURCE_DIR, "TeslaCam", folder)
-                if not os.path.exists(src):
-                    continue
-                # 统一路径：TeslaUSB/TeslaCam/{folder}/ (与手动同步一致)
-                dst = remote_path.rstrip('/') + '/TeslaCam/' + folder
-                ok, msg, stats = upload_directory(src, remote, dst, bwlimit=bwlimit)
-                if ok:
-                    total_files += stats.get("files", 0)
-                    total_bytes += stats.get("bytes", 0)
-                else:
-                    all_ok = False
-                # 每次上传间隔 10 秒，降低连续负载
-                if _sync_worker_running:
-                    time.sleep(10)
+                continue
 
-            elapsed = round(time.time() - t0, 1)
-            _sync_retry_count = 0 if all_ok else _sync_retry_count + 1
-            add_sync_record({
-                "trigger": "auto",
-                "success": all_ok,
-                "message": f"自动同步 {len(folders)} 个文件夹",
-                "files": total_files,
-                "bytes": total_bytes,
-                "duration_sec": elapsed,
-            })
+            try:
+                # F3-3: 每轮开跑前重置取消标志，避免上一轮手动取消污染本轮
+                from cloud_rclone_service import reset_sync_cancel
+                reset_sync_cancel()
+
+                # 按配置的文件夹顺序同步（sync_order 定义优先级）
+                folders = cfg.get("sync_folders", ["SentryClips", "SavedClips", "ArchivedClips"])
+                sync_order = cfg.get("sync_order", ["SentryClips", "SavedClips", "ArchivedClips"])
+                # 按 sync_order 排序：order 中越靠前的优先级越高（先上传）
+                if sync_order and len(sync_order) > 0:
+                    rank = {f: i for i, f in enumerate(sync_order)}
+                    folders = sorted(folders, key=lambda f: rank.get(f, 999))
+                remote = cfg.get("remote_name", "gdrive")
+                remote_path = cfg.get("remote_path", "TeslaUSB/")
+                bwlimit = cfg.get("bandwidth_limit_kb", 0)  # 0 = 无限制
+
+                t0 = time.time()
+                total_files = 0
+                total_bytes = 0
+                all_ok = True
+
+                for folder in folders:
+                    if not _sync_worker_running:
+                        break
+                    src = os.path.join(SOURCE_DIR, "TeslaCam", folder)
+                    if not os.path.exists(src):
+                        continue
+                    # 统一路径：TeslaUSB/TeslaCam/{folder}/ (与手动同步一致)
+                    dst = remote_path.rstrip('/') + '/TeslaCam/' + folder
+                    ok, msg, stats = upload_directory(src, remote, dst, bwlimit=bwlimit)
+                    if ok:
+                        total_files += stats.get("files", 0)
+                        total_bytes += stats.get("bytes", 0)
+                    else:
+                        all_ok = False
+                    # 每次上传间隔 10 秒，降低连续负载
+                    if _sync_worker_running and _worker_stop_event.wait(10):
+                        break
+
+                elapsed = round(time.time() - t0, 1)
+                _sync_retry_count = 0 if all_ok else _sync_retry_count + 1
+                add_sync_record({
+                    "trigger": "auto",
+                    "success": all_ok,
+                    "message": f"自动同步 {len(folders)} 个文件夹",
+                    "files": total_files,
+                    "bytes": total_bytes,
+                    "duration_sec": elapsed,
+                })
+            finally:
+                _sync_lock.release()
 
             if not all_ok and _sync_retry_count < SYNC_RETRY_MAX:
                 logger.warning(f"同步部分失败，{SYNC_RETRY_DELAY}s 后重试 ({_sync_retry_count}/{SYNC_RETRY_MAX})")
-                time.sleep(SYNC_RETRY_DELAY)
+                if _worker_stop_event.wait(SYNC_RETRY_DELAY):
+                    break
             else:
-                time.sleep(_sync_interval_sec)
+                if _worker_stop_event.wait(_sync_interval_sec):
+                    break
 
         except Exception as e:
             logger.error(f"Sync worker error: {e}")
-            time.sleep(300)  # 出错等 5 分钟
+            if _worker_stop_event.wait(300):  # 出错等 5 分钟
+                break
 
 # 默认配置
 DEFAULT_CLOUD_CONFIG = {
@@ -294,8 +358,9 @@ def get_sync_stats() -> dict:
         if scheduler:
             tasks = scheduler.get_all_tasks()
             pending = len([t for t in tasks if t.status.value in ('pending_confirm', 'confirmed', 'uploading')])
-    except Exception:
-        pass
+    except Exception as e:
+        # F3-6: 静默吞异常改为留痕，便于排查
+        logger.warning(f"获取上传调度器待处理任务数失败: {e}")
     
     return {
         "total_synced": total_synced,
@@ -418,10 +483,20 @@ def complete_oauth(auth_code: str) -> dict:
             "message": f"Token 已获取，但 rclone 配置失败: {rclone_msg}",
         }
 
+    # 返回 token_json 供前端 saveProviderConfig 闭环（F1-1 链路：completeOAuth 成功后
+    # 前端会再次调用 configure_provider 幂等重写 rclone.conf，缺失则报"缺少 access token"误导）
+    token_json = json.dumps({
+        "access_token": token_data['access_token'],
+        "token_type": "Bearer",
+        "refresh_token": token_data['refresh_token'],
+        "expiry": datetime.fromtimestamp(token_data['expires_at']).isoformat(),
+    })
+
     return {
         "success": True,
         "message": "授权成功！rclone 已配置",
         "provider": cfg.get('provider', 'google'),
+        "token_json": token_json,
     }
 
 
@@ -520,24 +595,21 @@ def get_cloud_status(fast: bool = False) -> dict:
                 pass
 
         # 统计云端文件数 — fast 模式跳过慢速 rclone 调用
+        # F3-4: max_depth=1 只列当前层，避免全量递归（云端文件多时 lsjson 极慢）
         if not fast:
             try:
-                ok, files = list_remote_files(remote_name, cfg.get('remote_path', 'TeslaUSB/'))
+                ok, files = list_remote_files(remote_name, cfg.get('remote_path', 'TeslaUSB/'), max_depth=1)
                 if ok:
                     status["files_in_cloud"] = len(files)
             except:
                 pass
 
-    # 最后同步时间
-    sync_log = "/opt/radxa_data/teslausb/data/cloud_sync_log.json"
+    # 最后同步时间（F3-5: 统一从同步历史读取，废弃双日志 cloud_sync_log.json）
     try:
-        if os.path.exists(sync_log):
-            with open(sync_log, 'r') as f:
-                log = json.load(f)
-                entries = log.get("entries", [])
-                if entries:
-                    status["last_sync"] = entries[-1].get("time", None)
-    except (OSError, json.JSONDecodeError):
+        history = get_sync_history(1)
+        if history:
+            status["last_sync"] = history[0].get("time")
+    except Exception:
         pass
 
     return status
@@ -595,8 +667,15 @@ def upload_event_to_cloud(folder_type: str, event_id: str) -> dict:
 
             ok, msg, stats = upload_directory(tmp_dir, remote, remote_path)
 
-            # 记录同步日志
-            _log_sync("upload", event_id, ok, msg, stats)
+            # F3-5: 统一记录到同步历史（替代双日志 _log_sync）
+            add_sync_record({
+                "trigger": "upload",
+                "success": ok,
+                "message": msg,
+                "files": stats.get("files_synced", stats.get("files", 0)),
+                "bytes": stats.get("bytes_transferred", stats.get("bytes", 0)),
+                "duration_sec": stats.get("duration_sec", 0),
+            })
 
             return {
                 "success": ok,
@@ -617,7 +696,15 @@ def upload_event_to_cloud(folder_type: str, event_id: str) -> dict:
 
         ok, msg, stats = upload_directory(event_path, remote, remote_path)
 
-        _log_sync("upload", event_id, ok, msg, stats)
+        # F3-5: 统一记录到同步历史
+        add_sync_record({
+            "trigger": "upload",
+            "success": ok,
+            "message": msg,
+            "files": stats.get("files_synced", stats.get("files", 0)),
+            "bytes": stats.get("bytes_transferred", stats.get("bytes", 0)),
+            "duration_sec": stats.get("duration_sec", 0),
+        })
 
         return {
             "success": ok,
@@ -633,7 +720,8 @@ def get_sync_progress() -> dict:
         {"running": bool, "progress": int, "message": str, "started_at": float|None}
         progress: 0-100（钳制在此范围），-1=失败已完成
     """
-    state = dict(_sync_state)
+    # F3-2: 锁内快照读取，避免读到写入中的半更新状态
+    state = _get_sync_state()
     # 钳制进度值在有效范围
     p = state.get('progress', 0)
     if p > 100:
@@ -653,8 +741,6 @@ def sync_teslacam_to_cloud() -> dict:
     Returns:
         {"success": bool, "message": str, "stats": dict}
     """
-    global _sync_state
-    
     ready, err = _check_cloud_ready()
     if not ready:
         return {"success": False, "message": err}
@@ -683,11 +769,11 @@ def sync_teslacam_to_cloud() -> dict:
             rank = {f: i for i, f in enumerate(sync_order)}
             folders = sorted(folders, key=lambda f: rank.get(f, 999))
 
-        _sync_state["running"] = True
-        _sync_state["progress"] = 0
-        _sync_state["message"] = f"准备上传 {len(folders)} 个文件夹..."
-        _sync_state["started_at"] = time.time()
-        _sync_state["cancelled"] = False
+        # F3-2: 状态写入统一走锁保护
+        _set_sync_state(running=True, progress=0,
+                        message=f"准备上传 {len(folders)} 个文件夹...",
+                        started_at=time.time(), cancelled=False)
+        started_at = time.time()
 
         total_files = 0
         total_bytes = 0
@@ -713,23 +799,20 @@ def sync_teslacam_to_cloud() -> dict:
             def _make_folder_callback(folder_name, base, pct_range):
                 def _cb(pct):
                     if pct < 0:
-                        _sync_state["progress"] = pct
-                        _sync_state["message"] = f"[{folder_name}] 同步失败"
+                        _set_sync_state(progress=pct, message=f"[{folder_name}] 同步失败")
                     elif pct >= 100:
                         scaled = min(base + pct_range, 99)
-                        _sync_state["progress"] = scaled
-                        _sync_state["message"] = f"[{folder_name}] 完成 ✅"
+                        _set_sync_state(progress=scaled, message=f"[{folder_name}] 完成 ✅")
                     else:
                         # 避免小百分比舍入为 0：至少移动 1%
                         step = int(pct * pct_range / 100)
                         if pct > 0 and step == 0:
                             step = 1
                         scaled = min(base + step, 99)
-                        _sync_state["progress"] = scaled
-                        _sync_state["message"] = f"[{folder_name}] {pct}%"
+                        _set_sync_state(progress=scaled, message=f"[{folder_name}] {pct}%")
                 return _cb
 
-            _sync_state["message"] = f"[{folder}] 正在上传 ({folder_count}/{len(folders)})..."
+            _set_sync_state(message=f"[{folder}] 正在上传 ({folder_count}/{len(folders)})...")
             
             ok, msg, stats = upload_directory(src, remote, dst,
                                               bwlimit=bwlimit,
@@ -744,29 +827,28 @@ def sync_teslacam_to_cloud() -> dict:
                     break
 
         if is_sync_cancelled():
-            _sync_state["message"] = "同步已取消"
-            _sync_state["progress"] = -1
-            _log_sync("sync_all", "", False, "同步已取消", {"files": total_files, "bytes": total_bytes})
+            _set_sync_state(message="同步已取消", progress=-1)
             return {"success": False, "message": "同步已取消", "stats": {"files": total_files, "bytes": total_bytes}}
         
-        _sync_state["progress"] = 100
-        _sync_state["message"] = f"同步完成 ({total_files} 文件)"
+        _set_sync_state(progress=100, message=f"同步完成 ({total_files} 文件)")
         
-        duration = round(time.time() - _sync_state["started_at"], 1)
+        duration = round(time.time() - started_at, 1)
         summary_stats = {
             "duration_sec": duration,
             "files_synced": total_files,
             "bytes_transferred": total_bytes,
             "bytes_fmt": _fmt_size(total_bytes),
         }
-        _log_sync("sync_all", "", all_ok, f"同步 {len(folders)} 个文件夹", summary_stats)
         return {
             "success": all_ok,
             "message": f"同步完成 ({duration:.0f}s, {total_files} 文件, {folder_count} 文件夹)",
             "stats": summary_stats,
         }
     finally:
-        _sync_state["running"] = False
+        # F3-2/F3-3: 状态复位走锁 + 取消标志会话化（完成/取消后清除，避免污染下一轮）
+        _set_sync_state(running=False)
+        from cloud_rclone_service import reset_sync_cancel
+        reset_sync_cancel()
         _sync_lock.release()
 
 
@@ -808,30 +890,5 @@ def list_cloud_files(path: str = "") -> dict:
 
 
 # ── 内部工具 ────────────────────────────────────────────
-
-
-def _log_sync(action: str, event_id: str, success: bool, message: str, stats: dict = None):
-    """记录同步日志到本地 JSON 文件"""
-    log_file = "/opt/radxa_data/teslausb/data/cloud_sync_log.json"
-    try:
-        log = {"entries": []}
-        if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
-            with open(log_file, 'r') as f:
-                log = json.load(f)
-
-        entry = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "action": action,
-            "event_id": event_id,
-            "success": success,
-            "message": message,
-            "stats": stats or {},
-        }
-        log.setdefault("entries", []).append(entry)
-        # 保留最近 100 条
-        log["entries"] = log["entries"][-100:]
-
-        with open(log_file, 'w') as f:
-            json.dump(log, f, indent=2)
-    except Exception as e:
-        logger.warning(f"写入同步日志失败: {e}")
+# F3-5: 原 _log_sync（双日志）已废弃，统一使用 add_sync_record 记录同步历史。
+# 遗留的 cloud_sync_log.json 不再写入，历史读取统一走 get_sync_history。

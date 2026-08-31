@@ -113,6 +113,15 @@ if __name__ == '__main__':
         app.logger.info("TeslaCam 缓存一致性兜底任务已启动")
     except Exception as e:
         app.logger.warning("缓存一致性任务启动失败（不影响主服务）: %s", e)
+
+    # ── 云归档自动同步恢复（v0.3.1.38 F3-7/F5-1）──
+    # 按 cloud.json auto_sync_enabled 恢复 worker，修复 web 重启后自动同步静默丢失
+    try:
+        from cloud_archive_service import init_auto_sync
+        init_auto_sync()
+        app.logger.info("云归档自动同步恢复检查完成")
+    except Exception as e:
+        app.logger.warning(f"云归档自动同步恢复失败: {e}")
     
     # ── 开机通知 ──
     try:

@@ -21,10 +21,13 @@ from utils.app_helpers import get_template_context
 
 @cloud_bp.route('/api/sync/status')
 def sync_status_api():
-    """获取同步状态"""
+    """[DEPRECATED] 获取 NAS 同步状态 — 遗留接口，请使用 /api/cloud/* 系列（云归档）"""
+    current_app.logger.warning("调用已废弃的 /api/sync/status（请迁移到 /api/cloud/*）")
     try:
         status = sync_service.get_sync_status()
-        return jsonify({"success": True, **status})
+        resp = jsonify({"success": True, **status})
+        resp.headers['X-Deprecated'] = 'true'
+        return resp
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -32,10 +35,13 @@ def sync_status_api():
 
 @cloud_bp.route('/api/sync/history')
 def sync_history_api():
-    """获取同步历史"""
+    """[DEPRECATED] 获取 NAS 同步历史 — 遗留接口，请使用 /api/cloud/* 系列（云归档）"""
+    current_app.logger.warning("调用已废弃的 /api/sync/history（请迁移到 /api/cloud/*）")
     try:
         history = sync_service.get_sync_history()
-        return jsonify({"success": True, "history": history})
+        resp = jsonify({"success": True, "history": history})
+        resp.headers['X-Deprecated'] = 'true'
+        return resp
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -43,10 +49,13 @@ def sync_history_api():
 
 @cloud_bp.route('/api/sync/trigger', methods=['POST'])
 def sync_trigger_api():
-    """手动触发同步"""
+    """[DEPRECATED] 手动触发 NAS 同步 — 遗留接口，请使用 /api/cloud/* 系列（云归档）"""
+    current_app.logger.warning("调用已废弃的 /api/sync/trigger（请迁移到 /api/cloud/*）")
     try:
         result = sync_service.run_sync()
-        return jsonify(result)
+        resp = jsonify(result)
+        resp.headers['X-Deprecated'] = 'true'
+        return resp
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
@@ -54,12 +63,15 @@ def sync_trigger_api():
 
 @cloud_bp.route('/api/sync/config', methods=['GET', 'POST'])
 def sync_config_api():
-    """获取/更新同步配置"""
+    """[DEPRECATED] 获取/更新 NAS 同步配置 — 遗留接口，请使用 /api/cloud/* 系列（云归档）"""
+    current_app.logger.warning("调用已废弃的 /api/sync/config（请迁移到 /api/cloud/*）")
     if request.method == 'GET':
         cfg = sync_service.load_config()
         # 隐藏密码
         safe = {k: v for k, v in cfg.items() if not k.startswith('_')}
-        return jsonify({"success": True, "config": safe})
+        resp = jsonify({"success": True, "config": safe})
+        resp.headers['X-Deprecated'] = 'true'
+        return resp
 
     try:
         data = request.get_json() or {}
@@ -71,7 +83,9 @@ def sync_config_api():
         if '_nas_pass' in data and data['_nas_pass']:
             current['_nas_pass'] = data['_nas_pass']
         result = sync_service.save_config(current)
-        return jsonify(result)
+        resp = jsonify(result)
+        resp.headers['X-Deprecated'] = 'true'
+        return resp
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
@@ -101,8 +115,22 @@ def cloud_status_api():
 
 @cloud_bp.route('/api/cloud/oauth/authorize', methods=['POST'])
 def cloud_oauth_authorize():
-    """启动 OAuth 授权流程，返回 Google 授权 URL"""
+    """启动 OAuth 授权流程，返回 Google 授权 URL
+
+    F4-1: 接收前端提交的 client_id/client_secret 并持久化到 cloud.json，
+    修复"表单输入形同虚设"（此前后端只读 cloud.json，页面填了也不生效）。
+    """
     try:
+        data = request.get_json(silent=True) or {}
+        cid = (data.get('client_id') or '').strip()
+        cse = (data.get('client_secret') or '').strip()
+        if cid or cse:
+            cfg = cloud_archive_service.load_cloud_config()
+            if cid:
+                cfg['google_client_id'] = cid
+            if cse:
+                cfg['google_client_secret'] = cse
+            cloud_archive_service.save_cloud_config(cfg)
         result = cloud_archive_service.start_oauth_flow()
         return jsonify(result)
     except Exception as e:
@@ -211,6 +239,9 @@ def cloud_provider_disconnect():
 def cloud_files_api():
     """列出云端文件"""
     path = request.args.get('path', '')
+    # F4-2: 路径穿越防护（与 /api/cloud/upload/event 的校验保持一致）
+    if '..' in path or '\\' in path or '//' in path:
+        return jsonify({"success": False, "error": "非法路径"}), 400
     try:
         result = cloud_archive_service.list_cloud_files(path)
         return jsonify(result)
