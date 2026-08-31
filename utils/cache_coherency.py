@@ -60,6 +60,16 @@ ENSURE_TTL_SEC = 30
 # listdir（可靠），此兜底仅覆盖指纹感知不到的罕见场景。
 S3_FORCE_TTL_SEC = 120
 
+# v0.3.1.39（A1 延迟刷新）：车机写入静止判定窗口（秒）。
+# 背景：v0.3.1.35 listdir 指纹实时感知车机写入 → 车机写哨兵期间每 30s 触发
+# 一次全局 drop_caches=2（实证 refresh_count=338）→ 959MB 小内存系统缓存回收
+# + 本地读重新落盘 → NVMe/USB gadget 写路径抖动 → 诱发 dwc3 ep1out 端点
+# 禁用 → 车机 UI_a112「USB设备故障 - I/O错误」（8-31 诊断实证）。
+# 修复：检测到车机写入仅标记 dirty（不立即刷），等车机停止写入 ≥ 该时长后
+# 才执行 drop_caches。读取驱动 ensure_fresh 仍保证「读取时刻 = 刷新时刻」
+# （货不对板修复不回归）——车机停写后任意读取会触发刷新，读到最新完整文件。
+WRITE_STABLE_SEC = 60
+
 # 后台兜底检测间隔（秒）：仅 listdir 指纹检测，车机在写才刷，无写入零开销。
 DEFAULT_REFRESH_INTERVAL = 60
 
@@ -75,9 +85,14 @@ _state = {
 }
 _state_lock = threading.Lock()
 
-# ensure_fresh 节流状态（TTL + listdir 指纹）
+# ensure_fresh 节流状态（TTL + listdir 指纹 + v0.3.1.39 dirty 延迟刷新）
 _ensure_lock = threading.Lock()
-_ensure_state = {"last_ts": 0.0, "last_fingerprint": None}
+_ensure_state = {
+    "last_ts": 0.0,
+    "last_fingerprint": None,
+    "dirty": False,        # v0.3.1.39: 检测到车机写入但尚未刷新（延迟窗口内）
+    "last_write_ts": 0.0,  # v0.3.1.39: 最近一次检测到车机写入的时间
+}
 
 
 def get_coherency_status() -> dict:
@@ -174,7 +189,16 @@ def ensure_fresh(path: Optional[str] = None) -> bool:
     主保障（读取驱动）：
       - 30s TTL 节流：距上次刷新不足 30s 直接跳过（缓存仍新鲜）
       - listdir 指纹：文件集合未变（车机未写）→ 跳过，零开销
-      - S3 兜底：距上次刷新 >120s 即使指纹未变也强制刷一次
+      - v0.3.1.39（A1 延迟刷新）：检测到车机写入（指纹变化）→ 仅标记 dirty
+        并记录 last_write_ts，**不立即 drop_caches**；待车机停止写入 ≥
+        WRITE_STABLE_SEC（60s）后才执行刷新。消除「车机写哨兵期间每 30s
+        全局 drop_caches」→ 系统 IO 抖动 → dwc3 ep1out 端点异常 → UI_a112
+        的诱发链。
+        新鲜度取舍（已明确接受）：车机停写后 60s 内读取拿到的是上一版完整
+        文件（避免读半截新文件）；停写 ≥60s 后任意读取/后台兜底触发刷新，
+        读到最新完整文件。车机持续写入期间不刷新（dirty 恒真屏蔽 S3 兜底），
+        陈旧度由读取方容忍——写期间读旧缓存优于读半截 + 系统抖动。
+      - S3 兜底：非 dirty 状态下距上次刷新 >120s 强制刷一次
         （覆盖「同名覆盖重写」等指纹感知不到的罕见场景）
       - 仅 Present 模式生效（Edit 模式 rw 挂载、缓存随磁盘重建，无需刷）
     返回是否执行了刷新（供调用方/日志参考）。
@@ -190,21 +214,47 @@ def ensure_fresh(path: Optional[str] = None) -> bool:
         if now - _ensure_state["last_ts"] < ENSURE_TTL_SEC:
             return False
         fp = _dir_fingerprint(target)
-        # listdir 指纹未变（车机未写新文件）且距上次刷新 < S3 兜底时长 → 跳过。
-        # fp 为 None（目录不可读）→ 保守视为有变化，触发刷新。
-        if fp is not None and _ensure_state["last_ts"] > 0 \
-                and fp == _ensure_state["last_fingerprint"] \
-                and (now - _ensure_state["last_ts"]) < S3_FORCE_TTL_SEC:
+        # 目录不可读 → 保守立即刷（维持原行为）
+        if fp is None:
+            return _do_refresh(fp)
+        # 首跑（启动后第一次调用）：直接刷一次建立基准指纹，
+        # 避免 last_fingerprint=None 被误判为"写入"而多等 60s 延迟窗口
+        if _ensure_state["last_ts"] == 0:
+            return _do_refresh(fp)
+        if fp != _ensure_state["last_fingerprint"]:
+            # 检测到车机写入：标记 dirty + 记录时间，不立即刷（A1 延迟）
+            _ensure_state["dirty"] = True
+            _ensure_state["last_write_ts"] = now
+            _ensure_state["last_fingerprint"] = fp
+            logger.debug("检测到车机写入，标记待刷（延迟窗口 %ds）", WRITE_STABLE_SEC)
             return False
-        if not drop_vfs_caches():
-            _record_error("drop_vfs_caches 返回失败")
+        # 指纹未变：
+        if _ensure_state["dirty"]:
+            if (now - _ensure_state["last_write_ts"]) >= WRITE_STABLE_SEC:
+                # 车机已静止 ≥60s → 执行刷新
+                return _do_refresh(fp)
+            # 车机仍在写（或刚停不足窗口）→ 继续等待，不刷
             return False
-        # 同时让视频扫描元数据缓存失效，避免事件列表陈旧
-        _invalidate_video_scan_cache()
-        _ensure_state["last_ts"] = now
-        _ensure_state["last_fingerprint"] = fp
-        _record_success()
-        return True
+        # 非 dirty：S3 兜底（距上次刷新 >120s 强制刷一次）
+        if _ensure_state["last_ts"] > 0 \
+                and (now - _ensure_state["last_ts"]) >= S3_FORCE_TTL_SEC:
+            return _do_refresh(fp)
+        return False
+
+
+def _do_refresh(fp) -> bool:
+    """执行一次实际刷新（drop_caches + 元数据缓存失效 + 状态更新）。"""
+    if not drop_vfs_caches():
+        _record_error("drop_vfs_caches 返回失败")
+        return False
+    # 同时让视频扫描元数据缓存失效，避免事件列表陈旧
+    _invalidate_video_scan_cache()
+    now = time.time()
+    _ensure_state["last_ts"] = now
+    _ensure_state["last_fingerprint"] = fp
+    _ensure_state["dirty"] = False
+    _record_success()
+    return True
 
 
 def _coherency_loop(interval: int):

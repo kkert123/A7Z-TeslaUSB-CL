@@ -1910,6 +1910,40 @@ class WifiSmartSwitch:
         except Exception:
             return []
 
+    def _wait_scan_results(self, max_wait: int = 30, interval: int = 3) -> set:
+        """轮询 nmcli wifi list 直到出现非空结果（v0.3.1.39 AP 退出修复）。
+
+        AIC8800 从 AP 模式切回 station 后扫描需 10-30s，固定 sleep(5) 常拿到空
+        结果 → 误判"无可回连网络"。轮询等待：每 interval 秒查一次，直到非空
+        或超时。返回扫描到的 SSID 集合（可能为空=超时仍未扫到）。
+
+        注意：-f SSID 为单列输出，行内容即 SSID（nmcli -t 将 SSID 内特殊字符
+        转义，冒号显示为 \\:，需还原）；不做 rsplit 切分（含冒号 SSID 会被截断）。
+        子进程 timeout 可能使单窗口略超 max_wait（约 +10s），无碍（多等即多等）。
+
+        Args:
+            max_wait: 最长等待秒数
+            interval: 轮询间隔秒数
+        """
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            try:
+                r = subprocess.run(
+                    ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                scanned = set()
+                for line in r.stdout.splitlines():
+                    ssid = line.strip().replace("\\:", ":")
+                    if ssid:
+                        scanned.add(ssid)
+                if scanned:
+                    return scanned
+            except Exception:
+                pass
+            time.sleep(interval)
+        return set()
+
     def _start_ap_fallback(self) -> None:
         """当所有 WiFi 不可用时自动启用 AP 热点（复用完整 bring-up 流程）"""
         try:
@@ -2007,24 +2041,31 @@ class WifiSmartSwitch:
                 _write_backoff(min(backoff * 2, AP_BACKOFF_MAX))
                 _record_ap_try()
                 return
-            # 主动扫描（5s 等待 NM 扫描完成；S6：不再调 _scan_available 避免双重 rescan）
+            # 主动扫描（v0.3.1.39 FIX：AIC8800 从 AP 切回 station 后扫描需 10-30s，
+            # 原固定 rescan + sleep(5) 常扫不到已保存 WiFi → 误判"无可回连网络"
+            # → 反复重启 AP + 退避加倍（手机断开不切回根因，8-31 日志
+            # 12:44:24→35 实锤 11 秒误判）。改为轮询式等待 + 空结果重试。
+            # 注：nmcli wifi list 可能先返回切模式前的旧扫描缓存（非空）→ 轮询
+            # 提前返回旧 SSID。旧 SSID 是真实存在过的网络，_switch_to 会实际连接
+            # 验证，连不上则走下方"无可回连"兜底，行为正确（最多多一次失败尝试）。）
             subprocess.run(
                 ["nmcli", "dev", "wifi", "rescan"],
                 capture_output=True, text=True, timeout=15,
             )
-            time.sleep(5)
+            time.sleep(3)
+            scanned = self._wait_scan_results(max_wait=30, interval=3)
+            if not scanned:
+                # 空结果重试一次（再 rescan + 再轮询，最长约 +30s）
+                self.log.info("AP 自愈: 首次扫描为空（可能仍在切模式），重试 rescan...")
+                subprocess.run(
+                    ["nmcli", "dev", "wifi", "rescan"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                time.sleep(3)
+                scanned = self._wait_scan_results(max_wait=30, interval=3)
             # S1：全量扫描结果 ∩ NM 已保存连接（含未配置优先级的已保存 WiFi，
             # 避免 _scan_available 只返回优先级网络 → 误判"无可回连网络"）
             saved = set(self._get_saved_connections())
-            r_list = subprocess.run(
-                ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list"],
-                capture_output=True, text=True, timeout=10,
-            )
-            scanned = set()
-            for line in r_list.stdout.splitlines():
-                ssid = line.rsplit(":", 1)[0].replace("\\:", ":").strip() if ":" in line else line.strip()
-                if ssid:
-                    scanned.add(ssid)
             known = [ssid for ssid in saved if ssid in scanned]
             if known:
                 self.log.info("AP 自愈: 发现已知 WiFi %s，尝试回连", known)
@@ -2035,8 +2076,9 @@ class WifiSmartSwitch:
                         self.log.info("AP 自愈: 已回连 %s，AP 保持关闭", ssid)
                         return
             # 无已知 WiFi 或连接失败 → 立即重启 AP（不等 NM 空等 30s），退避加倍
-            self.log.info("AP 自愈: 无可回连网络，重启 AP + 退避加倍(%d→%dmin)",
-                          backoff, min(backoff * 2, AP_BACKOFF_MAX))
+            # v0.3.1.39：日志记录扫描结果数，便于区分「真无可回连」vs「扫描未完成」
+            self.log.info("AP 自愈: 无可回连网络（已保存 %d, 扫描到 %d 个 SSID），重启 AP + 退避加倍(%d→%dmin)",
+                          len(saved), len(scanned), backoff, min(backoff * 2, AP_BACKOFF_MAX))
             _ap_bring_up()
             _write_backoff(min(backoff * 2, AP_BACKOFF_MAX))
             _record_ap_try()
