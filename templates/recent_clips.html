@@ -7,7 +7,8 @@
   <h2>🌀 车外监控 · 台风实况</h2>
   <div class="header-actions">
     <span class="badge" id="thumbnail-count">{{ thumbnail_count }} 张</span>
-    <span class="badge badge-muted" id="refresh-hint">30s 刷新</span>
+    <button class="btn btn-sm btn-outline" id="btn-refresh-gallery" onclick="manualRefresh()" title="立即刷新画廊列表">🔄 刷新</button>
+    <span class="badge badge-muted" id="refresh-hint">30s 自动刷新</span>
   </div>
 </div>
 
@@ -167,7 +168,8 @@ document.addEventListener('DOMContentLoaded', function() {
 var galleryRefreshTimer = null;
 
 function refreshGallery() {
-  fetch('/api/camera/recent-thumbnails?limit=30&t=' + Date.now())
+  // 返回 promise 供手动刷新感知完成（v0.3.1.40）
+  return fetch('/api/camera/recent-thumbnails?limit=30&t=' + Date.now())
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (!d.success || !d.thumbnails) return;
@@ -225,6 +227,21 @@ function refreshGallery() {
     .catch(function() {
       // 静默处理网络错误
     });
+}
+
+// v0.3.1.40：手动即时刷新 — 用户主动想看最新 → 不等 30s 轮询立即拉一次列表。
+// 注：list_recent_thumbnails 只列已生成 JPG（不触发 drop_caches），故自动轮询
+// 维持 30s 无 UI_a112 代价；手动按钮价值 = 主动即时获取 + 明确完成反馈。
+function manualRefresh() {
+  var btn = document.getElementById('btn-refresh-gallery');
+  var hint = document.getElementById('refresh-hint');
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+  var done = function() {
+    if (btn) { btn.textContent = '🔄'; btn.disabled = false; }
+    if (hint) hint.textContent = '已刷新 ' + new Date().toTimeString().slice(0, 8);
+  };
+  // refreshGallery 内部已 catch，promise 必 resolve → then 必执行
+  refreshGallery().then(done);
 }
 
 function startGalleryRefresh() {

@@ -277,6 +277,14 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     # 清理旧备份（bak 保留最近 BAK_KEEP 个）
     _prune_bak()
 
+    # v0.3.1.40 post-install：部署随包 udev 规则到 /etc/udev/rules.d/（幂等）
+    # ok=True 部署成功 / None 包内无规则正常跳过 / False 部署失败（警告不阻断）
+    _ph_ok, _ph_msg = _run_post_install_hooks(new_dir)
+    if _ph_ok is False:
+        steps.append(f"post-install 警告: {_ph_msg}")
+    elif _ph_ok is True:
+        steps.append(_ph_msg)
+
     _write_progress("等待重启生效", 98)
     steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
     # S4：成功返回前清除进度文件（防残留 98% 脏状态导致 progress API 误报 running）
@@ -358,6 +366,13 @@ def do_upgrade_from_tarball(tarball_path, new_version):
 
     _record_version(new_version, "", "manual-upload")
     _prune_bak()
+
+    # v0.3.1.40 post-install：部署随包 udev 规则到 /etc/udev/rules.d/（幂等）
+    _ph_ok, _ph_msg = _run_post_install_hooks(new_dir)
+    if _ph_ok is False:
+        steps.append(f"post-install 警告: {_ph_msg}")
+    elif _ph_ok is True:
+        steps.append(_ph_msg)
 
     steps.append("等待重启生效")
     return True, "\n".join(steps)
@@ -782,6 +797,38 @@ def _restore_from_bak(version):
         shutil.rmtree(target, ignore_errors=True)
         return False, f"v{version} 恢复后不完整（缺少 {', '.join(missing)}），已回滚删除"
     return True, target
+
+
+def _run_post_install_hooks(new_dir: str):
+    """升级后置钩子（v0.3.1.40）——部署随包发布的系统级配置文件。
+
+    背景：/etc/udev/rules.d/99-usb-gadget.rules 是系统级部署物（不在版本目录
+    生效路径内）。v0.3.1.39 前仅 SSH 手部署、升级包不含 → 「git 有而包无」，
+    全新部署/换机从包恢复会回归 5-09 旧版（bind 无条件重置 xhci-hcd +
+    unbind 分支 → 运行中 gadget 被打断 → UI_a112 干扰源，9-3 三天审查 P1-1）。
+    修复：升级包携带 udev/99-usb-gadget.rules（deploy_manager 白名单已加），
+    升级成功且版本目录切换后自动 cp 到 /etc/udev/rules.d/ + udevadm reload。
+
+    幂等性：规则内容一致时覆盖写入无副作用；reload-rules 重复执行安全。
+    返回 (ok, msg)：ok=True 部署成功；ok=None 包内无规则（正常跳过，调用方
+    不应提示警告）；ok=False 部署失败（仅记录，不阻断升级主流程——udev 规则
+    属增强性修复，若部署失败设备仍可运行，仅丢失该防护）。
+    """
+    try:
+        src = os.path.join(new_dir, "udev", "99-usb-gadget.rules")
+        if not os.path.isfile(src):
+            return None, "升级包无 udev/99-usb-gadget.rules（旧包或手工构建），跳过部署"
+        dst = "/etc/udev/rules.d/99-usb-gadget.rules"
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o644)
+        rc, out, err = _run(["udevadm", "control", "--reload-rules"], timeout=20)
+        if rc != 0:
+            return False, f"udevadm reload-rules 失败: {err[:150]}"
+        # 注：不执行 udevadm trigger —— 默认 action=change 与规则 ACTION=="bind"
+        # 不匹配（无效）；下次真实 USB bind 事件（含车机插拔）自然触发新规则
+        return True, "udev 规则已部署到 /etc/udev/rules.d/ 并 reload"
+    except Exception as e:
+        return False, f"post-install 钩子异常: {e}"
 
 
 def _backup_current():

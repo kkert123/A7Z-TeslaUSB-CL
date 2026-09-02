@@ -28,7 +28,8 @@ def _get_generate_lock(key):
         return lock
 
 
-def _generate_thumbnail(event_path, event_id, video_files=None, folder_type=None):
+def _generate_thumbnail(event_path, event_id, video_files=None, folder_type=None,
+                        background: bool = False):
     """生成四宫格缩略图：2x2 (前/后+左/右) + 摄像头标签 + 时间水印
     
     参考 TeslaUSB-CL video_preview.py generate_sentry_grid_preview()
@@ -38,6 +39,10 @@ def _generate_thumbnail(event_path, event_id, video_files=None, folder_type=None
         event_id: 事件ID
         video_files: 可选，直接指定视频文件列表（用于 RecentClips 平铺结构）
         folder_type: 可选，文件夹类型 (SentryClips/SavedClips/RecentClips)，用于缩略图命名
+        background: v0.3.1.40 透传 ensure_fresh 语义 —— 后台预生成
+            （bg_preview_generator，无人浏览也跑）传 True → A1 延迟刷新
+            （车机写期间不 drop → UI_a112 防护不被后台旁路）；前台懒生成
+            （serve_thumbnail 用户看图触发）默认 False → 立即刷（新鲜度优先）
     
     Returns:
         str: 缩略图 URL 路径，失败返回 None
@@ -53,10 +58,12 @@ def _generate_thumbnail(event_path, event_id, video_files=None, folder_type=None
 
     # 并发保护（threaded=True 后同 event 可能并发请求，锁住「检查-生成-保存」全程）
     with _get_generate_lock(thumbnail_file):
-        return _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, thumbnail_file)
+        return _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, thumbnail_file,
+                                          background=background)
 
 
-def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, thumbnail_file):
+def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, thumbnail_file,
+                               background: bool = False):
     """_generate_thumbnail 的加锁实现（由主函数持 per-path 锁调用）"""
     # 缓存检查（含 RecentClips 平铺文件结构支持）
     # 
@@ -154,7 +161,10 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
     if folder_type == 'RecentClips':
         try:
             from utils.cache_coherency import ensure_fresh
-            ensure_fresh()
+            # v0.3.1.40：透传 background —— 后台预生成（bg_preview，无人也跑）
+            # 传 True 走 A1 延迟刷（写期间不 drop → UI_a112 防护不被旁路）；
+            # 前台懒生成默认 False 立即刷（用户看图要最新）
+            ensure_fresh(background=background)
         except Exception:
             # 刷新失败不影响生成主流程，仅可能仍读到陈旧帧
             pass

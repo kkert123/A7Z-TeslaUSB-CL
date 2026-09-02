@@ -388,7 +388,8 @@ class BgPreviewGenerator:
         try:
             from utils.thumbnail_utils import _generate_thumbnail
             result = _generate_thumbnail(entry['folder_path'], entry['event_id'],
-                                         folder_type=entry.get('folder_type', 'SentryClips'))
+                                         folder_type=entry.get('folder_type', 'SentryClips'),
+                                         background=True)  # v0.3.1.40: 后台生成走 A1 延迟刷
             return bool(result)
         except Exception as e:
             logger.error(f"生成缩略图失败 {entry['event_id']}: {e}")
@@ -459,7 +460,8 @@ class BgPreviewGenerator:
                         return False
 
             result = _generate_thumbnail(event_path, event_id, video_files=video_files,
-                                         folder_type=entry.get('folder_type'))
+                                         folder_type=entry.get('folder_type'),
+                                         background=True)  # v0.3.1.40: 后台生成走 A1 延迟刷
             return bool(result)
         except Exception as e:
             logger.error(f"生成缩略图失败 {entry['event_id']}: {e}")

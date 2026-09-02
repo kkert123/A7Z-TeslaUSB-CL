@@ -1,4 +1,4 @@
-# TeslaUSB A7Z — USB Gadget udev 规则（v0.3.1.39 修正版）
+# TeslaUSB A7Z — USB Gadget udev 规则（v0.3.1.40 修正版）
 # ============================================================
 # 背景：旧规则（2026-05-09 设备端手工部署）在任意 usb_device bind/unbind
 # 事件（含 AIC8800 WiFi/蓝牙插拔）时无条件执行：
@@ -11,13 +11,11 @@
 #   2. 删除 unbind 分支的 xhci-hcd unbind/bind —— gadget 生命周期由
 #      present_usb.sh / usb_gadget_init.sh 全权管理，udev 无需干预
 #
-# 部署（设备端）：
-#   sudo cp udev/99-usb-gadget.rules /etc/udev/rules.d/99-usb-gadget.rules
-#   sudo chmod 644 /etc/udev/rules.d/99-usb-gadget.rules
-#   sudo udevadm control --reload-rules
-#
-# 说明：本文件为部署参考源（进 git 版本化）；不进升级包白名单，
-# 避免升级覆盖设备端的现场配置。
+# 部署（v0.3.1.40 起随升级包自动部署，upgrade_service post-install 钩子）：
+#   升级完成后自动执行：cp 本文件 → /etc/udev/rules.d/ + udevadm control
+#   --reload-rules（幂等）。本文件在 deploy_manager MANAGED_FILES 白名单内、
+#   进入升级包；设备端已部署的旧规则在 v0.3.1.39 时已手动覆盖为同内容修正版
+#   （备份 .bak-v37），升级流程再次覆盖为同内容文件无害。
 
 # 当 USB 连接时，仅当 Gadget 未激活（UDC 文件为空）才执行绑定。
 # [ ! -s UDC ] = UDC 未绑定控制器（未激活）→ 才重绑；已激活则跳过（不打断）。
