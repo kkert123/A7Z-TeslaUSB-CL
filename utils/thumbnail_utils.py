@@ -161,9 +161,10 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
     if folder_type == 'RecentClips':
         try:
             from utils.cache_coherency import ensure_fresh
-            # v0.3.1.40：透传 background —— 后台预生成（bg_preview，无人也跑）
-            # 传 True 走 A1 延迟刷（写期间不 drop → UI_a112 防护不被旁路）；
-            # 前台懒生成默认 False 立即刷（用户看图要最新）
+            # v0.3.1.40 起透传 background；v0.3.1.41 bg_preview 后台生成恢复默认
+            # 前台立即刷（实证：A1 延迟刷 + 无人访问时 readdir 冻结 → 后台不生成
+            # 缩略图回归）。参数保留：未来若需抑制特定路径的 drop 频率
+            # （UI_a112 残余风险兜底）可对相应调用方传 background=True。
             ensure_fresh(background=background)
         except Exception:
             # 刷新失败不影响生成主流程，仅可能仍读到陈旧帧

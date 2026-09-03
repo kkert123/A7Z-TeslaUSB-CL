@@ -387,9 +387,11 @@ class BgPreviewGenerator:
         """生成哨兵事件四宫格缩略图（用于视频列表页）"""
         try:
             from utils.thumbnail_utils import _generate_thumbnail
+            # v0.3.1.41：撤销 v0.3.1.40 的 background=True —— 后台生成恢复前台
+            # 立即刷语义（见 _process_thumbnail_event 注释）。SentryClips 不含
+            # RecentClips 回收重写场景，ensure_fresh 实际不触发，传参仅保一致性。
             result = _generate_thumbnail(entry['folder_path'], entry['event_id'],
-                                         folder_type=entry.get('folder_type', 'SentryClips'),
-                                         background=True)  # v0.3.1.40: 后台生成走 A1 延迟刷
+                                         folder_type=entry.get('folder_type', 'SentryClips'))
             return bool(result)
         except Exception as e:
             logger.error(f"生成缩略图失败 {entry['event_id']}: {e}")
@@ -459,9 +461,20 @@ class BgPreviewGenerator:
                         logger.warning(f"RecentClips 无有效视频: {event_id} (已加密或损坏)")
                         return False
 
+            # v0.3.1.41：撤销 v0.3.1.40 的 background=True —— 后台缩略图生成恢复
+            # 「前台立即刷」语义。原因（9-3 实证）：A1 延迟刷 + 无人访问时 readdir
+            # 走冻结的目录 page cache → bgpreview scan 看不到车机新事件 → 后台
+            # 不生成缩略图（10:20-12:47 零生成，手动访问触发 drop 后才恢复）。
+            # 恢复后：事件写完 ≥2min（scan 活跃窗口）才处理 → 前台 ensure_fresh
+            # 检测到写入立即刷 → 读到最新内容确定性生成。
+            # ⚠️ UI_a112 权衡（交叉审查修正，勿再改回）：车机高密度持续写时，
+            # 本路径 drop 频率受 ensure_fresh 30s TTL 限制（每 30-60s 一次，
+            # 与 v0.3.1.35 实证期量级相当）——但 ep1out 主因是 dwc3 驱动层
+            # 写路径瞬态（实测失败在 drop 前 1s），drop 仅放大器；真实使用
+            # 哨兵事件稀疏，实际频率低。48h 观察 UI_a112，若复发 → 给本路径
+            # 加独立宽节流（如进程内 60s 最小间隔）即可，勿整体回退延迟刷。
             result = _generate_thumbnail(event_path, event_id, video_files=video_files,
-                                         folder_type=entry.get('folder_type'),
-                                         background=True)  # v0.3.1.40: 后台生成走 A1 延迟刷
+                                         folder_type=entry.get('folder_type'))
             return bool(result)
         except Exception as e:
             logger.error(f"生成缩略图失败 {entry['event_id']}: {e}")
