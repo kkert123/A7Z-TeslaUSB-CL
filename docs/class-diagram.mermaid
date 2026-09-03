@@ -1,0 +1,114 @@
+classDiagram
+    class App {
+        +Flask app
+        +dict PARTITIONS
+        +start() None
+        +get_queue_status() dict
+    }
+    
+    class UploadScheduler {
+        +ConfigManager config
+        +str queue_db_path
+        +Path sentry_path
+        +create_task(event_path, at_home, preview_code) UploadTask
+        +upload_sentry_event(event_path, event_id) bool
+        +get_pending_tasks() list~UploadTask~
+        +confirm_upload(preview_code) UploadTask
+        +start() None
+        +stop() None
+        +_execute_upload(task) bool
+        +schedule_delete(file_path, delay, verified) None
+        +process_delete_queue() int
+    }
+    
+    class UploadTask {
+        +str task_id
+        +str event_path
+        +str event_name
+        +UploadStatus status
+        +str preview_code
+        +str created_at
+        +int retry_count
+        +bool at_home
+        +dict file_progress
+        +to_dict() dict
+    }
+    
+    class SentryWatchdog {
+        +dict config
+        +LocationDetector location_detector
+        +WifiSwitcher wifi_switcher
+        +UploadScheduler upload_scheduler
+        +set_modules(location, wifi, upload) None
+        +scan_sentry_clips() List~SentryEvent~
+        +_get_current_location_status() str
+        +_do_upload(event) bool
+        +start() None
+        +stop() None
+    }
+    
+    class SentryService {
+        +SentryWatchdog watchdog
+        +WeixinNotifier notifier
+        +WeixinNotifier sentry_notifier
+        +VideoPreviewGenerator preview_generator
+        +_init_components() None
+        +start() None
+        +_on_new_event(event) None
+    }
+    
+    class SystemMonitor {
+        +dict config
+        +CooldownManager cooldown
+        +HeartbeatState heartbeat
+        +_init_notifier() None
+        +check_cpu_temp() None
+        +check_storage() None
+        +check_heartbeat() None
+        +run_daemon(interval) None
+    }
+    
+    class LocationDetector {
+        +check_location() LocationInfo
+    }
+    
+    class LocationInfo {
+        +LocationState state
+        +str raw_location
+        +str wifi_connected
+        +bool needs_wifi_switch
+        +float confidence
+    }
+    
+    class WeixinNotifier {
+        +WeComConfig config
+        +send_text(text) bool
+        +send_markdown(content) bool
+        +send_image(path) bool
+        +send_news(articles) bool
+        +send_upload_progress(event_id, progress, ...) bool
+        +send_upload_complete(event_id, ...) bool
+        +send_sentry_detected(event_id, ...) bool
+        +send_daily_report(...) bool
+        +send_boot_notification(...) bool
+    }
+    
+    class ConfigModule {
+        +dict PARTITIONS
+        +str SENTRY_CLIPS_PATH
+        +str RECENT_CLIPS_PATH
+        +str DATA_DIR
+        +str CONFIG_DIR
+    }
+    
+    App --> SentryService : 启动时初始化
+    App --> SystemMonitor : 启动时初始化
+    App --> UploadScheduler : get_queue_status() 查询
+    SentryService --> SentryWatchdog : 组合
+    SentryWatchdog --> LocationDetector : 位置检测
+    SentryWatchdog --> UploadScheduler : upload_sentry_event()
+    UploadScheduler --> UploadTask : 创建/管理
+    SystemMonitor --> WeixinNotifier : 告警推送(延迟导入)
+    SystemMonitor --> ConfigModule : 路径导入
+    SentryService --> WeixinNotifier : 事件通知
+    SentryWatchdog --> ConfigModule : sentry_clips_path
