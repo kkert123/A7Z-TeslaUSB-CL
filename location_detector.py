@@ -285,7 +285,11 @@ class TeslaMateCustomAPI:
             if resp.status_code == 200:
                 data = resp.json()
                 # 返回 raw_data，其中包含位置信息
-                return data.get("raw_data")
+                raw = data.get("raw_data")
+                if raw is None:
+                    # 服务端响应结构变更时留线索，避免静默失效（M62）
+                    logger.warning(f"/msg 返回 200 但无 raw_data，顶层键: {sorted(data.keys())}")
+                return raw
             elif resp.status_code == 401:
                 # Token 过期，清除缓存并重新登录
                 logger.warning("Token 无效，清除缓存并重新登录...")
@@ -298,7 +302,10 @@ class TeslaMateCustomAPI:
                     resp = requests.get(url, headers=headers, timeout=10)
                     if resp.status_code == 200:
                         data = resp.json()
-                        return data.get("raw_data")
+                        raw = data.get("raw_data")
+                        if raw is None:
+                            logger.warning(f"/msg 返回 200 但无 raw_data，顶层键: {sorted(data.keys())}")
+                        return raw
             else:
                 logger.warning(f"获取车辆数据失败: {resp.status_code}")
                 
@@ -307,34 +314,95 @@ class TeslaMateCustomAPI:
         
         return None
     
+    @staticmethod
+    def _clean_value(v):
+        """服务端会把 nil 序列化为字符串 'nil'，统一视为空"""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            if not v or v.lower() == "nil":
+                return None
+        return v
+
     def get_location(self) -> Optional[str]:
         """
         获取车辆当前位置地址
-        
-        从 /msg 返回的 raw_data 中提取 ui_current_address
-        
+
+        取数优先级（M62，2026-09-05 实测）：
+        1. /msg raw_data.ui_current_address —— 服务端历史字段，恢复时优先
+        2. /api/dashboard drives_list[0] 上次行程终点 —— 服务端已不下发地址时的主来源，
+           围栏内为围栏名、围栏外为 TeslaMate 逆地理的实际地址
+        3. /msg 坐标兜底（GPS:lat,lng）—— 仅作展示，check_location 不做关键词判定
+
         Returns:
-            位置地址字符串（如"乐清市象阳高园村综合办公楼东南"），失败返回 None
+            位置地址字符串，失败返回 None
         """
         raw_data = self.get_vehicle_data()
-        if not raw_data:
-            return None
-        
-        # ui_current_address 是主要的位置字段
-        address = raw_data.get("ui_current_address")
-        if address and isinstance(address, str) and address.strip():
-            return address.strip()
-        
-        # 备选：检查 location 字段（通常是 JSON 格式坐标）
-        location = raw_data.get("location")
-        if location and isinstance(location, dict):
-            # 如果有坐标但没有地址，返回坐标
-            lat = location.get("latitude")
-            lng = location.get("longitude")
+
+        # 1) 服务端地址字段
+        address = self._clean_value(raw_data.get("ui_current_address")) if isinstance(raw_data, dict) else None
+        if address:
+            return address
+
+        # 2) 上次行程终点
+        trip_end = self.get_last_trip_end()
+        if trip_end:
+            return trip_end
+
+        # 3) 坐标兜底（location 可能是 JSON 字符串而非 dict）
+        if isinstance(raw_data, dict):
+            location = raw_data.get("location")
+            if isinstance(location, str):
+                try:
+                    location = json.loads(location)
+                except (ValueError, TypeError):
+                    location = None
+            if isinstance(location, dict):
+                lat = self._clean_value(location.get("latitude"))
+                lng = self._clean_value(location.get("longitude"))
+                if lat and lng:
+                    return f"GPS:{lat},{lng}"
+            lat = self._clean_value(raw_data.get("latitude"))
+            lng = self._clean_value(raw_data.get("longitude"))
             if lat and lng:
                 return f"GPS:{lat},{lng}"
-        
+
         return None
+
+    def get_last_trip_end(self) -> Optional[str]:
+        """
+        从 /api/dashboard 的 drives_list[0].desc 提取上次行程终点作为车辆位置
+
+        desc 格式为"起点 → 终点"（围栏内为围栏名，围栏外为实际地址）。
+        复用 get_token() 的缓存 token，不额外触发登录。
+
+        Returns:
+            终点位置文本，无行程/格式异常返回 None
+        """
+        token = self.get_token()
+        if not token:
+            return None
+
+        try:
+            url = f"{self.base_url}/api/dashboard"
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                logger.debug(f"/api/dashboard 返回 {resp.status_code}，跳过行程终点")
+                return None
+            data = (resp.json() or {}).get("data") or {}
+            drives = data.get("drives_list") or []
+            if not drives:
+                return None
+            desc = drives[0].get("desc") or ""
+            if "→" not in desc:
+                return None
+            end = desc.split("→")[-1].strip()
+            return end or None
+        except Exception as e:
+            logger.debug(f"获取上次行程终点失败: {e}")
+            return None
     
     def get_states(self) -> Optional[dict]:
         """
@@ -618,7 +686,7 @@ class LocationDetector:
                         logger.info(f"TeslaMate 重认证后位置: '{location}'")
                         return location
             
-            logger.warning("TeslaMate 认证失败，将使用 WiFi 定位")
+            logger.warning("TeslaMate 页面认证或地址解析失败，将使用 WiFi 定位")
         except requests.RequestException as e:
             logger.warning(f"TeslaMate 认证请求失败: {e}")
         except Exception as e:
@@ -759,9 +827,12 @@ class LocationDetector:
         # 判断位置状态（TeslaMate 为主）
         is_home = False
         confidence = 0.5
-        
+        # GPS 坐标文本不参与家关键词判定（坐标在自家院内也会被判"外出"），
+        # 交由 WiFi SSID 仲裁（M62）
+        gps_only = teslamate_available and raw_location.startswith("GPS:")
+
         # 优先判断：TeslaMate 位置包含家关键词
-        if teslamate_available:
+        if teslamate_available and not gps_only:
             # 从配置的 home_location 中拆分多关键词（逗号分隔）；保留硬编码作为兜底
             config_keywords = [kw.strip() for kw in self.home_location.split(",") if kw.strip()]
             home_keywords = config_keywords + ["家", "乐清", "象阳", "高园村"]
@@ -777,18 +848,20 @@ class LocationDetector:
                 is_home = False
                 confidence = 0.9
                 logger.info(f"TeslaMate 判定外出: '{raw_location}'")
+        elif gps_only:
+            logger.info(f"TeslaMate 仅提供坐标，位置判定交由 WiFi 仲裁: '{raw_location}'")
         
         # WiFi 辅助验证
         if current_wifi in self.home_wifi_ssids:
             if is_home:
                 confidence = 1.0  # TeslaMate + WiFi 都确认在家
                 location_source = "teslamate+wifi"
-            elif not teslamate_available:
-                # TeslaMate 不可用，使用 WiFi 判断
+            elif not teslamate_available or gps_only:
+                # TeslaMate 不可用或仅有坐标，使用 WiFi 判断
                 is_home = True
                 confidence = 0.7
                 location_source = "wifi"
-                logger.info("WiFi 确认在家 (TeslaMate 不可用)")
+                logger.info("WiFi 确认在家 (TeslaMate 无地址)")
             else:
                 # TeslaMate 显示外出但连了家里 WiFi（可能是 TeslaMate 延迟）
                 logger.info("WiFi 确认在家，但 TeslaMate 位置不匹配（可能延迟）")
@@ -801,7 +874,8 @@ class LocationDetector:
         # 确定状态
         if is_home:
             state = LocationState.HOME
-        elif raw_location != "unknown" or current_wifi:
+        elif (raw_location != "unknown" and not gps_only) or current_wifi:
+            # 仅坐标不足以判定外出（在家/在外坐标无法区分），无 WiFi 证据时保持 UNKNOWN
             state = LocationState.AWAY
         else:
             state = LocationState.UNKNOWN
