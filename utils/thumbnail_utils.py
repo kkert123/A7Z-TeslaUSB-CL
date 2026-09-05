@@ -287,9 +287,25 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
                 return True
         return False
 
+    def _missing_quadrants(frames_local, vfiles):
+        """M66：某摄像头存在视频文件但未抽出帧 → 四宫格将出现 N/A 缺格
+        （典型根因：扫描 mtime 冻结误判"写入已停"导致提前生成，此时
+        后摄 mp4 仍在写入/未封口，ffmpeg 抽帧失败）"""
+        names = [os.path.basename(v).lower() for v in (vfiles or [])]
+        if not names and event_path and os.path.isdir(event_path):
+            names = [f.lower() for f in os.listdir(event_path) if f.lower().endswith('.mp4')]
+        missing = []
+        for cam_key in camera_map:
+            if cam_key in frames_local:
+                continue
+            if any(("-" + cam_key) in n for n in names):
+                missing.append(cam_key)
+        return missing
+
     mismatch = bool(used_videos) and _mvhd_mismatch()
-    if mismatch and folder_type == 'RecentClips':
-        # 强制刷 VFS 缓存（绕过 30s TTL）+ 重扫文件后重试一次
+    missing = _missing_quadrants(frames, video_files)
+    if (mismatch or missing) and folder_type == 'RecentClips':
+        print(f"[Thumbnail] {event_id} 质检未过（串图={mismatch} 缺格={missing}）→ 强制刷重试")
         try:
             from utils.cache_coherency import ensure_fresh
             ensure_fresh(force=True)
@@ -302,9 +318,10 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
             ]
         frames, used_videos = _extract_frames()
         mismatch = bool(used_videos) and _mvhd_mismatch()
-    if mismatch:
-        # 仍不匹配：宁缺毋假，不落盘（下轮扫描会重试）
-        print(f"[Thumbnail] {event_id} 重试后仍不符，放弃本次生成（防货不对板）")
+        missing = _missing_quadrants(frames, video_files)
+    if mismatch or missing:
+        # 仍不达标：宁缺毋假，不落盘（下轮扫描会重试，届时文件已完整）
+        print(f"[Thumbnail] {event_id} 放弃本次生成（串图={mismatch} 缺格={missing}），待下轮重试")
         return None
 
     

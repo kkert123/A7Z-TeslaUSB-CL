@@ -172,33 +172,7 @@ def generate_gif(frames: int = DEFAULT_FRAMES, interval_ms: int = DEFAULT_INTERV
                 if img.size != (GIF_OUTPUT_WIDTH, GIF_OUTPUT_HEIGHT):
                     img = img.resize((GIF_OUTPUT_WIDTH, GIF_OUTPUT_HEIGHT), Image.LANCZOS)
 
-                # 底部半透明时间条
-                ts_display = tn['event_id'].replace('_', ' ')
-                draw_tmp = ImageDraw.Draw(img)
-
-                # 使用 getbbox 或 textlength 测量文字
-                try:
-                    bbox = draw_tmp.textbbox((0, 0), ts_display, font=font)
-                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                except (AttributeError, TypeError):
-                    tw = len(ts_display) * 8  # 估算
-                    th = 16
-
-                bar_h = th + 10
-                bar_y = img.height - bar_h
-
-                # 半透明黑底
-                overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
-                overlay_draw = ImageDraw.Draw(overlay)
-                overlay_draw.rectangle(
-                    [0, bar_y, img.width, img.height],
-                    fill=(0, 0, 0, 130)
-                )
-                img = Image.alpha_composite(img, overlay)
-
-                # 白色时间戳文字
-                draw = ImageDraw.Draw(img)
-                draw.text((8, bar_y + 5), ts_display, fill=(255, 255, 255, 245), font=font)
+                # 时间水印：缩略图自带右下角时间戳（M64），GIF 不再叠加左下角时间条
 
                 rgb = img.convert('RGB')
                 images.append(rgb)

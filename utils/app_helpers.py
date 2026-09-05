@@ -518,6 +518,58 @@ import wrap_service
 
 MODE_FILE = '/opt/radxa_data/teslausb/data/mode.txt'
 
+_tesla_vehicle_cache = {"data": None, "ts": 0.0}
+_tesla_vehicle_lock = threading.Lock()
+
+
+def get_tesla_vehicle_status():
+    """TeslaMate 车辆状态（60s 缓存）：电量/内外温度/胎压 —— 供 USB Gadget 卡片。
+
+    复用 TeslaMateCustomAPI 的 token 缓存（23h），不产生额外登录；
+    失败也缓存 60s，避免高频重试。
+    """
+    now = time.time()
+    with _tesla_vehicle_lock:
+        if now - _tesla_vehicle_cache["ts"] < 60:
+            return _tesla_vehicle_cache["data"]
+    data = None
+    try:
+        cfg_path = getattr(config, 'SENTRY_CONFIG_FILE', '') or '/opt/radxa_data/teslausb/config/sentry.json'
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        base = (cfg.get('teslamate_url') or '').rstrip('/')
+        pwd = cfg.get('teslamate_password') or ''
+        if base and pwd:
+            import requests as _rq
+            from location_detector import TeslaMateCustomAPI
+            api = TeslaMateCustomAPI(base, pwd)
+            token = api.get_token()
+            if token:
+                resp = _rq.get(base + "/msg", headers={"Authorization": "Bearer " + token}, timeout=8)
+                if resp.status_code == 200:
+                    raw = (resp.json() or {}).get("raw_data") or {}
+
+                    def _f(v):
+                        try:
+                            return round(float(v), 1)
+                        except (TypeError, ValueError):
+                            return None
+
+                    data = {
+                        "available": True,
+                        "battery": _f(raw.get("usable_battery_level")),
+                        "inside_temp": _f(raw.get("inside_temp")),
+                        "outside_temp": _f(raw.get("outside_temp")),
+                        "tpms": {k: _f(raw.get("tpms_pressure_" + k)) for k in ("fl", "fr", "rl", "rr")},
+                    }
+    except Exception as e:
+        logging.warning(f"TeslaMate 车辆状态获取失败: {e}")
+        data = None
+    with _tesla_vehicle_lock:
+        _tesla_vehicle_cache = {"data": data, "ts": now}
+    return data
+
+
 def get_system_stats():
     cpu_temp = get_cpu_temperature()
     gpu_temp = get_gpu_temperature_fields()
@@ -565,6 +617,7 @@ def get_system_stats():
         'nvme_total_disk': get_nvme_total_disk(),
         'power_on_hours_fmt': fmt_power_on_hours(nvme_health.get('power_on_hours')),
         'monthly_traffic': traffic_monitor.get_monthly(),
+        'tesla_vehicle': get_tesla_vehicle_status(),
         'fan_status': get_fan_status(),
     }
 

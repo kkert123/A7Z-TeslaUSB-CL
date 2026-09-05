@@ -71,6 +71,9 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Se
 /* ── 主视频区 ── */
 .video-area{position:relative;background:#000;min-height:0;overflow:hidden}
 .video-area .single{width:100%;height:100%;object-fit:contain}
+.vp-overlay{position:absolute;z-index:6;pointer-events:none;background:rgba(0,0,0,0.45);color:#fff;font-size:0.78rem;padding:2px 10px;border-radius:4px;font-family:Consolas,'SF Mono',monospace;letter-spacing:0.04em;display:none}
+.vp-cam{top:8px;left:8px}
+.vp-ts{bottom:46px;right:8px}
 .video-area .grid{display:none;width:100%;height:100%;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px;background:#222}
 .video-area.grid-mode .single{display:none}
 .video-area.grid-mode .grid{display:grid}
@@ -209,6 +212,8 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Se
 <!-- ── 主视频区 ── -->
 <div class="video-area" id="videoArea">
   <video id="mainVideo" class="single" controls playsinline></video>
+  <div class="vp-overlay vp-cam" id="vpCamName"></div>
+  <div class="vp-overlay vp-ts" id="vpTimestamp"></div>
   <div class="grid" id="videoGrid">
     {% for angle,label in [('front','前视'),('back','后视'),('left_repeater','左后视'),('right_repeater','右后视')] %}
     <div class="grid-cell" onclick="focusGridCell({{ loop.index }})">
@@ -318,6 +323,24 @@ const gvs = [1,2,3,4].map(i => document.getElementById('gv'+i));
 const ANGLES = ['front','back','left_repeater','right_repeater'];
 let gridOn = false, gridAllPlaying = false;
 
+const CAM_LABELS = {front:'前摄像头', back:'后摄像头', left_repeater:'左后视', right_repeater:'右后视'};
+function updateVpOverlay(){
+  const camEl = document.getElementById('vpCamName'), tsEl = document.getElementById('vpTimestamp');
+  if (!camEl || !tsEl) return;
+  if (gridOn){camEl.style.display='none';tsEl.style.display='none';return;}
+  camEl.style.display='block';camEl.textContent = CAM_LABELS[ca] || '';
+  if (CLIPS.length > 0 && CLIPS[ci] && CLIPS[ci].datetime){
+    const base = new Date(CLIPS[ci].datetime.replace(' ', 'T'));
+    if (!isNaN(base)){
+      const d = new Date(base.getTime() + Math.floor(vid.currentTime || 0) * 1000);
+      const p = n => String(n).padStart(2, '0');
+      tsEl.textContent = d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+    }
+  }
+  tsEl.style.display = 'block';
+}
+vid.addEventListener('timeupdate', updateVpOverlay);
+
 function surl(fn){return fn?'/videos/stream/'+F+'/'+(FS==='flat'?'':EID+'/')+fn:null;}
 function seiUrl(fn){return fn?'/videos/sei/'+F+'/'+(FS==='flat'?'':EID+'/')+fn:null;}
 function seiApiUrl(angle){return '/api/sei/'+F+'/'+EID+'/'+angle;}
@@ -336,6 +359,7 @@ function toggleSEIBtn(){
 // ── Camera switch ──
 function switchCam(a,el){
   const fn=cf(a);if(!fn)return;ca=a;ct=vid.currentTime;
+  updateVpOverlay();
   document.querySelectorAll('.view-cell.on').forEach(b=>{
     if (b.dataset && b.dataset.angle) b.classList.remove('on');
   });

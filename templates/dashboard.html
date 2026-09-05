@@ -50,6 +50,20 @@
       <span id="gadget-check-time" style="color:var(--text-muted);margin-left:8px;font-size:0.7em"></span>
     </div>
     <div style="font-size:0.65rem;color:var(--danger);margin-top:2px;display:none" id="gadget-error"></div>
+    <div class="hero-detail" id="tesla-vehicle-row" style="display:none">
+      <span style="color:var(--text-muted)">电量</span>
+      <span id="tesla-battery" style="font-weight:600">—</span>
+      <span class="hero-sep">|</span>
+      <span style="color:var(--text-muted)">车内</span>
+      <span id="tesla-in-temp" style="font-weight:600">—</span>
+      <span class="hero-sep">|</span>
+      <span style="color:var(--text-muted)">车外</span>
+      <span id="tesla-out-temp" style="font-weight:600">—</span>
+    </div>
+    <div class="hero-detail" id="tesla-tpms-row" style="display:none">
+      <span style="color:var(--text-muted)">胎压</span>
+      <span id="tesla-tpms" style="font-weight:600">—</span>
+    </div>
   </div>
 
   <!-- 2. TeslaUSB 服务 -->
@@ -660,6 +674,36 @@ function updateDashboard(d) {
       if (ce) ce.style.display = 'flex';
     }
     if (cc) cc.textContent = (d.camera_latest.count || 0) + ' 张缩略图';
+  }
+
+  // ── 车辆状态（TeslaMate，M64） ──
+  if (d.tesla_vehicle) {
+    var tv = d.tesla_vehicle;
+    var vRow = document.getElementById('tesla-vehicle-row');
+    var tRow = document.getElementById('tesla-tpms-row');
+    if (tv.available) {
+      if (vRow) vRow.style.display = 'flex';
+      var bEl = document.getElementById('tesla-battery');
+      var iTel = document.getElementById('tesla-in-temp');
+      var oTel = document.getElementById('tesla-out-temp');
+      if (bEl) bEl.textContent = (tv.battery != null ? tv.battery + '%' : '—');
+      if (iTel) iTel.textContent = (tv.inside_temp != null ? tv.inside_temp + '°C' : '—');
+      if (oTel) oTel.textContent = (tv.outside_temp != null ? tv.outside_temp + '°C' : '—');
+      var tp = tv.tpms || {};
+      var parts = [];
+      [['左前', 'fl'], ['右前', 'fr'], ['左后', 'rl'], ['右后', 'rr']].forEach(function (it) {
+        var v = tp[it[1]];
+        parts.push(it[0] + ' ' + (v != null ? v.toFixed(2) : '—'));
+      });
+      if (tRow) {
+        tRow.style.display = 'flex';
+        var tpEl = document.getElementById('tesla-tpms');
+        if (tpEl) tpEl.textContent = parts.join(' / ') + ' bar';
+      }
+    } else {
+      if (vRow) vRow.style.display = 'none';
+      if (tRow) tRow.style.display = 'none';
+    }
   }
 
   // ── USB Gadget 连接状态 ──
