@@ -156,7 +156,6 @@ class Config:
         "sei_service.py",
         "preview_generator.py",
         "upload_scheduler.py",
-        "sentry_notify_queue.py",
         # filesystem check (2026-06-26)
         "fsck_check.py",
         # staging service (2026-06-29)

@@ -481,7 +481,7 @@ function doTrim(){
   fetch('/videos/trim/'+F+'/'+EID, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({camera:angle, start:s, end:e})
+    body:JSON.stringify({camera:angle, filename:fn, start:s, end:e})
   })
   .then(r=>{
     if(!r.ok) return r.json().then(d=>{throw new Error(d.error||('HTTP '+r.status));});

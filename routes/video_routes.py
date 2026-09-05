@@ -755,21 +755,49 @@ def api_videos_zip():
 _VALID_CAMERAS = {'front', 'back', 'left', 'right', 'left_repeater', 'right_repeater'}
 
 
-def _resolve_camera_path(folder_type, event_id, camera):
-    """按摄像头角度解析视频物理路径；不存在/加密/非法返回 (path_or_None, error_str)。"""
-    event = video_service.get_event_cameras(folder_type, event_id)
-    if not event:
-        return None, '事件不存在或无视频'
-    if camera not in _VALID_CAMERAS:
-        return None, f'无效的摄像头: {camera}'
-    fname = event.get('camera_videos', {}).get(camera)
-    if not fname:
-        return None, f'该事件没有 {camera} 摄像头视频'
+def _resolve_camera_path(folder_type, event_id, camera, filename=None):
+    """按摄像头角度解析视频物理路径；不存在/加密/非法返回 (path_or_None, error_str)。
 
+    filename 显式传入时（播放页多段事件场景），校验后优先使用，保证裁剪/下载
+    的是用户正在看的那一段；未传入时退回 camera_videos 解析（scandir 首个匹配，
+    兼容旧行为）。
+    """
     folder_config = video_service.VIDEO_FOLDERS.get(folder_type)
     if not folder_config:
         return None, '无效的文件夹类型'
     folder_path = folder_config['path']
+    if camera not in _VALID_CAMERAS:
+        return None, f'无效的摄像头: {camera}'
+    if not video_service.validate_event_id(event_id):
+        return None, '无效的事件 ID'
+
+    if filename:
+        # 安全校验：仅接受纯文件名（防路径穿越），必须是 mp4 且含摄像头关键词
+        base = os.path.basename(filename)
+        if base != filename or base in ('', '.', '..'):
+            return None, '无效的文件名'
+        if not base.lower().endswith('.mp4'):
+            return None, '无效的视频文件'
+        if camera not in base:
+            return None, f'文件名与摄像头 {camera} 不匹配'
+        if folder_type == 'RecentClips':
+            if not base.startswith(event_id):
+                return None, '文件不属于该事件'
+            full_path = os.path.join(folder_path, base)
+        else:
+            full_path = os.path.join(folder_path, event_id, base)
+        if not os.path.isfile(full_path):
+            return None, '视频文件不存在'
+        if not video_service.is_valid_mp4(full_path):
+            return None, '文件已被 Tesla 加密，无法处理'
+        return full_path, None
+
+    event = video_service.get_event_cameras(folder_type, event_id)
+    if not event:
+        return None, '事件不存在或无视频'
+    fname = event.get('camera_videos', {}).get(camera)
+    if not fname:
+        return None, f'该事件没有 {camera} 摄像头视频'
 
     # RecentClips 为平铺结构，其余为 event/<event_id>/ 子目录
     if folder_type == 'RecentClips':
@@ -788,7 +816,8 @@ def _resolve_camera_path(folder_type, event_id, camera):
 def video_download_clip(folder_type, event_id):
     """下载单个摄像头视频文件（单独影片下载）"""
     camera = (request.args.get('camera') or '').strip()
-    full_path, err = _resolve_camera_path(folder_type, event_id, camera)
+    filename = (request.args.get('filename') or '').strip() or None
+    full_path, err = _resolve_camera_path(folder_type, event_id, camera, filename)
     if err:
         return err, 400 if '无效' in err or '加密' in err else 404
     return send_file(
@@ -803,11 +832,12 @@ def video_download_clip(folder_type, event_id):
 def video_trim_clip(folder_type, event_id):
     """裁剪指定摄像头视频片段并流式下载（ffmpeg 流拷贝，免重编码）"""
     data = request.get_json(silent=True) or {}
-    camera = (data.get('camera') or '').strip()
+    camera = str(data.get('camera') or '').strip()
+    filename = str(data.get('filename') or '').strip() or None
     start_str = str(data.get('start', ''))
     end_str = str(data.get('end', ''))
 
-    full_path, err = _resolve_camera_path(folder_type, event_id, camera)
+    full_path, err = _resolve_camera_path(folder_type, event_id, camera, filename)
     if err:
         return jsonify({'success': False, 'error': err}), (
             400 if ('无效' in err or '加密' in err) else 404)
