@@ -18,9 +18,10 @@ import cloud_archive_service
 import cloud_rclone_service
 from utils.hardware_stats import (get_cpu_percent, get_cpu_temperature, get_gpu_temperature_fields,
     get_memory_info, get_all_disks, get_nvme_total_disk, _save_disk_cache, get_network_bytes,
-    _update_disk_io, get_disk_io, _get_monthly_traffic, get_gpu_npu_status, get_fan_status,
+    _update_disk_io, get_disk_io, get_gpu_npu_status, get_fan_status,
     _detect_thermal_zones, _update_temp_histories)
 from utils.system_info import get_wifi_info, get_system_uptime, get_service_status, get_ip_info
+from utils import traffic_monitor
 from utils.nvme_monitor import (_refresh_nvme_cache, _get_nvme_cache, get_nvme_temperature,
     _update_nvme_temp_history, get_nvme_temperature_fields, get_nvme_health, fmt_power_on_hours)
 from utils.thumbnail_utils import _generate_thumbnail
@@ -563,7 +564,7 @@ def get_system_stats():
         'disk_io': disk_io,
         'nvme_total_disk': get_nvme_total_disk(),
         'power_on_hours_fmt': fmt_power_on_hours(nvme_health.get('power_on_hours')),
-        'monthly_traffic': _get_monthly_traffic(net_info['net_rx'], net_info['net_tx']),
+        'monthly_traffic': traffic_monitor.get_monthly(),
         'fan_status': get_fan_status(),
     }
 
@@ -663,6 +664,7 @@ def _stats_broadcaster():
             _update_temp_histories()
             _update_nvme_temp_history()
             _update_disk_io()
+            traffic_monitor.update()
             stats = {
                 'time': datetime.now().strftime("%H:%M:%S"),
                 'service': get_service_status(),

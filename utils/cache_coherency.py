@@ -190,7 +190,7 @@ def _dir_fingerprint(path: str):
         return None
 
 
-def ensure_fresh(path: Optional[str] = None, background: bool = False) -> bool:
+def ensure_fresh(path: Optional[str] = None, background: bool = False, force: bool = False) -> bool:
     """读取前调用：确保目标路径（默认 RecentClips）内容最新。
 
     v0.3.1.40 双语义（修复 v0.3.1.39 A1 把前台读取一并延迟导致的缓存冻结
@@ -222,9 +222,13 @@ def ensure_fresh(path: Optional[str] = None, background: bool = False) -> bool:
     target = path or RECENTCLIPS_DIR
     now = time.time()
     with _ensure_lock:
-        # 30s TTL：节流窗口内不重复刷
-        if now - _ensure_state["last_ts"] < ENSURE_TTL_SEC:
+        # 30s TTL：节流窗口内不重复刷（force=True 绕过：缩略图旧簇校验重试专用，M64）
+        if not force and now - _ensure_state["last_ts"] < ENSURE_TTL_SEC:
             return False
+        if force:
+            # 强制刷：跳过指纹/ dirty 判定，直接 drop（旧簇帧校验失败后的重试路径）
+            fp = _dir_fingerprint(target)
+            return _do_refresh(fp)
         fp = _dir_fingerprint(target)
         # 目录不可读 → 保守立即刷（维持原行为）
         if fp is None:

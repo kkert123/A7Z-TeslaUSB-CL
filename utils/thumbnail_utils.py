@@ -170,93 +170,143 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
             # 刷新失败不影响生成主流程，仅可能仍读到陈旧帧
             pass
 
+    used_videos = {}  # cam_key -> 实际抽帧的视频路径（M64 校验用）
     frames = {}  # cam_key -> (PIL.Image, label)
 
-    for cam_key, (cam_label, need_flip) in camera_map.items():
-        video_path = None
+    def _extract_frames():
+        """抽取四摄帧（可重入：旧簇校验失败后强制刷 VFS 缓存重试，M64）"""
+        frames_local = {}
+        used_local = {}
+        for cam_key, (cam_label, need_flip) in camera_map.items():
+            video_path = None
         
-        if video_files:
-            # RecentClips 模式：从提供的文件列表中查找
-            # 先去重 + 只保留属于此 event_id 的文件
-            valid_videos = []
-            seen_stems = set()
-            for vf in video_files:
-                stem = os.path.splitext(os.path.basename(vf))[0]
-                if stem in seen_stems:
-                    continue
-                if not stem.startswith(event_id):
-                    continue
-                seen_stems.add(stem)
-                valid_videos.append(vf)
-            
-            for vf in valid_videos:
-                fname_lower = os.path.basename(vf).lower()
-                if f'-{cam_key}' in fname_lower:
-                    video_path = vf
-                    break
-                if cam_key in ('left', 'right') and f'-{cam_key}_repeater' in fname_lower:
-                    video_path = vf
-                    break
-        else:
-            # 事件文件夹模式：扫描目录
-            # 仅 RecentClips 等平铺目录需按 event_id 前缀过滤
-            is_flat_dir = os.path.basename(event_path) in ('RecentClips', 'SavedClips')
-            for fname in sorted(os.listdir(event_path)):
-                if fname.lower().endswith('.mp4'):
-                    if is_flat_dir and not fname.startswith(event_id):
+            if video_files:
+                # RecentClips 模式：从提供的文件列表中查找
+                # 先去重 + 只保留属于此 event_id 的文件
+                valid_videos = []
+                seen_stems = set()
+                for vf in video_files:
+                    stem = os.path.splitext(os.path.basename(vf))[0]
+                    if stem in seen_stems:
                         continue
-                    if f'-{cam_key}' in fname.lower():
-                        video_path = os.path.join(event_path, fname)
-                        break
-                    if cam_key in ('left', 'right') and f'-{cam_key}_repeater' in fname.lower():
-                        video_path = os.path.join(event_path, fname)
-                        break
-        
-        if not video_path:
-            continue
-        
-        # 跳过加密/损坏的文件（Tesla 会加密 RecentClips，无法解码）
-        if not video_service.is_valid_mp4(video_path):
-            continue
-        
-        # 计算时间偏移
-        time_offset = 3.0
-        if video_start and key_timestamp:
-            delta = (key_timestamp - video_start).total_seconds()
-            if 0 < delta < 60:
-                time_offset = delta
-        
-        # ffmpeg 提取帧
-        frame_img = None
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.jpg')
-            os.close(tmp_fd)
+                    if not stem.startswith(event_id):
+                        continue
+                    seen_stems.add(stem)
+                    valid_videos.append(vf)
             
-            cmd = [
-                'ffmpeg', '-y',
-                '-ss', str(time_offset),
-                '-i', video_path,
-                '-vframes', '1',
-                '-q:v', '5',
-                '-pix_fmt', 'yuvj420p',
-                tmp_path
-            ]
-            proc = subprocess.run(cmd, capture_output=True, timeout=60)
-            if proc.returncode == 0 and os.path.exists(tmp_path):
-                frame_img = Image.open(tmp_path)
-                if need_flip:
-                    frame_img = frame_img.transpose(Image.FLIP_LEFT_RIGHT)
-                frames[cam_key] = (frame_img, cam_label)
-            
+                for vf in valid_videos:
+                    fname_lower = os.path.basename(vf).lower()
+                    if f'-{cam_key}' in fname_lower:
+                        video_path = vf
+                        break
+                    if cam_key in ('left', 'right') and f'-{cam_key}_repeater' in fname_lower:
+                        video_path = vf
+                        break
+            else:
+                # 事件文件夹模式：扫描目录
+                # 仅 RecentClips 等平铺目录需按 event_id 前缀过滤
+                is_flat_dir = os.path.basename(event_path) in ('RecentClips', 'SavedClips')
+                for fname in sorted(os.listdir(event_path)):
+                    if fname.lower().endswith('.mp4'):
+                        if is_flat_dir and not fname.startswith(event_id):
+                            continue
+                        if f'-{cam_key}' in fname.lower():
+                            video_path = os.path.join(event_path, fname)
+                            break
+                        if cam_key in ('left', 'right') and f'-{cam_key}_repeater' in fname.lower():
+                            video_path = os.path.join(event_path, fname)
+                            break
+        
+            if not video_path:
+                continue
+        
+            # 跳过加密/损坏的文件（Tesla 会加密 RecentClips，无法解码）
+            if not video_service.is_valid_mp4(video_path):
+                continue
+        
+            # 计算时间偏移
+            time_offset = 3.0
+            if video_start and key_timestamp:
+                delta = (key_timestamp - video_start).total_seconds()
+                if 0 < delta < 60:
+                    time_offset = delta
+        
+            # ffmpeg 提取帧
+            frame_img = None
             try:
-                os.unlink(tmp_path)
-            except:
-                pass
-        except Exception as e:
-            print(f"[Thumbnail] 提取 {cam_key} 帧失败: {e}")
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix='.jpg')
+                os.close(tmp_fd)
+            
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-ss', str(time_offset),
+                    '-i', video_path,
+                    '-vframes', '1',
+                    '-q:v', '5',
+                    '-pix_fmt', 'yuvj420p',
+                    tmp_path
+                ]
+                proc = subprocess.run(cmd, capture_output=True, timeout=60)
+                if proc.returncode == 0 and os.path.exists(tmp_path):
+                    used_local[cam_key] = video_path
+                    frame_img = Image.open(tmp_path)
+                    if need_flip:
+                        frame_img = frame_img.transpose(Image.FLIP_LEFT_RIGHT)
+                    frames_local[cam_key] = (frame_img, cam_label)
+            
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+            except Exception as e:
+                print(f"[Thumbnail] 提取 {cam_key} 帧失败: {e}")
     
-    if not frames:
+
+
+        return frames_local, used_local
+
+    frames, used_videos = _extract_frames()
+
+    # M64：旧簇帧校验——mvhd 创建时间与 event_id 偏差 >300s 视为读到被
+    # Tesla 回收重写的旧文件内容（货不对板根因），拒绝落盘永久缓存
+    def _mvhd_mismatch():
+        try:
+            ev_dt = datetime.strptime(event_id[:19], "%Y-%m-%d_%H-%M-%S")
+        except Exception:
+            return False
+        from utils.mvhd_timestamp import extract_mvhd_timestamp
+        for vf in used_videos.values():
+            try:
+                mv = extract_mvhd_timestamp(vf)
+            except Exception:
+                continue
+            if mv is None:
+                continue
+            if abs((mv - ev_dt).total_seconds()) > 300:
+                print(f"[Thumbnail] {event_id} 帧时间不符（mvhd={mv}），疑似旧簇内容")
+                return True
+        return False
+
+    mismatch = bool(used_videos) and _mvhd_mismatch()
+    if mismatch and folder_type == 'RecentClips':
+        # 强制刷 VFS 缓存（绕过 30s TTL）+ 重扫文件后重试一次
+        try:
+            from utils.cache_coherency import ensure_fresh
+            ensure_fresh(force=True)
+        except Exception:
+            pass
+        if event_path and os.path.isdir(event_path):
+            video_files = [
+                os.path.join(event_path, f) for f in sorted(os.listdir(event_path))
+                if f.endswith('.mp4') and f.startswith(event_id)
+            ]
+        frames, used_videos = _extract_frames()
+        mismatch = bool(used_videos) and _mvhd_mismatch()
+    if mismatch:
+        # 仍不匹配：宁缺毋假，不落盘（下轮扫描会重试）
+        print(f"[Thumbnail] {event_id} 重试后仍不符，放弃本次生成（防货不对板）")
         return None
+
     
     # 5) 构建四宫格
     try:

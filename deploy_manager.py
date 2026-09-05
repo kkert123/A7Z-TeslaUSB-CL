@@ -204,6 +204,8 @@ class Config:
         "config/weixin_config.example.json",
         # 升级公钥（供设备端校验签名使用）
         "upgrade_key.pub",
+        # 独立流量统计模块（2026-09-05 v0.3.1.45：分类持久化，版本目录外存储）
+        "utils/traffic_monitor.py",
         # udev 规则修正版（2026-09-03 v0.3.1.40：随包发布，upgrade_service
         # post-install 钩子自动部署到 /etc/udev/rules.d/ —— 此前仅 SSH 手部署，
         # 包/git 不一致，全新部署会回归 5-09 unbind 旧版 → UI_a112 干扰源复现）

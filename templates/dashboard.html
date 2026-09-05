@@ -124,7 +124,8 @@
       <span class="hero-sep">|</span>
       <span style="color:var(--text-secondary)">LAN <span style="font-weight:600" id="ip-local">{{ ip_info.local or '—' }}</span></span>
       <br>实时 ↓ <span id="net-rx">—</span> ↑ <span id="net-tx">—</span>
-      <span style="font-size:0.65rem;color:var(--text-muted);margin-left:6px">本月 ↓<span id="monthly-rx">—</span> ↑<span id="monthly-tx">—</span></span>
+      <br><span style="font-size:0.7rem;color:var(--text-muted)">本月家庭WiFi ↓ <span id="monthly-home-rx">—</span> ↑ <span id="monthly-home-tx">—</span></span>
+      <br><span style="font-size:0.7rem;color:var(--text-muted)">本月车辆热点 ↓ <span id="monthly-hot-rx">—</span> ↑ <span id="monthly-hot-tx">—</span></span>
     </div>
   </div>
 
@@ -481,11 +482,14 @@ function updateDashboard(d) {
     }
     lastRx = y.net_rx; lastTx = y.net_tx; lastNetTime = now;
   }
-  // 月度流量
+  // 月度流量（家庭 WiFi / 车辆热点 分类，M64）
   if (d.monthly_traffic) {
-    const mr = document.getElementById('monthly-rx'), mt = document.getElementById('monthly-tx');
-    if (mr) mr.textContent = fmtBytes(d.monthly_traffic.rx_bytes || 0);
-    if (mt) mt.textContent = fmtBytes(d.monthly_traffic.tx_bytes || 0);
+    const mt = d.monthly_traffic;
+    const setB = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = fmtBytes(v || 0); };
+    setB('monthly-home-rx', mt.home_wifi && mt.home_wifi.rx);
+    setB('monthly-home-tx', mt.home_wifi && mt.home_wifi.tx);
+    setB('monthly-hot-rx', mt.hotspot && mt.hotspot.rx);
+    setB('monthly-hot-tx', mt.hotspot && mt.hotspot.tx);
   }
 
   // ── CPU 进度条 ──
