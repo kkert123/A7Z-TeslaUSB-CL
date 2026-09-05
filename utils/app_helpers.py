@@ -528,6 +528,7 @@ def get_tesla_vehicle_status():
     复用 TeslaMateCustomAPI 的 token 缓存（23h），不产生额外登录；
     失败也缓存 60s，避免高频重试。
     """
+    global _tesla_vehicle_cache
     now = time.time()
     with _tesla_vehicle_lock:
         if now - _tesla_vehicle_cache["ts"] < 60:
@@ -736,6 +737,7 @@ def _stats_broadcaster():
             stats['nvme_written_fmt'] = sys_stats.get('nvme_written_fmt')
             stats['power_on_hours_fmt'] = sys_stats.get('power_on_hours_fmt')
             stats['monthly_traffic'] = sys_stats.get('monthly_traffic')
+            stats['tesla_vehicle'] = sys_stats.get('tesla_vehicle')  # M67：SSE 摊平清单与 JS 消费字段保持一致
             stats['gpu_npu'] = sys_stats.get('gpu_npu')
             # 哨兵事件统计（使用缓存扫描）
             _update_sentry_count()

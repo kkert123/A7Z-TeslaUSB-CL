@@ -1233,6 +1233,7 @@ def api_system_stats_stream():
                 stats['nvme_total_disk'] = sys_init.get('nvme_total_disk')
                 stats['power_on_hours_fmt'] = sys_init.get('power_on_hours_fmt')
                 stats['monthly_traffic'] = sys_init.get('monthly_traffic')
+                stats['tesla_vehicle'] = sys_init.get('tesla_vehicle')  # M67：SSE 摊平清单与 JS 消费字段保持一致
                 stats['gpu_npu'] = sys_init.get('gpu_npu')
                 _update_sentry_count()
                 stats['sentry_events'] = get_cached_sentry_events()
