@@ -21,11 +21,17 @@ def _dbm_to_percent(dbm):
 
 
 def _finalize(w):
-    """统一出口：dBm → 百分比"""
-    if w.get("signal") is not None:
-        pct = _dbm_to_percent(w.get("signal"))
+    """统一出口：dBm → 百分比（容忍 "signal: -47 dBm" 整行文本）"""
+    sig = w.get("signal")
+    if sig is not None:
+        pct = _dbm_to_percent(sig)
+        if pct is None and isinstance(sig, str):
+            import re as _re2
+            m = _re2.search(r'-\d+(?:\.\d+)?', sig)
+            if m:
+                pct = _dbm_to_percent(m.group(0))
         if pct is not None:
-            w["signal_dbm"] = w["signal"]
+            w["signal_dbm"] = sig
             w["signal"] = pct
     return w
 
@@ -68,7 +74,10 @@ def get_wifi_info():
                         if line.strip().startswith('SSID:'):
                             wifi['ssid'] = line.strip().split('SSID:')[1].strip()
                         if 'signal' in line.lower():
-                            wifi['signal'] = line.strip()
+                            import re as _re
+                            m = _re.search(r'-?\d+(?:\.\d+)?', line)
+                            if m:
+                                wifi['signal'] = m.group(0)
             except:
                 pass
         
