@@ -925,8 +925,24 @@ class LocationDetector:
                     logger.error(f"WiFi 切换回调异常: {e}", exc_info=True)
         
         self._last_location = location_info
+        self._persist_location_state(location_info)
         return location_info
     
+    def _persist_location_state(self, info) -> None:
+        """位置状态落盘（M69）：供 wifi_service 等独立进程读取，
+        免去它们各自直连 TeslaMate 的开销与登录副作用。"""
+        try:
+            state_file = Path("/opt/radxa_data/teslausb/data/location_state.json")
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(json.dumps({
+                "state": info.state.value if hasattr(info.state, "value") else str(info.state),
+                "raw_location": info.raw_location or "",
+                "wifi_connected": info.wifi_connected or "",
+                "ts": int(time.time()),
+            }, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"位置状态落盘失败: {e}")
+
     def get_recommended_wifi(self) -> Optional[str]:
         """
         获取推荐的 WiFi SSID

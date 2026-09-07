@@ -32,6 +32,10 @@ HTTP_CHECK_URLS = [
 PING_TARGETS = ['12.127.12.8']
 CHECK_INTERVAL_SEC = 30
 MAX_RETRIES = 10
+# M69: 达到 MAX_RETRIES 后不再直接放弃——网络可能长时间不可用（车载热点抢占/休眠），
+# 转为每小时慢速重试，累计 48 次仍失败才放弃。旧版 50 分钟即丢弃导致通知永久丢失。
+SLOW_RETRY_INTERVAL_SEC = 3600
+SLOW_RETRY_MAX = 48
 RETRY_DELAY_SEC = 300
 HTTP_TIMEOUT_SEC = 3
 
@@ -75,7 +79,15 @@ class SentryNotifyQueue:
             try:
                 with open(self.queue_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    return data if isinstance(data, list) else []
+                    if isinstance(data, list):
+                        # M69 迁移：旧版耗尽(10次)即 abandoned 的条目复活为 pending，
+                        # 进入每小时慢速重试通道
+                        for e in data:
+                            if e.get('status') == 'abandoned' and e.get('retry_count', 0) < SLOW_RETRY_MAX:
+                                e['status'] = 'pending'
+                                logger.info(f"迁移耗尽条目至慢速重试: {e.get('event_id')}")
+                        return data
+                    return []
             except Exception as e:
                 logger.warning(f"加载通知队列失败: {e}")
         return []
@@ -477,7 +489,8 @@ class SentryNotifyQueue:
             # 检查重试间隔（避免短时间内反复重试）
             if entry.get('last_retry'):
                 last = datetime.fromisoformat(entry['last_retry'])
-                if (datetime.now() - last).total_seconds() < RETRY_DELAY_SEC:
+                gap = SLOW_RETRY_INTERVAL_SEC if entry.get('retry_count', 0) >= MAX_RETRIES else RETRY_DELAY_SEC
+                if (datetime.now() - last).total_seconds() < gap:
                     remaining.append(entry)
                     continue
 
@@ -537,9 +550,9 @@ class SentryNotifyQueue:
                 # 发送失败，增加重试计数
                 entry['retry_count'] += 1
                 entry['last_retry'] = datetime.now().isoformat()
-                if entry['retry_count'] >= MAX_RETRIES:
+                if entry['retry_count'] >= SLOW_RETRY_MAX:
                     entry['status'] = 'abandoned'
-                    logger.warning(f"通知 {event_id} 已放弃（超过最大重试次数）")
+                    logger.warning(f"通知 {event_id} 已放弃（慢速重试 {SLOW_RETRY_MAX} 次仍失败）")
                 remaining.append(entry)
 
             except Exception as e:

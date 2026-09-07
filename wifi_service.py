@@ -1414,6 +1414,9 @@ SMART_SWITCH_LOCK_FILE = "/var/run/wifi-smart-switch.lock"
 SMART_SWITCH_STATE_FILE = "/var/run/wifi-smart-switch.state"
 SMART_SWITCH_FAILURE_COUNT_FILE = "/var/run/wifi-failure-count"
 SMART_SWITCH_LOG_FILE = "/var/log/wifi-smart-switch.log"
+LOCATION_STATE_FILE = "/opt/radxa_data/teslausb/data/location_state.json"  # M69: web 位置判定落盘
+SENTRY_CONFIG_FILE_WIFI = "/opt/radxa_data/teslausb/config/sentry.json"
+LOCATION_STATE_MAX_AGE_SEC = 900  # 位置状态超过 15 分钟视为失效（按外出处理）
 SMART_SWITCH_PRIORITY_CONFIG = "/opt/radxa_data/teslausb/config/wifi_priority.json"
 
 # 默认优先级（从 shell 脚本继承）
@@ -1454,7 +1457,7 @@ class WifiSmartSwitch:
     _stream_handler_attached = False
 
     def __init__(self, log_to_file: bool = True):
-        self.priority = _load_priority_config()
+        self.priority = self._load_nm_priorities() or _load_priority_config()
         self._setup_logging(log_to_file)
 
     def _setup_logging(self, to_file: bool):
@@ -1508,13 +1511,43 @@ class WifiSmartSwitch:
 
     # ── 优先级 ──
 
+    def _load_nm_priorities(self) -> dict:
+        """读取 NM 各连接的 autoconnect-priority（/wifi 页面写入的权威值），
+        按 SSID 返回。非 WiFi 连接（SSID 为 "--"）跳过。
+        失败返回空 dict（调用方回退 wifi_priority.json / 默认表）。"""
+        try:
+            r = subprocess.run(
+                ["nmcli", "-t", "-f", "NAME,AUTOCONNECT-PRIORITY", "connection", "show"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if r.returncode != 0:
+                return {}
+            result: dict = {}
+            for line in r.stdout.splitlines():
+                if ":" not in line:
+                    continue
+                name, _, prio = line.rpartition(":")
+                if not name or not prio.strip().lstrip("-").isdigit():
+                    continue
+                r2 = subprocess.run(
+                    ["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", name],
+                    capture_output=True, text=True, timeout=5,
+                )
+                ssid = r2.stdout.strip().replace("\\:", ":") if r2.returncode == 0 else ""
+                if not ssid or ssid == "--":
+                    continue
+                result[ssid] = int(prio)
+            return result
+        except Exception:
+            return {}
+
     def get_priority(self, ssid: str) -> int:
         """获取指定 SSID 的优先级（未配置的返回 0）"""
         return self.priority.get(ssid, 0)
 
     def reload_priority(self):
         """重新加载优先级配置（供 Web UI 修改后调用）"""
-        self.priority = _load_priority_config()
+        self.priority = self._load_nm_priorities() or _load_priority_config()
 
     # ── 网络检测 ──
 
@@ -1529,7 +1562,22 @@ class WifiSmartSwitch:
             if r.returncode == 0:
                 for line in r.stdout.splitlines():
                     if line.startswith("wlan0:connected:"):
-                        return line.split(":")[2].strip()
+                        con_name = line.split(":")[2].strip()
+                        # M69: NM 连接名 ≠ SSID（如 profile "WiFi-YL-MIFI-000500" 的 SSID 是
+                        # "YL-MIFI-000500"），不解析会导致同网跳过失效、优先级比较出 0 vs 150 幻觉，
+                        # 每 10 分钟对同一 SSID 断开重连（单日 31 次断连的根因）
+                        try:
+                            r_ssid = subprocess.run(
+                                ["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", con_name],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if r_ssid.returncode == 0:
+                                ssid = r_ssid.stdout.strip().replace("\\:", ":")
+                                if ssid and ssid != "--":
+                                    return ssid
+                        except Exception:
+                            pass
+                        return con_name  # 解析失败退回连接名（旧行为）
 
             # 方法 2: nmcli device wifi (当前活跃)
             r2 = subprocess.run(
@@ -1837,12 +1885,23 @@ class WifiSmartSwitch:
         is_connected = self._check_connectivity()
         cur_priority = self.get_priority(cur_ssid) if cur_ssid else 0
 
+        # M69: 位置联动——在家时只在家庭白名单内选网（按页面优先级排序），
+        # 防止无外网的车载热点在家抢占连接、导致推送反复失败
+        loc_state, loc_age = self._read_location_state()
+        at_home = loc_state == "home" and loc_age < LOCATION_STATE_MAX_AGE_SEC
+        home_allowed = self._get_home_allowed() if at_home else set()
+        if at_home:
+            self.log.info("位置判定: 在家（%d 秒前），家庭白名单: %s", loc_age, sorted(home_allowed))
+
         if is_connected:
             self.log.info("当前连接: %s (优先级: %d)", cur_ssid or "未知", cur_priority)
 
             # 扫描可用 WiFi
             available = self._scan_available()
             for net in available:
+                if at_home and net["ssid"] not in home_allowed:
+                    self.log.info("在家，跳过非家庭网络: %s", net["ssid"])
+                    continue
                 ssid = net["ssid"]
                 signal = net["signal"]
                 net_priority = net["priority"]
@@ -1855,13 +1914,37 @@ class WifiSmartSwitch:
                     if self._switch_to(ssid):
                         return  # 切换成功，退出
 
-            self.log.info("未找到更优网络")
+            if at_home and cur_ssid not in home_allowed:
+                # 在家但连着非白名单网络 → 切到白名单内最优可见网络。
+                # 白名单身份优先于页面优先级数值（YL=600 > C12345=500，
+                # 但在家时 YL 无外网必须让位）；页面优先级仅用于白名单内部排序。
+                allowed_nets = [n for n in available
+                                if n["ssid"] in home_allowed and n["signal"] >= SIGNAL_THRESHOLD_DBM]
+                if allowed_nets:
+                    best = allowed_nets[0]  # _scan_available 已按 (-优先级, -信号) 排序
+                    self.log.info("在家纠正: 非白名单 %s → 白名单最优 %s (优先级 %d)",
+                                  cur_ssid, best["ssid"], best["priority"])
+                    if self._switch_to(best["ssid"]):
+                        return
+                else:
+                    self.log.info("在家但白名单网络均不可见，保持当前连接: %s（下轮再试）", cur_ssid)
+            else:
+                self.log.info("未找到更优网络")
+                self.log.info("未找到更优网络")
 
         else:
             self.log.info("网络连接异常，尝试重连...")
 
             available = self._scan_available()
             reconnected = False
+
+            # M69: 在家时重连只尝试白名单网络
+            if at_home:
+                allowed = [n for n in available if n["ssid"] in home_allowed]
+                if allowed:
+                    available = allowed
+                else:
+                    self.log.info("在家但白名单网络不可见，保持完整重连流程")
             for net in available:
                 ssid = net["ssid"]
                 signal = net["signal"]
@@ -1888,6 +1971,25 @@ class WifiSmartSwitch:
                 self._start_ap_fallback()
 
         self.log.info("完整检测完成")
+
+    def _read_location_state(self):
+        """读取 web 位置判定落盘（location_detector 每 30s 刷新）。
+        返回 (state, age_seconds)；文件缺失/损坏返回 ("unknown", 极大值)。"""
+        try:
+            with open(LOCATION_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return str(data.get("state", "unknown")), time.time() - int(data.get("ts", 0))
+        except Exception:
+            return "unknown", float("inf")
+
+    def _get_home_allowed(self) -> set:
+        """家庭白名单 = sentry.json home_wifi_ssids（含 189-AP），兜底 C12345"""
+        try:
+            with open(SENTRY_CONFIG_FILE_WIFI, "r", encoding="utf-8") as f:
+                ssids = json.load(f).get("home_wifi_ssids", []) or []
+            return {str(x) for x in ssids} or {"C12345"}
+        except Exception:
+            return {"C12345"}
 
     def _get_saved_connections(self) -> list:
         """获取所有 NetworkManager 已保存的 WiFi 连接（排除当前连接）"""

@@ -288,9 +288,19 @@ class WeixinNotifier:
         if mentioned_list:
             data["text"]["mentioned_list"] = mentioned_list
 
-        success, error = self._send_request(data)
-        if not success:
-            logger.warning(f"发送文本消息失败: {error}")
+        # M69: 网络抖动窗口内单次必败 → 10/30/60 退避重试（哨兵文本与图片同等可靠性）
+        import time as _time
+        backoff = [10, 30, 60, 60, 60]
+        for attempt, wait in enumerate(backoff, start=1):
+            success, error = self._send_request(data)
+            if success:
+                if attempt > 1:
+                    logger.info(f"文本第 {attempt} 次重试成功")
+                return True
+            if attempt < len(backoff):
+                logger.warning(f"发送文本消息失败 (第{attempt}次): {error}, {wait}秒后重试...")
+                _time.sleep(wait)
+        logger.warning(f"发送文本消息失败(已重试{len(backoff)}次): {error}")
         return success
 
     def send_markdown(self, content: str) -> bool:
@@ -348,16 +358,20 @@ class WeixinNotifier:
                 }
             }
 
-            # 最多重试 2 次（网络不稳定时很关键）
-            for attempt in range(3):
+            # 网络抖动窗口内 2 秒重试必败（M69: 车载热点切换窗口数十秒起步），
+            # 改为 10/30/60 秒退避，覆盖 WiFi 切换/网络重建的典型时长
+            import time as _time
+            backoff = [10, 30, 60, 60, 60]
+            for attempt, wait in enumerate(backoff, start=1):
                 success, error = self._send_request(data, timeout=120)
                 if success:
+                    if attempt > 1:
+                        logger.info(f"图片第 {attempt} 次重试成功")
                     return True
-                if attempt < 2:
-                    logger.warning(f"发送图片失败 (第{attempt+1}次): {error}, 2秒后重试...")
-                    import time
-                    time.sleep(2)
-            logger.warning(f"发送图片消息失败(已重试3次): {error}")
+                if attempt < len(backoff):
+                    logger.warning(f"发送图片失败 (第{attempt}次): {error}, {wait}秒后重试...")
+                    _time.sleep(wait)
+            logger.warning(f"发送图片消息失败(已重试{len(backoff)}次): {error}")
             return False
 
         except FileNotFoundError:
