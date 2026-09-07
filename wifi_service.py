@@ -1536,7 +1536,8 @@ class WifiSmartSwitch:
                 ssid = r2.stdout.strip().replace("\\:", ":") if r2.returncode == 0 else ""
                 if not ssid or ssid == "--":
                     continue
-                result[ssid] = int(prio)
+                # 同一 SSID 多 profile（如 "C12345" 与 "C12345 2"）→ 取最高优先级
+                result[ssid] = max(result.get(ssid, 0), int(prio))
             return result
         except Exception:
             return {}
