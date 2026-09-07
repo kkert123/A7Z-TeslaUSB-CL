@@ -252,6 +252,27 @@
 </div>
 
 <!-- ═══════════════════════════════════════════
+     Group 5.5: 推送与报警（M72）
+     ═══════════════════════════════════════════ -->
+<div class="sys-group" id="grp-push">
+  <div class="sys-group-header" onclick="toggleGroup('grp-push')">
+    <span>推送与报警 <span class="sg-summary" id="push-summary"></span></span>
+    <span class="sg-chevron">▶</span>
+  </div>
+  <div class="sys-group-body" style="display:none">
+    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px">胎压报警阈值（bar，任一轮胎低于阈值即推送并标红）</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+      <input id="push-tpms-threshold" type="number" step="0.1" min="0" max="5"
+             style="width:90px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+      <button class="btn btn-primary btn-sm" onclick="savePushConfig()">保存全部</button>
+      <span id="push-config-status" style="font-size:0.7rem;color:var(--text-muted)"></span>
+    </div>
+    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px">推送内容模板（变量在保存时自动填充）</div>
+    <div id="push-templates" style="display:flex;flex-direction:column;gap:10px">加载中...</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
      Group 5: 存储
      ═══════════════════════════════════════════ -->
 <div class="sys-group" id="grp-storage">
@@ -835,7 +856,7 @@ async function loadServices() {
       const 成功 = svc.active;
       const timer = svc.timer_next ? '（下次: ' + svc.timer_next + ')' : '';
       return '<div class="service-row">' +
-        '<span class="sr-name">' + name + '<span class="sr-timer">' + timer + '</span></span>' +
+        '<span class="sr-name">' + (svc.display || name) + '<span class="sr-timer">' + timer + '</span></span>' +
         '<span style="color:' + (成功 ? 'var(--success)' : 'var(--danger)') + '">' + (成功 ? '运行中' : '已停止') + '</span>' +
         '</div>';
     }).join('');
@@ -846,6 +867,78 @@ async function loadServices() {
     }
   } catch (e) { el.innerHTML = '<span style="color:var(--danger)">加载失败</span>'; if (summary) summary.textContent = '加载失败'; }
 }
+
+// ═══ 推送与报警配置（M72）═══
+const PUSH_TEMPLATES_META = [
+  { key: 'upgrade_success',  label: '升级成功',     vars: '{version} = 新版本号' },
+  { key: 'tpms_alert',       label: '胎压偏低报警', vars: '{detail} = 四轮胎压明细, {threshold} = 阈值, {time} = 时间' },
+  { key: 'tpms_recovered',   label: '胎压恢复',     vars: '{detail} = 四轮胎压明细, {time} = 时间' },
+  { key: 'boot',             label: '开机启动',     vars: '（无变量）' },
+];
+let _pushDefaults = {};
+
+async function loadPushConfig() {
+  const box = document.getElementById('push-templates');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/system/push-config');
+    const d = await r.json();
+    if (!d.success) { box.innerHTML = '<span style="color:var(--danger)">加载失败</span>'; return; }
+    _pushDefaults = d.defaults || {};
+    const thEl = document.getElementById('push-tpms-threshold');
+    if (thEl) thEl.value = d.tpms_alarm_threshold;
+    box.innerHTML = PUSH_TEMPLATES_META.map(m =>
+      '<div>' +
+      '<div style="font-size:0.75rem;font-weight:600;margin-bottom:2px">' + m.label +
+        ' <button class="btn btn-sm btn-outline" style="padding:0 6px;font-size:0.65rem" onclick="resetTpl(\'' + m.key + '\')">恢复默认</button></div>' +
+      '<textarea id="push-tpl-' + m.key + '" rows="2" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.75rem;resize:vertical"></textarea>' +
+      '<div style="font-size:0.65rem;color:var(--text-muted)">变量: ' + m.vars + '</div>' +
+      '</div>'
+    ).join('');
+    PUSH_TEMPLATES_META.forEach(m => {
+      const el = document.getElementById('push-tpl-' + m.key);
+      if (el) el.value = (d.templates || {})[m.key] || '';
+    });
+    const sm = document.getElementById('push-summary');
+    if (sm) sm.textContent = '阈值 ' + d.tpms_alarm_threshold + ' bar';
+  } catch (e) { box.innerHTML = '<span style="color:var(--danger)">加载失败</span>'; }
+}
+
+function resetTpl(key) {
+  const el = document.getElementById('push-tpl-' + key);
+  if (el && _pushDefaults[key]) el.value = _pushDefaults[key];
+}
+
+async function savePushConfig() {
+  const st = document.getElementById('push-config-status');
+  const thEl = document.getElementById('push-tpms-threshold');
+  const th = parseFloat(thEl && thEl.value);
+  if (isNaN(th) || th <= 0 || th > 5) {
+    if (st) { st.textContent = '阈值需在 0-5 之间'; st.style.color = 'var(--danger)'; }
+    return;
+  }
+  const templates = {};
+  PUSH_TEMPLATES_META.forEach(m => {
+    const el = document.getElementById('push-tpl-' + m.key);
+    if (el) templates[m.key] = el.value.trim();
+  });
+  try {
+    const r = await fetch('/api/system/push-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tpms_alarm_threshold: th, push_templates: templates })
+    });
+    const d = await r.json();
+    if (st) {
+      st.textContent = d.success ? '已保存' : ('保存失败: ' + (d.error || ''));
+      st.style.color = d.success ? 'var(--success)' : 'var(--danger)';
+    }
+    const sm = document.getElementById('push-summary');
+    if (sm && d.success) sm.textContent = '阈值 ' + th + ' bar';
+  } catch (e) {
+    if (st) { st.textContent = '保存失败: ' + e; st.style.color = 'var(--danger)'; }
+  }
+}
+loadPushConfig();
 
 // ═══ 挂载点 status ═══
 async function load挂载点Status() {

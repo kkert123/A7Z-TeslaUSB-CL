@@ -61,8 +61,8 @@
       <span id="tesla-out-temp" style="font-weight:600">—</span>
     </div>
     <div class="hero-detail" id="tesla-tpms-row" style="display:none">
-      <span style="color:var(--text-muted)">胎压</span>
-      <span id="tesla-tpms" style="font-weight:600">—</span>
+      <span style="color:var(--text-muted);line-height:1.15">胎<br>压</span>
+      <span id="tesla-tpms" style="font-weight:600;line-height:1.35">—</span>
     </div>
   </div>
 
@@ -690,15 +690,18 @@ function updateDashboard(d) {
       if (iTel) iTel.textContent = (tv.inside_temp != null ? tv.inside_temp + '°C' : '—');
       if (oTel) oTel.textContent = (tv.outside_temp != null ? tv.outside_temp + '°C' : '—');
       var tp = tv.tpms || {};
-      var parts = [];
-      [['左前', 'fl'], ['右前', 'fr'], ['左后', 'rl'], ['右后', 'rr']].forEach(function (it) {
-        var v = tp[it[1]];
-        parts.push(it[0] + ' ' + (v != null ? v.toFixed(2) : '—'));
-      });
+      var tpTh = (typeof tv.threshold === 'number') ? tv.threshold : 2.9;
+      function tpVal(k) {
+        var v = tp[k];
+        if (v == null) return '—';
+        return '<span style="color:' + (v < tpTh ? 'var(--danger)' : 'inherit') + '">' + v.toFixed(2) + '</span>';
+      }
       if (tRow) {
         tRow.style.display = 'flex';
         var tpEl = document.getElementById('tesla-tpms');
-        if (tpEl) tpEl.textContent = parts.join(' / ') + ' bar';
+        if (tpEl) tpEl.innerHTML =
+          '左前 ' + tpVal('fl') + ' / 右前 ' + tpVal('fr') + '<br>' +
+          '左后 ' + tpVal('rl') + ' / 右后 ' + tpVal('rr');
       }
     } else {
       if (vRow) vRow.style.display = 'none';

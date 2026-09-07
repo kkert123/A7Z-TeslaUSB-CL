@@ -521,6 +521,90 @@ MODE_FILE = '/opt/radxa_data/teslausb/data/mode.txt'
 _tesla_vehicle_cache = {"data": None, "ts": 0.0}
 _tesla_vehicle_lock = threading.Lock()
 
+# ── M72: 推送模板与胎压报警 ──
+TPMS_ALARM_THRESHOLD_DEFAULT = 2.9
+
+PUSH_TEMPLATE_DEFAULTS = {
+    "boot": "A7Z 哨兵系统已启动",
+    "upgrade_success": "系统升级成功 V{version}",
+    "tpms_alert": "⚠️ 胎压偏低\n{detail}\n阈值: {threshold} bar\n时间: {time}",
+    "tpms_recovered": "✅ 胎压已恢复\n{detail}\n时间: {time}",
+}
+
+_tpms_alarm_state = {"low": False, "last_push_ts": 0.0}
+_TPMS_MIN_INTERVAL = 1800  # 边沿防抖：30 分钟内的反复变化不重复推送
+
+
+def _read_sentry_cfg():
+    try:
+        cfg_path = getattr(config, 'SENTRY_CONFIG_FILE', '') or '/opt/radxa_data/teslausb/config/sentry.json'
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def get_push_template(key: str) -> str:
+    """读取推送模板（sentry.json push_templates 段），缺失回退内置默认（M72）"""
+    try:
+        v = (_read_sentry_cfg().get("push_templates") or {}).get(key)
+        if v and str(v).strip():
+            return str(v)
+    except Exception:
+        pass
+    return PUSH_TEMPLATE_DEFAULTS.get(key, "")
+
+
+def get_tpms_threshold():
+    """胎压报警阈值（bar），sentry.json tpms_alarm_threshold，默认 2.9"""
+    try:
+        return float(_read_sentry_cfg().get("tpms_alarm_threshold", TPMS_ALARM_THRESHOLD_DEFAULT))
+    except (TypeError, ValueError):
+        return TPMS_ALARM_THRESHOLD_DEFAULT
+
+
+def check_tpms_alarm():
+    """胎压阈值报警（M72）：边沿触发 + 30 分钟最小间隔，防轮询轰炸。
+
+    由 broadcaster 周期驱动；数据来自 get_tesla_vehicle_status()（60s 缓存，
+    零额外 TeslaMate 请求）。任一轮胎低于阈值即视为偏低。
+    """
+    try:
+        tv = get_tesla_vehicle_status()
+        if not tv or not tv.get("available"):
+            return
+        th = tv.get("threshold")
+        tp = tv.get("tpms") or {}
+        vals = {k: v for k, v in tp.items() if v is not None}
+        if th is None or len(vals) < 4:
+            return
+        is_low = any(v < th for v in vals.values())
+        st = _tpms_alarm_state
+        if is_low == st["low"]:
+            return
+        now = time.time()
+        if now - st["last_push_ts"] < _TPMS_MIN_INTERVAL:
+            return  # 防抖：窗口内的边沿抖动不推
+        detail = " / ".join(
+            label + " " + ("%.2f" % tp[k] if tp.get(k) is not None else "—")
+            for label, k in (("左前", "fl"), ("右前", "fr"), ("左后", "rl"), ("右后", "rr")))
+        key = "tpms_alert" if is_low else "tpms_recovered"
+        try:
+            text = get_push_template(key).format(
+                detail=detail, threshold=th, time=time.strftime("%m-%d %H:%M"))
+        except Exception:
+            text = PUSH_TEMPLATE_DEFAULTS[key].format(
+                detail=detail, threshold=th, time=time.strftime("%m-%d %H:%M"))
+        from weixin_notifier import WeixinNotifier
+        notifier = WeixinNotifier(bot_name="系统通知")
+        if notifier.send_text(text):
+            st["low"] = is_low
+            st["last_push_ts"] = now
+            logging.info(f"胎压报警推送完成 (low={is_low})")
+        # 发送失败不更新状态 → 下轮自动重试
+    except Exception as e:
+        logging.warning(f"胎压报警检查失败: {e}")
+
 
 def get_tesla_vehicle_status():
     """TeslaMate 车辆状态（60s 缓存）：电量/内外温度/胎压 —— 供 USB Gadget 卡片。
@@ -562,6 +646,7 @@ def get_tesla_vehicle_status():
                         "inside_temp": _f(raw.get("inside_temp")),
                         "outside_temp": _f(raw.get("outside_temp")),
                         "tpms": {k: _f(raw.get("tpms_pressure_" + k)) for k in ("fl", "fr", "rl", "rr")},
+                        "threshold": get_tpms_threshold(),
                     }
     except Exception as e:
         logging.warning(f"TeslaMate 车辆状态获取失败: {e}")
@@ -719,6 +804,7 @@ def _stats_broadcaster():
             _update_nvme_temp_history()
             _update_disk_io()
             traffic_monitor.update()
+            check_tpms_alarm()  # M72: 胎压阈值报警（边沿触发，内部有 60s 数据缓存）
             stats = {
                 'time': datetime.now().strftime("%H:%M:%S"),
                 'service': get_service_status(),

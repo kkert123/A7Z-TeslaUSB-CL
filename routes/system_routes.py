@@ -444,6 +444,62 @@ def api_system_wecom_test():
 
 
 
+def _read_sentry_json():
+    """读取 sentry.json（M72 推送配置存取用）"""
+    from utils.app_helpers import _read_sentry_cfg
+    return _read_sentry_cfg()
+
+
+def _write_sentry_json(cfg):
+    cfg_path = getattr(config, 'SENTRY_CONFIG_FILE', '') or '/opt/radxa_data/teslausb/config/sentry.json'
+    with open(cfg_path, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+@system_bp.route('/api/system/push-config', methods=['GET'])
+def api_push_config_get():
+    """推送与报警配置读取（M72：胎压阈值 + 推送模板）"""
+    try:
+        from utils.app_helpers import PUSH_TEMPLATE_DEFAULTS, get_tpms_threshold
+        cfg = _read_sentry_json()
+        tpl = cfg.get('push_templates') or {}
+        merged = {k: (tpl.get(k) or v) for k, v in PUSH_TEMPLATE_DEFAULTS.items()}
+        return jsonify({
+            'success': True,
+            'tpms_alarm_threshold': get_tpms_threshold(),
+            'templates': merged,
+            'defaults': PUSH_TEMPLATE_DEFAULTS,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/system/push-config', methods=['POST'])
+def api_push_config_post():
+    """推送与报警配置保存（M72）"""
+    try:
+        data = request.get_json(force=True) or {}
+        threshold = data.get('tpms_alarm_threshold')
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '阈值必须为数字'}), 400
+        if not (0 < threshold <= 5):
+            return jsonify({'success': False, 'error': '阈值需在 0-5 bar 之间'}), 400
+        templates = data.get('push_templates')
+        if not isinstance(templates, dict):
+            return jsonify({'success': False, 'error': 'push_templates 必须为对象'}), 400
+        cfg = _read_sentry_json()
+        cfg['tpms_alarm_threshold'] = round(threshold, 2)
+        clean_tpl = {str(k): str(v)[:500] for k, v in templates.items()
+                     if str(k) in ('boot', 'upgrade_success', 'tpms_alert', 'tpms_recovered')}
+        cfg['push_templates'] = clean_tpl
+        _write_sentry_json(cfg)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @system_bp.route('/api/system/wecom-config', methods=['GET', 'POST'])
 def api_system_wecom_config():
     """读取/修改企业微信机器人配置（KEY / 启用开关）

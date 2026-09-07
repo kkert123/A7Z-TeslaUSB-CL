@@ -123,12 +123,30 @@ if __name__ == '__main__':
     except Exception as e:
         app.logger.warning(f"云归档自动同步恢复失败: {e}")
     
-    # ── 开机通知 ──
+    # ── 开机通知（M72：升级成功走模板推送版本号，普通启动推固定文案）──
     try:
+        import json as _json
+        import os as _os
         from weixin_notifier import WeixinNotifier
+        from utils.app_helpers import get_push_template
         notifier = WeixinNotifier(bot_name="系统通知")
-        notifier.send_text("A7Z 哨兵系统已启动")
-        app.logger.info("开机通知已发送")
+        marker_path = '/opt/radxa_data/teslausb/data/upgrade_success.json'
+        upgraded = None
+        try:
+            with open(marker_path, 'r', encoding='utf-8') as _f:
+                upgraded = _json.load(_f)
+        except Exception:
+            upgraded = None
+        if upgraded and upgraded.get('version'):
+            notifier.send_text(get_push_template('upgrade_success').format(version=upgraded['version']))
+            try:
+                _os.remove(marker_path)
+            except OSError:
+                pass
+            app.logger.info(f"升级成功通知已发送: v{upgraded['version']}")
+        else:
+            notifier.send_text(get_push_template('boot'))
+            app.logger.info("开机通知已发送")
     except Exception as e:
         app.logger.warning(f"开机通知发送失败: {e}")
     

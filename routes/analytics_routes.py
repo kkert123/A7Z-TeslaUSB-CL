@@ -239,6 +239,14 @@ def api_analytics_services():
     svc_list = ['teslausb-web', 'teslausb-sentry', 'teslausb-mode', 'teslausb-io-tune',
                 'teslausb-fsck.timer', 'smbd',
                 'wifi-quick-check.timer', 'wifi-full-check.timer', 'teslausb-fan']
+    # M72: 服务名中文化（/system 页显示"中文名（原名）"）
+    SERVICE_DISPLAY_NAMES = {
+        'teslausb-web': 'Web 服务', 'teslausb-sentry': '哨兵监控',
+        'teslausb-mode': '模式控制器', 'teslausb-io-tune': 'I/O 调度',
+        'teslausb-fsck.timer': '文件系统检查', 'smbd': '网络共享',
+        'wifi-quick-check.timer': 'WiFi 快速检测', 'wifi-full-check.timer': 'WiFi 完整检测',
+        'teslausb-fan': '风扇温控',
+    }
     services = {}
     try:
         for svc in svc_list:
@@ -265,10 +273,12 @@ def api_analytics_services():
 
                 services[svc] = {
                     'active': active,
-                    'timer_next': timer_next
+                    'timer_next': timer_next,
+                    'display': (SERVICE_DISPLAY_NAMES[svc] + '（' + svc + '）')
+                               if svc in SERVICE_DISPLAY_NAMES else svc,
                 }
             except:
-                services[svc] = {'active': False, 'timer_next': None}
+                services[svc] = {'active': False, 'timer_next': None, 'display': svc}
         return jsonify({'success': True, 'services': services})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

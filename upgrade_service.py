@@ -367,6 +367,17 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     _record_version(new_version, "", "manual-upload")
     _prune_bak()
 
+    # M72: 升级成功标记——web 重启后开机通知改推"系统升级成功 V{version}"
+    # （data/ 目录已被 _restore_user_data 恢复到新版本目录，随符号链接可达）
+    try:
+        import time as _time
+        _mk_dir = os.path.join(new_dir, "data")
+        os.makedirs(_mk_dir, exist_ok=True)
+        with open(os.path.join(_mk_dir, "upgrade_success.json"), "w", encoding="utf-8") as _f:
+            _f.write(json.dumps({"version": new_version, "ts": _time.time()}))
+    except Exception:
+        steps.append("升级标记写入警告（不影响升级）")
+
     # v0.3.1.40 post-install：部署随包 udev 规则到 /etc/udev/rules.d/（幂等）
     _ph_ok, _ph_msg = _run_post_install_hooks(new_dir)
     if _ph_ok is False:
