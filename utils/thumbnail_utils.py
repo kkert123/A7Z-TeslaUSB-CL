@@ -270,6 +270,13 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
     # M64：旧簇帧校验——mvhd 创建时间与 event_id 偏差 >300s 视为读到被
     # Tesla 回收重写的旧文件内容（货不对板根因），拒绝落盘永久缓存
     def _mvhd_mismatch():
+        # M70: mvhd 串图校验仅适用于 RecentClips——其分钟文件夹被 Tesla 循环
+        # 回收复用，VFS 缓存不失效时 ffmpeg 读到旧簇内容（M64 实证）。
+        # SentryClips/SaveClips 事件目录由 Tesla 保存事件时新建、不被回收复用，
+        # 且天然包含触发前 ~11 分钟预缓冲切片（实测偏差 -613s），300s 容差会把
+        # 所有较长事件误判为串图（9-7 单日 6 个哨兵事件全被误杀），故跳过。
+        if folder_type != 'RecentClips':
+            return False
         try:
             ev_dt = datetime.strptime(event_id[:19], "%Y-%m-%d_%H-%M-%S")
         except Exception:
@@ -291,9 +298,13 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
         """M66：某摄像头存在视频文件但未抽出帧 → 四宫格将出现 N/A 缺格
         （典型根因：扫描 mtime 冻结误判"写入已停"导致提前生成，此时
         后摄 mp4 仍在写入/未封口，ffmpeg 抽帧失败）"""
-        names = [os.path.basename(v).lower() for v in (vfiles or [])]
-        if not names and event_path and os.path.isdir(event_path):
+        # M70: vfiles 是抽帧前的快照，后摄 mp4 可能在快照之后才出现
+        # （漏判 → N/A 落盘，9-7 实证 13 张），因此总是以目录实时列表为准
+        names = []
+        if event_path and os.path.isdir(event_path):
             names = [f.lower() for f in os.listdir(event_path) if f.lower().endswith('.mp4')]
+        if not names:
+            names = [os.path.basename(v).lower() for v in (vfiles or [])]
         missing = []
         for cam_key in camera_map:
             if cam_key in frames_local:
@@ -320,8 +331,10 @@ def _generate_thumbnail_locked(event_path, event_id, video_files, folder_type, t
         mismatch = bool(used_videos) and _mvhd_mismatch()
         missing = _missing_quadrants(frames, video_files)
     if mismatch or missing:
-        # 仍不达标：宁缺毋假，不落盘（下轮扫描会重试，届时文件已完整）
-        print(f"[Thumbnail] {event_id} 放弃本次生成（串图={mismatch} 缺格={missing}），待下轮重试")
+        # 仍不达标：宁缺毋假，不落盘。目录已消失（RecentClips 滚动回收）时
+        # 由调用方加入阻止列表（M70），不再无限重试
+        gone = not (event_path and os.path.isdir(event_path))
+        print(f"[Thumbnail] {event_id} 放弃本次生成（串图={mismatch} 缺格={missing} 目录消失={gone}），待下轮重试")
         return None
 
     

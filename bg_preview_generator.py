@@ -16,6 +16,7 @@ TeslaUSB CL — 后台预览图生成器 (CPU 自适应)
 import json
 import logging
 import os
+import glob
 import subprocess
 import sys
 import time
@@ -599,6 +600,22 @@ class BgPreviewGenerator:
                 if success:
                     self.queue.mark_done(event_id)
                     logger.info(f"OK {folder_type}/{event_id} ({batch_count}/{MAX_BATCH_PER_CYCLE} 本周期)")
+                elif folder_type == 'RecentClips':
+                    # M70: REC 平铺结构——按前缀实时匹配，前缀文件全部消失
+                    # （分钟被滚动回收）→ 阻止，不再空转重试（每轮 force
+                    # drop_caches 曾造成单日 760 次的 I/O 风暴）
+                    base = entry.get('folder_path', '')
+                    remaining = glob.glob(os.path.join(base, entry['event_id'] + '-*.mp4')) if base else []
+                    if not remaining:
+                        self.queue.block(event_id)
+                        logger.info(f"SKIP {folder_type}/{event_id} 切片已被回收，加入阻止列表")
+                    else:
+                        self.queue.pause(event_id)
+                        logger.warning(f"FAIL {folder_type}/{event_id} 重试 {entry.get('retry_count', 0)}/{MAX_RETRIES}")
+                elif entry.get('folder_path') and not os.path.isdir(entry['folder_path']):
+                    # M70: 事件目录已消失（SentryClips/SavedClips 被清理）→ 阻止
+                    self.queue.block(event_id)
+                    logger.info(f"SKIP {folder_type}/{event_id} 目录已消失，加入阻止列表")
                 else:
                     self.queue.pause(event_id)
                     logger.warning(f"FAIL {folder_type}/{event_id} 重试 {entry.get('retry_count', 0)}/{MAX_RETRIES}")

@@ -57,6 +57,9 @@ RECENTCLIPS_DIR = "/mnt/teslacam/TeslaCam/RecentClips"
 # Present 模式下刷新 VFS 缓存的节流窗口（秒）。
 # 30s 内只允许一次 drop_caches：读取连发/后台兜底高频触发时防抖。
 ENSURE_TTL_SEC = 30
+# M70: force 刷缓存（sync + drop_caches）全局最小间隔——9-7 质检风暴
+# 单日 760 次 drop_caches 打爆 I/O（TeslaMate/systemctl 连带超时）
+FORCE_MIN_INTERVAL_SEC = 60
 
 # S3 兜底：指纹检测失效场景（如「同名文件覆盖重写」O_TRUNC，文件名集合
 # 不变）的最长不刷新窗口。超过该时长即使指纹未变也强制刷一次。
@@ -94,6 +97,7 @@ _state_lock = threading.Lock()
 
 # ensure_fresh 节流状态（TTL + listdir 指纹 + v0.3.1.39 dirty 延迟刷新）
 _ensure_lock = threading.Lock()
+_last_force_ts = 0.0
 _ensure_state = {
     "last_ts": 0.0,
     "last_fingerprint": None,
@@ -226,7 +230,12 @@ def ensure_fresh(path: Optional[str] = None, background: bool = False, force: bo
         if not force and now - _ensure_state["last_ts"] < ENSURE_TTL_SEC:
             return False
         if force:
-            # 强制刷：跳过指纹/ dirty 判定，直接 drop（旧簇帧校验失败后的重试路径）
+            # 强制刷：跳过指纹/ dirty 判定，直接 drop（旧簇帧校验失败后的重试路径）。
+            # M70: 全局限流——重试循环里高频 drop_caches 会打爆 I/O
+            global _last_force_ts
+            if now - _last_force_ts < FORCE_MIN_INTERVAL_SEC:
+                return False
+            _last_force_ts = now
             fp = _dir_fingerprint(target)
             return _do_refresh(fp)
         fp = _dir_fingerprint(target)
