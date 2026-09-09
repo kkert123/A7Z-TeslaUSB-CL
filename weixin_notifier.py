@@ -21,6 +21,7 @@ import json
 import base64
 import hashlib
 import logging
+import subprocess
 import requests
 from pathlib import Path
 from datetime import datetime
@@ -36,6 +37,34 @@ logger = logging.getLogger('weixin_notifier')
 # 推送健康数据目录
 DATA_DIR = "/opt/teslausb-web/data"
 PUSH_HEALTH_FILE = os.path.join(DATA_DIR, "push_health.json")
+
+
+def _exit_node_active() -> bool:
+    """检测 Tailscale exit node 是否开启（v0.3.1.54，推送失败原因标注）。
+
+    9-8 实证：exit node 出口故障会黑洞 HTTPS TLS（TCP 通、TLS 握手超时），
+    推送表现为持续超时重试耗尽。标注便于区分「网络层出口故障」与普通抖动。
+    """
+    try:
+        r = subprocess.run(
+            ["tailscale", "debug", "prefs"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return False
+        return bool(json.loads(r.stdout).get("ExitNodeID"))
+    except Exception:
+        return False
+
+
+def _log_exit_node_hint(kind: str):
+    """重试耗尽后附加 exit node 故障提示（本地检测，无需外发通道）"""
+    if _exit_node_active():
+        logger.error(
+            "%s推送失败且检测到 Tailscale exit node 开启——疑似出口节点故障"
+            "（9-8 事故：HTTPS TLS 黑洞特征）。请检查: tailscale set --exit-node=", kind)
+    else:
+        logger.error("%s推送失败(重试耗尽)——非 exit node，请检查网络/机器人配置", kind)
 
 
 @dataclass
@@ -301,6 +330,7 @@ class WeixinNotifier:
                 logger.warning(f"发送文本消息失败 (第{attempt}次): {error}, {wait}秒后重试...")
                 _time.sleep(wait)
         logger.warning(f"发送文本消息失败(已重试{len(backoff)}次): {error}")
+        _log_exit_node_hint("文本")
         return success
 
     def send_markdown(self, content: str) -> bool:
@@ -372,6 +402,7 @@ class WeixinNotifier:
                     logger.warning(f"发送图片失败 (第{attempt}次): {error}, {wait}秒后重试...")
                     _time.sleep(wait)
             logger.warning(f"发送图片消息失败(已重试{len(backoff)}次): {error}")
+            _log_exit_node_hint("图片")
             return False
 
         except FileNotFoundError:

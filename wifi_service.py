@@ -38,6 +38,14 @@ AP_HAD_CLIENTS_FILE = "/var/run/teslausb-ap-had-clients"  # v0.3.1.36: 上次探
 AP_BACKOFF_INIT = 5                                       # 退避起点 5min（S7：2min 过激进，减少 NM restart 断网窗口）
 AP_BACKOFF_MAX = 30                                       # 退避上限 30min
 DNSMASQ_AP_CONF = "/etc/dnsmasq.d/ap.conf"                # M46: AP 的 dnsmasq 配置（条件启动保护）
+# ── v0.3.1.54: 检测链路活性 + AP 客户端断开快速让出 ──
+# 9-8 事故：timer 显示 active 但 2h23m 零触发（PID1/journald 层静默死亡），
+# v37 依赖 timer 的断开轮询永不执行 → AP 卡死只能断电。
+# 对策：① 心跳文件让常驻进程可监控 timer 活性；② hostapd 事件驱动让出，脱离 timer。
+WIFI_CHECK_HEARTBEAT_FILE = "/var/run/wifi_check_last_trigger"   # 每次检测运行写时间戳
+AP_EVENT_CALLBACK = "/opt/radxa_data/teslausb/ap_client_event.sh"  # hostapd_cli -a 事件回调
+AP_YIELD_PENDING_FILE = "/var/run/ap-yield-pending"    # DISCONNECTED → 15s 宽限让出标记
+AP_YIELD_DELAY_SEC = 15                                # 断开后宽限秒数（防手机漫游抖动）
 
 # captive portal（v0.3.1.36）：AP 模式下 dnsmasq 提供 DNS（任意域名 → AP 网关）
 # + iptables 将 80 端口重定向到 Web 5000，手机连 AP 开任意网页自动跳 A7Z 配置页。
@@ -804,6 +812,7 @@ def _write_hostapd_conf() -> bool:
 
     conf = f"""interface=wlan0
 driver=nl80211
+ctrl_interface=/var/run/hostapd
 ssid={ssid}
 hw_mode=g
 channel=6
@@ -1059,6 +1068,50 @@ def _record_ap_try():
         pass
 
 
+def _ap_start_client_monitor() -> bool:
+    """启动 hostapd 事件监听（v0.3.1.54）。
+
+    客户端断开 → AP 卡死是 9-8 事故直接形态：v37 的断开检测跑在 wifi timer
+    （quick=2min）里，timer 静默死亡时永不执行。这里改用 hostapd_cli -a
+    事件驱动：AP-STA-DISCONNECTED 即时回调 ap_client_event.sh → 15s 宽限后
+    让出回连，彻底脱离 timer 依赖。
+    - hostapd 停止 → control socket 关闭 → hostapd_cli 自动退出（无需管理 pid）
+    - start_new_session：wifi_service（timer CLI，运行数秒即退）退出后监听存活
+    - hostapd.conf 需含 ctrl_interface=/var/run/hostapd（_write_hostapd_conf 已加）
+    """
+    try:
+        # 单例守卫：bring_up 重入（hostapd 已运行时）会并存多个监听 → 重复让出
+        _ap_stop_client_monitor()
+        time.sleep(1.5)  # hostapd 刚启动，control socket 可能未就绪
+        proc = subprocess.Popen(
+            ["sudo", "-n", "hostapd_cli", "-a", AP_EVENT_CALLBACK, "-i", WIFI_INTERFACE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        ok = proc.poll() is None
+        if not ok:
+            logger = logging.getLogger("wifi_service")
+            logger.warning("hostapd_cli 事件监听启动即退出 rc=%s", proc.returncode)
+        return ok
+    except Exception:
+        return False
+
+
+def _ap_stop_client_monitor() -> None:
+    """停止 hostapd 事件监听（bring_down 时兜底清理）。
+
+    正常路径 hostapd 停止会令 hostapd_cli 自动退出；此处 pkill 兜底
+    清理异常残留的监听进程，防止"AP 已关但监听还活着"误触发让出。
+    """
+    try:
+        subprocess.run(
+            ["sudo", "-n", "pkill", "-f", "hostapd_cli.*ap_client_event"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
     """完整启动 AP 热点（对齐 ap_control.sh，补齐原实现缺失的关键步骤）。
 
@@ -1163,6 +1216,24 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
             ["sudo", "-n", "systemctl", "restart", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
         )
+        # v0.3.1.54: dnsmasq failed 粘滞态自愈——restart 对 failed 服务可能不重新
+        # 执行 ExecStart（9-8 实锤：断电残留 ap.conf → 开机 failed → AP 起来 DHCP/DNS 死）。
+        # reset-failed 清 failed 状态后重试一次 restart。
+        _dns_st = subprocess.run(
+            ["systemctl", "is-active", "dnsmasq"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if _dns_st.stdout.strip() == "failed":
+            logging.getLogger("wifi_service").warning(
+                "dnsmasq 处于 failed 粘滞态（9-8 残留场景）——reset-failed 后重试")
+            subprocess.run(
+                ["sudo", "-n", "systemctl", "reset-failed", "dnsmasq"],
+                capture_output=True, timeout=10,
+            )
+            r_dns = subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", "dnsmasq"],
+                capture_output=True, text=True, timeout=30,
+            )
 
         # 6) 校验 hostapd + dnsmasq 是否真的起来（R3：dnsmasq 失败不再静默）
         verify_hap = subprocess.run(
@@ -1183,6 +1254,8 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
             _ap_add_portal_iptables()
             _ap_probe_self()
             _record_ap_start_time(manual=manual)  # R5: 记录启动时间，宽限期内不自动关闭
+            # v0.3.1.54: hostapd 事件监听（客户端断开 → 15s 让出回连，脱离 timer 依赖）
+            _ap_start_client_monitor()
             _clear_ap_transition()
             return True, "AP 已启动"
         # 任一失败 → 回滚（R1：不留无主断网窗口）
@@ -1216,6 +1289,8 @@ def _ap_bring_down() -> Tuple[bool, str]:
             ["sudo", "-n", "systemctl", "stop", "hostapd"],
             capture_output=True, text=True, timeout=30,
         )
+        # v0.3.1.54: hostapd 停止后事件监听应自退；pkill 兜底清理残留
+        _ap_stop_client_monitor()
         subprocess.run(
             ["sudo", "-n", "systemctl", "stop", "dnsmasq"],
             capture_output=True, text=True, timeout=30,
@@ -1801,6 +1876,27 @@ class WifiSmartSwitch:
         """快速网络连通性检测，连续失败 2 次触发完整检查"""
         self.log.info("开始快速检测...")
 
+        # v0.3.1.54: dnsmasq failed 自愈（9-8 实锤：断电残留 ap.conf → 开机
+        # dnsmasq failed 且无任何重试 → AP 起来 DHCP/DNS 死、页面打不开）
+        try:
+            if os.path.exists(DNSMASQ_AP_CONF):
+                _dns_st = subprocess.run(
+                    ["systemctl", "is-active", "dnsmasq"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if _dns_st.returncode != 0 and _dns_st.stdout.strip() == "failed":
+                    self.log.warning("检测到 dnsmasq failed + ap.conf 残留，reset-failed 并重启")
+                    subprocess.run(
+                        ["sudo", "-n", "systemctl", "reset-failed", "dnsmasq"],
+                        capture_output=True, timeout=5,
+                    )
+                    subprocess.run(
+                        ["sudo", "-n", "systemctl", "restart", "dnsmasq"],
+                        capture_output=True, timeout=10,
+                    )
+        except Exception as e:
+            self.log.warning("dnsmasq failed 自愈异常: %s", e)
+
         # AP 残留自愈：只清理「hostapd 未运行 + ap.conf 残留」的脏状态，
         # 不强制关闭运行中的 AP（运行中 AP 由网络正常分支负责关闭，避免 fallback 震荡）
         try:
@@ -2195,8 +2291,34 @@ class WifiSmartSwitch:
 
     # ── 入口 ──
 
+    def _yield_ap(self) -> int:
+        """AP 客户端断开后让出回连（hostapd 事件回调触发，v0.3.1.54）。
+
+        让出逻辑与 timer 自愈共用 _ap_bring_down（单点，避免逻辑漂移）：
+        bring_down 内含恢复 wlan0 station + nmcli connect 回连已保存 WiFi。
+        """
+        if not self._acquire_lock():
+            return 0
+        try:
+            self.log.info("AP 事件回调: 客户端断开超宽限期，让出回连 WiFi")
+            ok, msg = _ap_bring_down()
+            if ok:
+                _write_backoff(AP_BACKOFF_INIT)
+                _record_ap_try()
+            else:
+                self.log.warning("AP 事件回调让出失败: %s", msg)
+            return 0 if ok else 1
+        except Exception as e:
+            self.log.error("AP 事件回调让出异常: %s", e)
+            return 1
+        finally:
+            self._release_lock()
+
     def run(self, mode: str) -> int:
         """执行主逻辑，返回退出码"""
+        if mode == "--yield-ap":
+            return self._yield_ap()
+
         if not self._acquire_lock():
             return 0  # 锁冲突是正常竞争，不算错误
 
@@ -2205,6 +2327,13 @@ class WifiSmartSwitch:
                 self.quick_check()
             else:
                 self.full_check()
+            # v0.3.1.54: 心跳写入——timer 每次真实触发即更新时间戳，
+            # 供常驻进程判定「timer 是否静默死亡」（9-8 事故：active 但 2h+ 零触发）
+            try:
+                with open(WIFI_CHECK_HEARTBEAT_FILE, "w") as f:
+                    f.write(str(int(time.time())))
+            except Exception:
+                pass
             return 0
         except Exception as e:
             self.log.error("执行异常: %s", e)
@@ -2770,9 +2899,10 @@ def run_upload_speed_test() -> dict:
 # 命令行直接执行
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2 or sys.argv[1] not in ("--quick", "--full"):
-        print("用法: python wifi_service.py [--quick|--full]", file=sys.stderr)
-        print("  --quick   快速检测网络连接", file=sys.stderr)
-        print("  --full    完整检测并优化WiFi连接", file=sys.stderr)
+    if len(sys.argv) < 2 or sys.argv[1] not in ("--quick", "--full", "--yield-ap"):
+        print("用法: python wifi_service.py [--quick|--full|--yield-ap]", file=sys.stderr)
+        print("  --quick     快速检测网络连接", file=sys.stderr)
+        print("  --full      完整检测并优化WiFi连接", file=sys.stderr)
+        print("  --yield-ap  AP 客户端断开后让出回连（hostapd 事件回调用）", file=sys.stderr)
         sys.exit(1)
     sys.exit(run_smart_switch(sys.argv[1]))

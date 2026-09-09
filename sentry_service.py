@@ -20,6 +20,7 @@ import argparse
 import logging
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Dict
@@ -125,6 +126,10 @@ class SentryService:
         
         # 运行状态
         self._running = False
+        # v0.3.1.54: WiFi 检测心跳监控（防 timer 静默死亡——9-8 事故：
+        # timer active 但 2h23m 零触发，fallback/自愈链路整体停摆）
+        self._hb_thread: Optional[threading.Thread] = None
+        self._hb_stop = threading.Event()
         
         logger.info("哨兵服务初始化完成")
     
@@ -614,6 +619,68 @@ class SentryService:
             logger.warning(f"SSID 检查异常: {e}，默认放行")
             return True
 
+    # ── v0.3.1.54: WiFi 检测心跳监控（防 timer 静默死亡）──
+    WIFI_HB_FILE = "/var/run/wifi_check_last_trigger"
+    WIFI_HB_STALE_SEC = 600       # 心跳超 10min 未更新 → 判定 timer 静默死亡
+    WIFI_HB_ALERT_INTERVAL = 1800 # 告警防抖 30min（避免持续刷屏）
+
+    def _start_wifi_heartbeat_monitor(self):
+        """启动 WiFi 检测心跳监控线程（daemon，随 sentry 存活）。
+
+        9-8 事故根因之一：wifi-quick/full-check.timer 显示 active 但 PID1/
+        journald 层异常，2h23m 零触发——依赖 timer 的 fallback/自愈整体停摆。
+        心跳监控不依赖 PID1 调度：wifi_service 每次真实运行写心跳文件，
+        本线程 60s 检查一次，超时则重启 timer + 微信告警。
+        """
+        if self._hb_thread and self._hb_thread.is_alive():
+            return
+        self._hb_stop.clear()
+        self._hb_thread = threading.Thread(
+            target=self._wifi_heartbeat_loop, daemon=True, name="wifi-hb-monitor")
+        self._hb_thread.start()
+        logger.info("WiFi 心跳监控线程已启动")
+
+    def _wifi_heartbeat_loop(self):
+        last_alert = 0.0
+        while not self._hb_stop.wait(60):
+            try:
+                age = time.time() - os.path.getmtime(self.WIFI_HB_FILE)
+                if age <= self.WIFI_HB_STALE_SEC:
+                    continue
+                # 心跳超时 → timer 疑似静默死亡：重启 + 告警（防抖）
+                if time.time() - last_alert < self.WIFI_HB_ALERT_INTERVAL:
+                    continue
+                last_alert = time.time()
+                logger.warning("WiFi 检测心跳停滞 %.0f 分钟——重启 wifi timer 并告警", age / 60)
+                r = subprocess.run(
+                    ["sudo", "-n", "systemctl", "restart",
+                     "wifi-quick-check.timer", "wifi-full-check.timer"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                ok = r.returncode == 0
+                if not ok:
+                    logger.error("心跳自愈: wifi timer 重启失败 rc=%s %s",
+                                 r.returncode, (r.stderr or "").strip()[:120])
+                self._notify_hb_stale(age, ok)
+            except FileNotFoundError:
+                pass  # 首次部署尚无心跳文件，属正常
+            except Exception as e:
+                logger.warning("WiFi 心跳监控异常: %s", e)
+
+    def _notify_hb_stale(self, age: float, restart_ok: bool):
+        """心跳停滞告警（走系统通知机器人；失败不阻塞——链路可能整体异常）"""
+        try:
+            notifier = self.notifier or WeixinNotifier(bot_name="系统通知")
+            if restart_ok:
+                detail = "已自动重启 timer"
+            else:
+                detail = "timer 重启失败（检查 sentry 进程 sudoers 权限）"
+            notifier.send_text(
+                f"⚠️ A7Z WiFi 检测链路疑似停滞\n心跳 {age / 60:.0f} 分钟未更新"
+                f"（{detail}）\n时间: {time.strftime('%F %T')}")
+        except Exception as e:
+            logger.warning("心跳停滞告警推送失败: %s", e)
+
     def start(self):
         """启动服务"""
         if self._running:
@@ -634,6 +701,8 @@ class SentryService:
         if self.watchdog:
             self.watchdog.start()
             self._running = True
+            # v0.3.1.54: WiFi 检测心跳监控（防 timer 静默死亡）
+            self._start_wifi_heartbeat_monitor()
             logger.info("服务已启动")
         else:
             logger.error("服务启动失败: 哨兵监控未初始化")
@@ -645,6 +714,10 @@ class SentryService:
         
         logger.info("停止服务...")
         self._running = False
+        # v0.3.1.54: 停心跳监控线程
+        self._hb_stop.set()
+        if self._hb_thread and self._hb_thread.is_alive():
+            self._hb_thread.join(timeout=5)
         
         if self.watchdog:
             self.watchdog.stop()

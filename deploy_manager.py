@@ -164,6 +164,9 @@ class Config:
         # 白名单移除会导致升级后新版本目录缺失此文件、链接断链、teslausb-mode 起不来。
         # 2026-09-07 v0.3.1.51 恢复随包分发，并含 v48 可重入加固）
         "usb_gadget_init.sh",
+        # AP 客户端事件回调（v0.3.1.54：hostapd_cli -a 断开→15s 让出回连，
+        # 引用方：wifi_service._ap_start_client_monitor；M71：服务依赖文件必须随包）
+        "ap_client_event.sh",
         # USB gadget script (2026-07-08)
         # auto present service (2026-07-08 v92)
         "auto_present_service.py",
