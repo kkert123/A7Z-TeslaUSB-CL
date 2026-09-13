@@ -1,8 +1,14 @@
 #!/bin/bash
-# usb_gadget_init.sh - A7Z USB Gadget v8 (Present 模式只读挂载所有分区)
+# usb_gadget_init.sh - A7Z USB Gadget v9 (Present 模式只读挂载所有分区)
 GADGET_NAME="tesla_usb"
 GADGET_DIR="/sys/kernel/config/usb_gadget/$GADGET_NAME"
 CONFIG_NAME="c.1"
+
+# 全局互斥锁（M74）：gadget 生命周期唯一 owner 是 present_usb.sh/teslausb-mode；
+# 历史遗留 usb-gadget.service 曾与其在开机并发执行本脚本、抢绑同一 UDC
+# → U 盘瞬断 + dwc3 ep1out 写入被丢弃 → 车机退出哨兵。此锁为兜底：任何路径下
+# 同一时刻只允许一个实例真正操作 gadget。
+LOCK_FILE="/var/run/usb_gadget_init.lock"
 
 LUN_DEVICES=("/dev/nvme0n1p2" "/dev/nvme0n1p3" "/dev/nvme0n1p4" "/dev/nvme0n1p5")
 LUN_LABELS=("TESLACAM" "MUSIC" "LIGHTSHOW" "BOOMBOX")
@@ -73,7 +79,7 @@ remount_all_ro() {
 }
 
 start_gadget() {
-    green "=== USB Gadget v8 (Present 模式，全分区只读挂载) ==="
+    green "=== USB Gadget v9 (Present 模式，全分区只读挂载) ==="
 
     echo "  步骤 1/9: ConfigFS..."
     mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
@@ -153,8 +159,12 @@ start_gadget() {
     ln -sf "$GADGET_DIR/functions/mass_storage.usb0" "$GADGET_DIR/configs/$CONFIG_NAME/"
     sleep 1
     # M68 可重入加固：UDC 已绑定（上次运行的 gadget 仍在）时先解绑，避免 EBUSY
-    if [ -s "$GADGET_DIR/UDC" ]; then
-        yellow "  检测到 UDC 已绑定 ($(cat "$GADGET_DIR/UDC" 2>/dev/null))，先解绑..."
+    # v9 修正 D3：原 `[ -s UDC ]` 会把 `echo ""` 写入的 1 字节换行误判为"已绑定"
+    # （日志里"检测到 UDC 已绑定 ()"的空括号即此），导致每次必然多做一次无谓解绑。
+    # 改为去掉空白字符后判非空，只有真正绑定了控制器才解绑。
+    _udc_cur="$(cat "$GADGET_DIR/UDC" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$_udc_cur" ]; then
+        yellow "  检测到 UDC 已绑定 ($_udc_cur)，先解绑..."
         echo "" > "$GADGET_DIR/UDC" 2>/dev/null || true
         sleep 1
     fi
@@ -210,7 +220,7 @@ stop_gadget() {
 }
 
 show_status() {
-    echo "=== USB Gadget v8 ==="
+    echo "=== USB Gadget v9 ==="
     if [ -d "$GADGET_DIR" ]; then
         UDC=$(cat "$GADGET_DIR/UDC" 2>/dev/null || echo "未绑定")
         echo "  UDC: $UDC"
@@ -242,6 +252,18 @@ show_status() {
         done
     fi
 }
+
+# ── 全局互斥（M74）：同一时刻只允许一个实例操作 gadget ──
+# flock -n 非阻塞：若已有实例在跑（含并发 start/restart），直接让行，避免抢绑。
+# 正常单 owner 流程（present_usb.sh 独占）不会命中此分支。
+# 失败开放（fail-open）：锁文件若打不开（异常环境），不加锁照常执行 —— 避免
+# "锁不可用 → gadget 永不初始化 → 车机读不到 U 盘" 的连带故障。
+if exec 9>"$LOCK_FILE" 2>/dev/null; then
+    if ! flock -n 9; then
+        yellow "检测到另一 usb_gadget_init 实例正在运行，跳过本次调用（防并发抢绑，M74）"
+        exit 0
+    fi
+fi
 
 case "${1:-start}" in
     start)   start_gadget ;;

@@ -285,6 +285,14 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     elif _ph_ok is True:
         steps.append(_ph_msg)
 
+    # v0.3.1.55 post-install：停用设备侧遗留 usb-gadget.service（消除与 present_usb.sh
+    # 抢绑同一 UDC 的竞态，M74）。仅 disable 不加 --now，避免拆掉当前 gadget。
+    _lg_ok, _lg_msg = _disable_legacy_gadget_service(new_dir)
+    if _lg_ok is False:
+        steps.append(f"post-install 警告: {_lg_msg}")
+    elif _lg_ok is True:
+        steps.append(_lg_msg)
+
     _write_progress("等待重启生效", 98)
     steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
     # S4：成功返回前清除进度文件（防残留 98% 脏状态导致 progress API 误报 running）
@@ -384,6 +392,13 @@ def do_upgrade_from_tarball(tarball_path, new_version):
         steps.append(f"post-install 警告: {_ph_msg}")
     elif _ph_ok is True:
         steps.append(_ph_msg)
+
+    # v0.3.1.55 post-install：停用设备侧遗留 usb-gadget.service（M74，同上）
+    _lg_ok, _lg_msg = _disable_legacy_gadget_service(new_dir)
+    if _lg_ok is False:
+        steps.append(f"post-install 警告: {_lg_msg}")
+    elif _lg_ok is True:
+        steps.append(_lg_msg)
 
     steps.append("等待重启生效")
     return True, "\n".join(steps)
@@ -840,6 +855,48 @@ def _run_post_install_hooks(new_dir: str):
         return True, "udev 规则已部署到 /etc/udev/rules.d/ 并 reload"
     except Exception as e:
         return False, f"post-install 钩子异常: {e}"
+
+
+def _disable_legacy_gadget_service(new_dir: str = ""):
+    """升级后置钩子（v0.3.1.55 / M74）——停用设备侧遗留 usb-gadget.service。
+
+    背景：/etc/systemd/system/usb-gadget.service 是设备侧历史遗留单元（不在本仓库、
+    不随包分发），其 ExecStart 与 teslausb-mode.service 调用的 present_usb.sh 指向
+    同一条 /opt/radxa_data/usb_gadget_init.sh，两者均为 enabled、开机并发执行同一
+    脚本 → 抢绑同一 UDC（6a00000.xhci2）→ U 盘瞬断 + dwc3 ep1out 写入被丢弃 →
+    车机退出哨兵（2026-09-12 事故，M74）。
+
+    修复：在设备侧停用该遗留单元，使 gadget 生命周期唯一 owner = present_usb.sh。
+
+    注意：只 disable（阻止下次开机自启），**不加 --now**。因为升级流程只重启
+    teslausb-web，不重启 teslausb-mode；若 `--now` 触发其 ExecStop（会解绑 gadget、
+    卸载分区），会导致升级后车机长时间读不到 U 盘直到下次重启/mode 切换。当前那个
+    已结束的 oneshot（RemainAfterExit）处于惰性状态，无需即时停止。
+
+    幂等：单元不存在 / 未启用 / 已停用时返回 None（调用方不提示）。
+    返回 (ok, msg)：ok=True 已停用；ok=None 无需处理；ok=False 失败（警告不阻断）。
+    """
+    svc = "usb-gadget.service"
+    try:
+        rc, out, _err = _run(["systemctl", "is-enabled", svc], timeout=15)
+        state = (out or "").strip()
+        # is-enabled 对不存在/未启用的单元返回非 enabled 字样 → 无需处理
+        if not state.startswith("enabled"):
+            return None, ""
+        _run(["systemctl", "disable", svc], timeout=30)
+        rc2, out2, _e2 = _run(["systemctl", "is-enabled", svc], timeout=15)
+        if (out2 or "").strip() == "disabled":
+            # 顺带清掉失败态标记（不触发 ExecStop，无副作用）
+            try:
+                _run(["systemctl", "reset-failed", svc], timeout=15)
+            except Exception:
+                pass
+            return True, f"已停用遗留 {svc}（消除与 present_usb.sh 抢绑，M74）"
+        # disable 未生效 → mask 兜底（阻止一切启动）
+        _run(["systemctl", "mask", svc], timeout=20)
+        return True, f"已 mask 遗留 {svc}（disable 未生效，M74）"
+    except Exception as e:
+        return False, f"停用遗留 gadget 服务异常: {e}"
 
 
 def _backup_current():

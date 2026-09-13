@@ -113,7 +113,11 @@ def _do_switch_to_present():
     logger.info("⏰ Edit 模式超时，自动切换到 Present...")
     try:
         import subprocess
-        script = "/opt/radxa_data/teslausb/usb_gadget_init.sh"
+        # D4：统一脚本路径。首选与 present_usb.sh 相同的顶层符号链接路径，
+        # 兜底版本目录路径；两者当前指向同一文件，但加兜底防止链接缺失时失效。
+        script = "/opt/radxa_data/usb_gadget_init.sh"
+        if not os.path.exists(script):
+            script = "/opt/radxa_data/teslausb/usb_gadget_init.sh"
         result = subprocess.run(
             ["sudo", "-n", "bash", script, "start"],
             capture_output=True, text=True, timeout=60,

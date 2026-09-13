@@ -101,6 +101,15 @@ if __name__ == '__main__':
     monitor_thread.start()
     app.logger.info("系统监控守护线程已启动")
 
+    # ── USB Gadget 健康监控（v0.3.1.55：D1 由被动改主动）──
+    # 此前仅当有人打开仪表盘触发 SSE 轮询时才检测 UDC，无人看板时掉线永不重绑；
+    # 现改为常驻线程每 60s 主动检测，连续 2 次掉线才重绑（防开机瞬态误判）。
+    try:
+        import gadget_health
+        gadget_health.start_monitor(interval=60)
+    except Exception as e:
+        app.logger.warning(f"Gadget 健康监控启动失败（不影响主服务）: {e}")
+
     # ── TeslaCam 只读挂载缓存一致性任务（修复 Present 模式货不对板）──
     # v0.3.1.31：由"每 30s 无条件全刷"改为"读取驱动 + 后台 60s 兜底"。
     # v0.3.1.35：写入检测由 stat mtime（被 inode 缓存冻结，8-30 实锤失效）
