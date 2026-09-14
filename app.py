@@ -110,6 +110,28 @@ if __name__ == '__main__':
     except Exception as e:
         app.logger.warning(f"Gadget 健康监控启动失败（不影响主服务）: {e}")
 
+    # ── 遗留 usb-gadget.service 启动自愈（v0.3.1.56 / M75：补齐钩子自举缺口）──
+    # 升级后置钩子跑在"当前运行的旧版本进程"里，新钩子滞后一个版本才生效；改为每次
+    # 启动幂等检查一次（仍 enabled 则 disable，不加 --now，避免拆掉当前 gadget）。
+    # 放 daemon 线程 + 延迟，避免 systemctl（最坏数十秒）阻塞 Web 启动。
+    def _legacy_gadget_selfheal():
+        try:
+            import time as _t
+            _t.sleep(15)
+            import upgrade_service
+            _ok, _msg = upgrade_service.startup_self_heal()
+            if _ok is True:
+                app.logger.info(f"启动自愈：{_msg}")
+            elif _ok is False:
+                app.logger.warning(f"启动自愈失败：{_msg}")
+            else:
+                app.logger.info("启动自愈：无遗留 usb-gadget.service 需处理")
+        except Exception as _e:
+            app.logger.warning(f"启动自愈异常（不影响主服务）: {_e}")
+
+    threading.Thread(target=_legacy_gadget_selfheal, daemon=True,
+                     name="legacy-gadget-selfheal").start()
+
     # ── TeslaCam 只读挂载缓存一致性任务（修复 Present 模式货不对板）──
     # v0.3.1.31：由"每 30s 无条件全刷"改为"读取驱动 + 后台 60s 兜底"。
     # v0.3.1.35：写入检测由 stat mtime（被 inode 缓存冻结，8-30 实锤失效）

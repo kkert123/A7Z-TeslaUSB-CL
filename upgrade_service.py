@@ -899,6 +899,20 @@ def _disable_legacy_gadget_service(new_dir: str = ""):
         return False, f"停用遗留 gadget 服务异常: {e}"
 
 
+def startup_self_heal():
+    """启动期幂等自愈（v0.3.1.56 / M75）——供 app.py 开机调用，补齐钩子自举缺口。
+
+    后置钩子在升级流程中由"当前运行的旧版本进程"执行，而钩子函数只存在于新版本
+    代码中，因此它永远滞后一个版本才生效：从 v55 之前的版本直接升到 v55+，本次升级
+    不会停用遗留 usb-gadget.service。改为每次启动都检查一次，仍 enabled 则停用，
+    覆盖所有升级路径。
+
+    幂等、best-effort；返回 (ok, msg) 语义同 _disable_legacy_gadget_service：
+    True 已停用 / None 无需处理 / False 失败（调用方警告不阻断）。
+    """
+    return _disable_legacy_gadget_service()
+
+
 def _backup_current():
     """备份当前运行版本（v0.3.1.35：打包压缩包存 teslausb-bak，替代 copytree 全量目录）"""
     current = get_current_version_dir()
