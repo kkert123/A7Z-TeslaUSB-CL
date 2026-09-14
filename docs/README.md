@@ -39,8 +39,9 @@
 
 - [服务清单](reference/服务清单.md) —— 所有 systemd service / timer 及用途
 - [路径与配置项](reference/路径与配置项.md) —— 目录布局、配置文件、环境变量
+- [TeslaMate 接口与状态字段](reference/TeslaMate接口与状态字段.md) —— 7777 服务的认证、端点、`/states` 196 个字段（含 `locked` / `sentry_mode` / `is_user_present`）
 - [版本历史](reference/版本历史.md) —— v0.3.1.20 起的版本变更索引
-- [教训索引](reference/教训索引.md) —— M15~M56 踩坑速查，改代码前值得扫一眼
+- [教训索引](reference/教训索引.md) —— M15~M76 踩坑速查，改代码前值得扫一眼
 - [发布说明规范](reference/发布说明规范.md) —— 写作风格与检查清单
 
 ## 说明（Explanation）
