@@ -12,6 +12,7 @@ TeslaUSB Neo - 系统监控告警模块
 5. 存储空间告警 (5GB 警告, 2GB 严重)
 6. 智能心跳 (每 60 分钟, 强制每 6 小时)
 7. 服务异常告警
+8. AP 带客户端持续开启提醒 (v0.3.1.58, 超 30min 提示可关闭 AP 回连 WiFi)
 
 基于旧版 sentry_monitor.py 重构，集成到当前架构
 
@@ -29,6 +30,8 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from config import PARTITIONS
 
 logger = logging.getLogger('system_monitor')
 
@@ -50,6 +53,18 @@ MEM_HIGH_DURATION_S = 120 # 持续时间 (秒)
 
 # 网络
 NET_OFFLINE_MIN_S = 120   # 离线最小时长才通知恢复 (秒)
+
+# AP 带客户端持续开启提醒（v0.3.1.58 / 9-22 事故 F4）
+# 背景：手机连着 AP 时 _ap_self_heal 主动让位（不打断配置），若用户配置完不主动关 AP，
+# 设备会一直停在热点模式无上行网络。标记由 wifi_service._note_ap_client_stuck() 写入。
+AP_CLIENT_STUCK_MIN_S = 1800         # 持续 30min 起提醒
+AP_CLIENT_STUCK_INTERVAL = 6 * 3600  # 提醒间隔 6h（避免刷屏）
+# 标记路径以写入方 wifi_service 为唯一事实来源；导入失败用同值兜底
+# （system_monitor 需能作为独立 CLI 运行，不应因依赖异常而无法启动）。
+try:
+    from wifi_service import AP_CLIENT_STUCK_FILE
+except Exception:  # pragma: no cover - 兜底路径
+    AP_CLIENT_STUCK_FILE = "/var/run/teslausb-ap-client-stuck"
 
 # 存储
 STORAGE_WARN_GB = 5       # 存储警告阈值 (GB)
@@ -446,6 +461,7 @@ class SystemMonitor:
         self._mem_high_since: Optional[float] = None
         self._net_offline_since: Optional[float] = None
         self._was_online: Optional[bool] = None
+        self._ap_stuck_last_alert: float = 0.0   # v0.3.1.58(F4)：AP 带客户端提醒上次发送时间
 
         # 通知器
         self._notifier = None
@@ -573,12 +589,82 @@ class SystemMonitor:
                 self._net_offline_since = now
             self._was_online = False
 
+    def check_ap_client_stuck(self):
+        """AP 带客户端持续开启提醒（v0.3.1.58 / 9-22 事故 F4）。
+
+        标记由 wifi_service._note_ap_client_stuck() 在「AP 运行 + 有客户端连接」时写入，
+        客户端断开 / AP 关闭 / AP 重开时被清除。此处只读文件，不做任何网络操作，
+        因此不依赖 sudo/iw，也不会打断正在通过 AP 配置的设备。
+        """
+        try:
+            with open(AP_CLIENT_STUCK_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            since = int(data.get("since", 0))
+            notified_at = int(data.get("notified_at", 0))
+        except Exception:
+            return  # 无标记（未进入该状态）或文件损坏 → 静默跳过
+        if since <= 0:
+            return
+        # 双重校验：AP 必须真的在运行。
+        # 防标记残留误报 —— 若 hostapd 是被外部 kill/stop 掉的（不走 _ap_bring_down），
+        # 标记不会被清除，此处若无校验就会推送「AP 已持续开启」的假消息。
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", "hostapd"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.stdout.strip() != "active":
+                return
+        except Exception:
+            return
+        duration = int(time.time() - since)
+        if duration < AP_CLIENT_STUCK_MIN_S:
+            return
+        # 防刷屏：节流时间戳落盘（marker 由 wifi_service 只在不存在时创建，
+        # 不会覆盖这里写入的 notified_at）——避免 Web 进程重启后重复推送
+        now = time.time()
+        if notified_at and (now - notified_at) < AP_CLIENT_STUCK_INTERVAL:
+            return
+        if (now - self._ap_stuck_last_alert) < AP_CLIENT_STUCK_INTERVAL:
+            return
+        self._ap_stuck_last_alert = now
+        # 先落盘再推送：即使推送失败/进程崩溃也不会在重启后立刻重复发
+        try:
+            with open(AP_CLIENT_STUCK_FILE, "w", encoding="utf-8") as f:
+                json.dump({"since": since, "notified_at": int(now)}, f)
+        except Exception:
+            pass
+        self._send_alert(
+            "ℹ️ A7Z 热点已持续开启",
+            f"AP 模式已持续 {duration // 60} 分钟且有设备连接\n"
+            f"若已配置完成，可在 WiFi 页面点「关闭 AP」自动回连已保存 WiFi\n"
+            f"（直接点「切换」也会先自动关闭 AP）\n"
+            f"时间: {time.strftime('%F %T')}",
+            level="info",
+        )
+
     def check_storage(self):
-        """检查存储空间（仅监控 TeslaCam 分区 /media/cnlvan/cam）"""
-        path = "/media/cnlvan/cam"
+        """检查存储空间（仅监控 TeslaCam 分区）"""
+        path = PARTITIONS["cam"]
         name = "TeslaCam"
         disk = self.sys_info.get_disk_free(path)
         free_gb = disk.get("free_gb", 0)
+        used_pct = disk.get("percent", 0)
+
+        # ── 磁盘使用率 > 90% 告警（WeixinNotifier 直接推送） ──
+        if used_pct > 90:
+            if self.cooldown.can_alert(f"storage_90pct_{name}"):
+                try:
+                    from weixin_notifier import WeixinNotifier
+                    notifier = WeixinNotifier(bot_name="系统通知")
+                    notifier.send_text(
+                        f"⚠️ 磁盘使用率告警\n{name} 分区使用率: {used_pct}%\n"
+                        f"剩余: {free_gb}GB，请及时清理",
+                        mentioned_list=None
+                    )
+                except Exception:
+                    pass
+                self.cooldown.record_alert(f"storage_90pct_{name}")
 
         if free_gb <= STORAGE_CRIT_GB:
             if self.cooldown.can_alert(f"storage_crit_{name}"):
@@ -694,6 +780,7 @@ class SystemMonitor:
         self.check_cpu_load()
         self.check_memory()
         self.check_network()
+        self.check_ap_client_stuck()
         self.check_storage()
         self.check_heartbeat()
         self.save_health_status()

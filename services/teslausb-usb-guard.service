@@ -1,0 +1,23 @@
+[Unit]
+Description=TeslaUSB A7Z USB Gadget Link Guard
+Documentation=https://github.com/kkert123/A7Z-TeslaUSB-CL
+# 晚于 sentry 启动：避开开机阶段 present_usb.sh 的正常初始化窗口
+After=network.target teslausb-sentry.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/radxa_data/teslausb
+# -u 关闭 stdout 缓冲，保证 journal 实时可见（排障关键）
+ExecStart=/usr/bin/python3 -u /opt/radxa_data/teslausb/usb_guard.py
+Restart=always
+RestartSec=10
+# 停服务时给它一点时间收尾（不阻塞）
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

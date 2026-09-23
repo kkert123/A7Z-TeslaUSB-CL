@@ -278,9 +278,29 @@ function saveApConfig(){
 
 /* ── WiFi 连接管理 ── */
 function switchTo(id){
-  if(!confirm('确定切换到 '+id+'？\n切换后当前连接可能中断几秒。'))return;
+  // M81：AP 开启时后端会先自动关闭 AP 再切换，这里提前告知用户。
+  // 预检接口加 3s 超时：即使接口挂起也必须给出反馈，禁止"点击后毫无反应"。
+  let done=false;
+  const go=apOn=>{if(done)return;done=true;doSwitch(id,apOn);};
+  const ctl=('AbortController' in window)?new AbortController():null;
+  const timer=setTimeout(()=>{if(ctl)ctl.abort();go(false);},3000);
+  const opts=ctl?{signal:ctl.signal}:{};
+  fetch('/api/ap/status',opts).then(r=>r.json()).then(ap=>{
+    clearTimeout(timer);go(!!(ap.active||ap.ap_active));
+  }).catch(()=>{clearTimeout(timer);go(false);});
+}
+function doSwitch(id,apOn){
+  const tip=apOn?'\n\n当前 AP 热点已开启，将先关闭 AP 再切换。\n切换过程中本机与设备的连接会中断（约 30~60 秒），请稍后重新打开本页面查看结果。\n若切换失败，设备会自动重开 AP。':'';
+  if(!confirm('确定切换到 '+id+'？\n切换后当前连接可能中断几秒。'+tip))return;
   fetch('/api/wifi/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:id})})
-  .then(r=>r.json()).then(d=>{location.reload();}).catch(()=>alert('请求失败'));
+  .then(r=>r.json()).then(d=>{
+    if(d.success){location.reload();return;}
+    alert(d.message||d.error||'切换失败');
+    location.reload();
+  }).catch(()=>{
+    if(apOn){alert('AP 正在关闭，本机与设备的连接已中断。\n请在约 1 分钟后重新打开本页面查看切换结果（失败会自动重开 AP）。');}
+    else{alert('请求失败');}
+  });
 }
 function delConn(id){
   if(!confirm('确定删除连接 "'+id+'"？\n此操作不可恢复。'))return;

@@ -129,6 +129,33 @@ def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
             shutil.rmtree(dest)
         shutil.copytree(saved_thumbs, dest, symlinks=True)
 
+
+def _write_upgrade_marker(target_dir, version):
+    """写入"升级成功"标记，供 web 重启后的开机通知识别为升级并带上版本号（M72）。
+
+    为什么必须有：app.py 启动时读 data/upgrade_success.json，读到才推
+    "系统升级成功 V{version}"，否则退化为普通"开机启动"文案。
+
+    调用时机：必须在**切换 symlink 之后**。标记写在 data/ 下，而 data/ 由
+    _restore_user_data 从旧版本恢复、随符号链接可达；提前写会落到即将被丢弃的目录。
+
+    ⚠️ M77：两条升级路径（do_upgrade 在线升级 / do_upgrade_from_tarball 本地上传包）
+    都必须调用。历史上只有本地上传包路径写了标记，导致长期走在线升级的用户
+    升级后收到的仍是"开机启动"文案（2026-09-15 实锤）。
+
+    返回 True 写入成功；False 失败（调用方仅记警告，不阻断升级）。
+    """
+    try:
+        import time as _time
+        _mk_dir = os.path.join(target_dir, "data")
+        os.makedirs(_mk_dir, exist_ok=True)
+        with open(os.path.join(_mk_dir, "upgrade_success.json"), "w", encoding="utf-8") as _f:
+            _f.write(json.dumps({"version": version, "ts": _time.time()}))
+        return True
+    except Exception:
+        return False
+
+
 def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     """一键升级。返回 (success, message)
 
@@ -272,6 +299,12 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     # ── 7. 记录版本 ──
     _record_version(new_version, sha256_expected, "upgrade")
 
+    # M77: 升级成功标记——web 重启后开机通知改推"系统升级成功 V{version}"。
+    # 此前本函数（在线升级路径）漏写标记，只有 do_upgrade_from_tarball 写了，
+    # 导致走在线升级的用户升级后收到的仍是普通"开机启动"文案。
+    if not _write_upgrade_marker(new_dir, new_version):
+        steps.append("升级标记写入警告（不影响升级）")
+
     _cleanup(tarball, sig_file)
 
     # 清理旧备份（bak 保留最近 BAK_KEEP 个）
@@ -375,15 +408,9 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     _record_version(new_version, "", "manual-upload")
     _prune_bak()
 
-    # M72: 升级成功标记——web 重启后开机通知改推"系统升级成功 V{version}"
-    # （data/ 目录已被 _restore_user_data 恢复到新版本目录，随符号链接可达）
-    try:
-        import time as _time
-        _mk_dir = os.path.join(new_dir, "data")
-        os.makedirs(_mk_dir, exist_ok=True)
-        with open(os.path.join(_mk_dir, "upgrade_success.json"), "w", encoding="utf-8") as _f:
-            _f.write(json.dumps({"version": new_version, "ts": _time.time()}))
-    except Exception:
+    # M72/M77: 升级成功标记——web 重启后开机通知改推"系统升级成功 V{version}"
+    # （与在线升级路径共用 _write_upgrade_marker，避免两条路径再次漂移）
+    if not _write_upgrade_marker(new_dir, new_version):
         steps.append("升级标记写入警告（不影响升级）")
 
     # v0.3.1.40 post-install：部署随包 udev 规则到 /etc/udev/rules.d/（幂等）
@@ -899,18 +926,120 @@ def _disable_legacy_gadget_service(new_dir: str = ""):
         return False, f"停用遗留 gadget 服务异常: {e}"
 
 
+GUARD_SVC = "teslausb-usb-guard.service"
+GUARD_SVC_DST = "/etc/systemd/system/" + GUARD_SVC
+
+
+def _ensure_usb_guard_service():
+    """启动期幂等自愈（v0.3.1.57 / M80）——确保 USB 链路守护单元已安装并运行。
+
+    依据两条既定教训：
+      - M45：systemd 单元是"无主资产"，必须随包分发 + 由常驻服务幂等自愈；
+      - M75：关键后置动作必须有启动期兜底，否则升级后置钩子跑在旧版本进程里、
+             永远滞后一版才生效（升到 v57 时钩子函数还不在跑着的 v56 代码中）。
+
+    步骤（全部幂等，重复调用无副作用）：
+      1) services/teslausb-usb-guard.service → /etc/systemd/system/（缺失或内容不一致时）
+      2) systemctl daemon-reload
+      3) systemctl enable（未启用时）+ start（未运行时）
+
+    返回 (ok, msg)：True 已处理 / None 无需处理 / False 失败（警告不阻断）。
+    """
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "services", GUARD_SVC)
+    if not os.path.isfile(src):
+        return False, f"单元源文件缺失: {src}"
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            want = f.read()
+
+        have = ""
+        if os.path.isfile(GUARD_SVC_DST):
+            try:
+                with open(GUARD_SVC_DST, "r", encoding="utf-8") as f:
+                    have = f.read()
+            except OSError:
+                have = ""
+
+        changed = (have != want)
+        if changed:
+            tmp = "/tmp/" + GUARD_SVC
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(want)
+            os.chmod(tmp, 0o644)
+            rc, _o, err = _run(["cp", "-f", tmp, GUARD_SVC_DST], timeout=30)
+            if rc != 0:
+                return False, f"安装 {GUARD_SVC} 失败: {err}"
+            _run(["systemctl", "daemon-reload"], timeout=30)
+
+        rc, out, _e = _run(["systemctl", "is-enabled", GUARD_SVC], timeout=15)
+        enabled = (out or "").strip().startswith("enabled")
+        if not enabled:
+            _run(["systemctl", "enable", GUARD_SVC], timeout=30)
+
+        rc, out, _e = _run(["systemctl", "is-active", GUARD_SVC], timeout=15)
+        active = (out or "").strip() == "active"
+        restarted = False
+        msg_note = ""
+        if active:
+            # 已在运行：必须 restart 才能刷上本次升级的新代码——进程不重启会一直跑
+            # 旧版本（M75 同源：升级后置动作跑在旧进程里，永远滞后一版）。
+            # 例外：守护正处故障处置中（phase=fault）则跳过，以免打断 L1 的
+            # 「UDC 断开→重连」窗口、把车机存储真的拆掉。
+            in_fault = False
+            try:
+                with open("/opt/radxa_data/teslausb/data/usb_guard_status.json",
+                          "r", encoding="utf-8") as _gf:
+                    in_fault = (json.load(_gf) or {}).get("phase") == "fault"
+            except Exception:
+                in_fault = False
+            if in_fault:
+                msg_note = "守护正处故障处置中，跳过重启以免打断恢复"
+            else:
+                _run(["systemctl", "restart", GUARD_SVC], timeout=30)
+                restarted = True
+        else:
+            _run(["systemctl", "start", GUARD_SVC], timeout=30)
+            rc, out, _e = _run(["systemctl", "is-active", GUARD_SVC], timeout=15)
+            active = (out or "").strip() == "active"
+
+        if changed or not enabled or not active or restarted:
+            tail = ("（%s）" % msg_note) if msg_note else ""
+            return True, (f"{GUARD_SVC} 已安装并拉起"
+                          f"（changed={changed} enabled={enabled} active={active} "
+                          f"restarted={restarted}）{tail}")
+        return None, ""
+    except Exception as e:
+        return False, f"确保 {GUARD_SVC} 异常: {e}"
+
+
 def startup_self_heal():
     """启动期幂等自愈（v0.3.1.56 / M75）——供 app.py 开机调用，补齐钩子自举缺口。
 
     后置钩子在升级流程中由"当前运行的旧版本进程"执行，而钩子函数只存在于新版本
     代码中，因此它永远滞后一个版本才生效：从 v55 之前的版本直接升到 v55+，本次升级
-    不会停用遗留 usb-gadget.service。改为每次启动都检查一次，仍 enabled 则停用，
-    覆盖所有升级路径。
+    不会停用遗留 usb-gadget.service。改为每次启动都检查一次，覆盖所有升级路径。
 
-    幂等、best-effort；返回 (ok, msg) 语义同 _disable_legacy_gadget_service：
-    True 已停用 / None 无需处理 / False 失败（调用方警告不阻断）。
+    v0.3.1.57 / M80 起同时负责安装并拉起 teslausb-usb-guard.service（同理：新服务的
+    systemd 单元不能依赖升级后置钩子自举）。
+
+    幂等、best-effort；返回 (ok, msg)：
+      True 有项目被处理 / None 全部无需处理 / False 有项目失败（调用方警告不阻断）。
     """
-    return _disable_legacy_gadget_service()
+    done, failed = [], []
+    for fn in (_disable_legacy_gadget_service, _ensure_usb_guard_service):
+        try:
+            ok, msg = fn()
+        except Exception as e:
+            ok, msg = False, f"{getattr(fn, '__name__', 'hook')} 异常: {e}"
+        if ok is True and msg:
+            done.append(msg)
+        elif ok is False:
+            failed.append(msg or getattr(fn, "__name__", "hook"))
+    if failed:
+        return False, "；".join(failed)
+    if done:
+        return True, "；".join(done)
+    return None, ""
 
 
 def _backup_current():

@@ -178,7 +178,12 @@ class Config:
         "templates/recent_clips.html",
         "templates/sentry.html",
         # gadget health monitor (2026-07-11 UDC 解绑自动恢复)
+        # 2026-09-19 M80：自愈已移交 usb_guard，本模块降级为只读
         "gadget_health.py",
+        # USB 链路守护（2026-09-19 M80）：独立常驻服务 + 其 systemd 单元
+        # 判据 = 线在位(online) + UDC state == configured；含拔线闸/熔断/五步阶梯
+        "usb_guard.py",
+        "services/teslausb-usb-guard.service",
         # requirements (2026-07-26 v0.3.0 — 升级包必须包含，否则新 venv 无依赖)
         "requirements.txt",
         # boombox + lightshow + wrap + license_plate (2026-07-26 — app_helpers.py 依赖)

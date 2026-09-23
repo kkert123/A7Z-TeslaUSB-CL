@@ -46,6 +46,11 @@ WIFI_CHECK_HEARTBEAT_FILE = "/var/run/wifi_check_last_trigger"   # 每次检测�
 AP_EVENT_CALLBACK = "/opt/radxa_data/teslausb/ap_client_event.sh"  # hostapd_cli -a 事件回调
 AP_YIELD_PENDING_FILE = "/var/run/ap-yield-pending"    # DISCONNECTED → 15s 宽限让出标记
 AP_YIELD_DELAY_SEC = 15                                # 断开后宽限秒数（防手机漫游抖动）
+# ── v0.3.1.58: AP 带客户端持续开启提醒（9-22 事故 F4 落地）──
+# 手机连着 AP 时 _ap_self_heal 主动让位（设计：不打断正在配置的设备），
+# 但若用户配置完不主动关 AP，设备会一直停在热点模式、无上行网络。
+# 对策：wifi_service 写「起始时间」标记 → 常驻 Web 进程的 SystemMonitor 读取并推提醒（不踢客户端）。
+AP_CLIENT_STUCK_FILE = "/var/run/teslausb-ap-client-stuck"
 
 # captive portal（v0.3.1.36）：AP 模式下 dnsmasq 提供 DNS（任意域名 → AP 网关）
 # + iptables 将 80 端口重定向到 Web 5000，手机连 AP 开任意网页自动跳 A7Z 配置页。
@@ -387,6 +392,115 @@ def _pick_best_bssid(ssid: str) -> Optional[str]:
         return None
 
 
+def _wlan0_has_ip() -> bool:
+    """探测 wlan0 是否已获得 IPv4 地址。
+
+    探测手段全部失败时返回 **False**（"无 IP"），这是有意的安全方向：
+    本返回值只被 `_restore_ap_after_failed_switch()` 使用，False 会把流程推向
+    `start_ap()` 重开 AP。AP 是设备唯一的逃生通道 —— 误开 AP 只是中断当前会话
+    （用户可重连 AP 处理），而"该开却没开"会让设备变成既无热点也无上行的离线砖。
+
+    交叉审查 P2-1：此前只跑 `ip` 一条命令，一旦它抛异常（超时/二进制缺失）就会被
+    外层 except 吞掉 → 兜底静默失效。故改为多手段探测，nmcli 兜底
+    （本模块处处依赖 nmcli，可用性最高）。
+    """
+    try:
+        r = subprocess.run(
+            ["ip", "-4", "addr", "show", "dev", WIFI_INTERFACE],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return "inet " in (r.stdout or "")
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "IP4.ADDRESS", "device", "show", WIFI_INTERFACE],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            # 形如 "IP4.ADDRESS[1]:192.168.1.5/24"；无地址时该值为空
+            return any("IP4.ADDRESS" in l and "/" in l
+                       for l in (r.stdout or "").splitlines())
+    except Exception:
+        pass
+    return False
+
+
+def _restore_ap_after_failed_switch() -> None:
+    """M81 兜底：切换 WiFi 时主动关闭过 AP，但最终失败 → 重开 AP，避免设备彻底失联。
+
+    「AP 已关 + 目标 WiFi 连不上」会让设备既无热点也无上行网络，只能断电恢复。
+    这里按「手动开启 AP」语义重开（退避重置 + 3min 宽限期），用户可再次操作。
+
+    安全前置：**仅当设备当前确实没有可用连接时才重开** —— 若已回连到其他 WiFi，
+    再拉起 AP 会因单射频互斥把刚恢复的 station 连接掐断，反而制造新的断网。
+
+    判据必须与 _ap_bring_down() 的成败口径一致（交叉审查 P1-1）：
+    后者把「L2 已 connected 但 DHCP 未拿到 IP」判为**失败**（见 "AP 已停止但 wlan0 无 IP"），
+    因此这里不能只看 `connected`，必须同时确认 wlan0 已获得 IPv4 地址；
+    否则该失败分支下本兜底会被跳过，退化成「AP 已停 + 无 IP」的新失联路径。
+    """
+    try:
+        cur = get_current_wifi()
+        if cur.get("connected"):
+            if _wlan0_has_ip():
+                logging.getLogger(__name__).info(
+                    "切换失败但已回连 '%s' 且拿到 IP，不重开 AP", cur.get("ssid"))
+                return
+            logging.getLogger(__name__).warning(
+                "切换失败：wlan0 已关联 '%s' 但无 IP（DHCP 未完成）→ 仍重开 AP 兜底",
+                cur.get("ssid"))
+        r = start_ap()
+        logging.getLogger(__name__).warning(
+            "切换失败且已关闭 AP、当前无可用连接 → 兜底重开 AP: %s", (r or {}).get("message", ""))
+    except Exception as e:
+        logging.getLogger(__name__).error("兜底重开 AP 失败: %s", e)
+
+
+def _ap_settle_after_down(max_wait: int = 30, interval: int = 3) -> None:
+    """AP 让出后等待 wlan0 完成 AP→station 沉降（AIC8800 单射频需 10-30s）。
+
+    对齐 _ap_self_heal 的轮询式等待（v0.3.1.39 修复，'AIC8800 从 AP 切回 station 后
+    扫描需 10-30s'）。不加等待直接 _pick_best_bssid / 连接，新 SSID 常因扫描为空而报
+    「找不到网络」（交叉审查 P1-2）。
+    先 rescan，随后轮询 `nmcli dev wifi list`，拿到非空结果即提前返回。
+    注意 `nmcli dev wifi list` 可能先返回切模式前的旧缓存（非空）→ 提前返回属预期，
+    旧 SSID 是真实存在过的网络，后续连接会实际验证。
+
+    交叉审查 P2-3：原实现用 `waited += interval` 计数，**没有计入子进程自身耗时**，
+    最坏情况（扫描持续失败）实际约 15+10×(3+10)=145s，远超 docstring 声称的 30s，
+    会让前端点击后卡住两分多钟。改为 **wall-clock 截止**：总耗时严格受 max_wait 约束，
+    且 rescan / list 的超时也各自按剩余时间收敛。
+    """
+    deadline = time.monotonic() + max_wait
+    try:
+        remain = deadline - time.monotonic()
+        subprocess.run(["nmcli", "dev", "wifi", "rescan"],
+                       capture_output=True, text=True,
+                       timeout=max(1, min(15, int(remain))))
+    except Exception:
+        pass
+    while True:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            return
+        time.sleep(min(interval, remain))
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            return
+        try:
+            r = subprocess.run(
+                ["nmcli", "-t", "-f", "SSID", "dev", "wifi", "list"],
+                capture_output=True, text=True,
+                timeout=max(1, min(10, int(remain))),
+            )
+            if r.returncode == 0 and any(l.strip() for l in r.stdout.splitlines()):
+                return
+        except Exception:
+            return
+
+
 def switch_wifi(ssid: str, password: str = "", prefer_5ghz: bool = True) -> dict:
     """切换到指定 WiFi，失败时自动回档到上一个连接
     
@@ -400,12 +514,51 @@ def switch_wifi(ssid: str, password: str = "", prefer_5ghz: bool = True) -> dict
     if password and (len(password) < 8 or len(password) > 63):
         raise ValueError("密码长度必须为 8-63 字符（开放网络可留空）")
 
-    # 5GHz 优先: 扫描同名 SSID 的所有 BSSID，选最佳
-    target_bssid = _pick_best_bssid(ssid) if prefer_5ghz else None
+    # ── M81：AP 模式下手动切换必须先让出 AP ──
+    # AP 运行时 _ap_bring_up() 已把 wlan0 置为 managed=no 并停掉 wpa_supplicant，
+    # 此时 nmcli connection up 必然失败（现象：点已保存 WiFi 报错、必须手动「关闭 AP」才能连）。
+    # 让出必须发生在 _pick_best_bssid / prev_* 捕获之前：
+    #   ① AIC8800 单射频——AP 占用 wlan0 时主动扫描报 EBUSY(-16)；
+    #   ② AP 关闭后 get_current_wifi() 才有有效结果，回档目标才合理。
+    ap_was_up = False
+    try:
+        _hap = subprocess.run(
+            ["systemctl", "is-active", "hostapd"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if _hap.stdout.strip() in ("active", "activating"):
+            if get_ap_force_mode() == "force-on":
+                status = {"success": False, "action": "rejected", "ssid": ssid,
+                          "message": "AP 处于「强制开启」模式，请先改为「自动」或手动关闭 AP 后再切换"}
+                _save_wifi_status(status)
+                return status
+            ap_was_up = True
+            _down_ok, _down_msg = _ap_bring_down()   # 与「关闭 AP」按钮同一条已验证路径
+            if not _down_ok:
+                _restore_ap_after_failed_switch()
+                status = {"success": False, "action": "failed", "ssid": ssid,
+                          "message": f"关闭 AP 失败（{_down_msg}），未执行切换"}
+                _save_wifi_status(status)
+                return status
+            # P1-2：等 wlan0 完成 AP→station 沉降，否则随后的扫描/连接会误报「找不到网络」
+            _ap_settle_after_down()
+    except Exception as _ap_e:
+        # AP 探测/让出异常不阻断切换（fail-open），但记录日志以免静默
+        logging.getLogger(__name__).warning("AP 前置让出异常（忽略，继续切换）: %s", _ap_e)
 
-    prev_conn = get_current_wifi()
-    prev_con_name = _get_active_connection_name()
-    prev_ssid = prev_conn.get("ssid") if prev_conn.get("connected") else None
+    # 5GHz 优先: 扫描同名 SSID 的所有 BSSID，选最佳
+    # 交叉审查 P2-2：以下三行位于「AP 已让出」之后、主 try 之前，一旦抛异常会直接冒泡，
+    # 让设备停在「AP 已关 + 未切换」状态。当前三个被调函数各自有内部 try/except 兜底
+    # （理论上不可达），但这是纯粹的隐患敞口，包一层保护成本极低。
+    try:
+        target_bssid = _pick_best_bssid(ssid) if prefer_5ghz else None
+        prev_conn = get_current_wifi()
+        prev_con_name = _get_active_connection_name()
+        prev_ssid = prev_conn.get("ssid") if prev_conn.get("connected") else None
+    except Exception as _cap_e:
+        if ap_was_up:
+            _restore_ap_after_failed_switch()
+        raise RuntimeError(f"切换 WiFi 异常（准备阶段）：{_cap_e}")
     con_name = f"WiFi-{ssid}"
 
     try:
@@ -500,6 +653,8 @@ def switch_wifi(ssid: str, password: str = "", prefer_5ghz: bool = True) -> dict
 
             if curr.get("connected") and prev_ssid and curr_ssid == prev_ssid:
                 err = (activate.stderr.strip() if activate and activate.returncode != 0 else "连接验证失败")
+                if ap_was_up:
+                    _restore_ap_after_failed_switch()
                 status = {"success": False,
                           "message": f"连接 '{ssid}' 失败，已自动回档到 '{prev_ssid}'",
                           "ssid": ssid, "prev_ssid": prev_ssid, "action": "reverted", "error": err}
@@ -519,12 +674,22 @@ def switch_wifi(ssid: str, password: str = "", prefer_5ghz: bool = True) -> dict
             status = {"success": False,
                       "message": f"连接 '{ssid}' 失败，且回档失败，请手动检查网络",
                       "ssid": ssid, "prev_ssid": prev_ssid, "action": "failed", "error": err}
+        if ap_was_up:
+            _restore_ap_after_failed_switch()
         _save_wifi_status(status)
         return status
 
     except ValueError:
+        # M81：AP 已让出后仍可能抛 ValueError（如 '找不到网络 xxx'，见上方
+        # nmcli device wifi connect 的 No network with SSID 分支）→ 同样兜底重开，
+        # 否则「AP 已停 + 目标网络没连上」会把设备彻底变成离线砖。
+        if ap_was_up:
+            _restore_ap_after_failed_switch()
         raise
     except Exception as e:
+        # 已关闭 AP 时异常退出 → 同样兜底重开，避免设备失联
+        if ap_was_up:
+            _restore_ap_after_failed_switch()
         raise RuntimeError(f"切换 WiFi 异常：{e}")
 
 
@@ -923,6 +1088,32 @@ def _write_had_clients(has: bool):
         pass
 
 
+def _note_ap_client_stuck():
+    """v0.3.1.58(F4)：记录「AP 开启且有客户端连接」的起始时间。
+
+    只在首次观测时写入（后续观测保持不变，形成"持续时长"语义）；
+    由常驻 Web 进程的 SystemMonitor 读取该文件决定是否推送提醒。
+    """
+    try:
+        if not os.path.exists(AP_CLIENT_STUCK_FILE):
+            with open(AP_CLIENT_STUCK_FILE, "w") as f:
+                json.dump({"since": int(time.time())}, f)
+    except Exception:
+        pass
+
+
+def _clear_ap_client_stuck():
+    """v0.3.1.58(F4)：清除「AP 带客户端持续开启」计时标记。
+
+    调用点：客户端已断开（含断开事件）/ AP 关闭 / AP 重新拉起 —— 均代表本轮结束。
+    """
+    try:
+        if os.path.exists(AP_CLIENT_STUCK_FILE):
+            os.remove(AP_CLIENT_STUCK_FILE)
+    except Exception:
+        pass
+
+
 def _ap_add_portal_iptables():
     """添加 captive portal 规则：80→5000（Web 跳转）+ 53→8053（DNS 转发）。幂等。"""
     try:
@@ -1135,6 +1326,7 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
         # v0.3.1.36：开 AP 前确保 resolved 正常（dnsmasq 8053 与 resolved 隔离，
         # 仅修复历史遗留的 failed/start-limit 状态）
         _ap_ensure_resolved()
+        _clear_ap_client_stuck()  # v0.3.1.58(F4)：AP 重新拉起 → 计时从本轮起算
         # 0) 前置校验：hostapd 单元必须存在且未 mask（Y2）
         r_unit = subprocess.run(
             ["systemctl", "is-enabled", "hostapd"],
@@ -1300,6 +1492,7 @@ def _ap_bring_down() -> Tuple[bool, str]:
         #        无需 stop/start resolved，8-30 实测消除 D-Bus 竞态与 start-limit）
         _ap_del_portal_iptables()
         _write_had_clients(False)  # AP 关闭 → 重置客户端状态（断开事件检测基准）
+        _clear_ap_client_stuck()   # v0.3.1.58(F4)：AP 关闭 → 结束"带客户端持续开启"计时
         # 2) 清理 AP 静态 IP（不存在时 ip addr del 会返回非 0，忽略即可）
         subprocess.run(
             ["sudo", "-n", "ip", "addr", "del", f"{AP_STATIC_IP}/24", "dev", "wlan0"],
@@ -1422,6 +1615,7 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
         # v0.3.1.36：AP 异常退出残留场景 → 恢复 resolved + 清理 captive portal 规则（幂等）
         _ap_del_portal_iptables()
         _write_had_clients(False)
+        _clear_ap_client_stuck()  # v0.3.1.58(F4)：AP 异常退出残留清理 → 同步结束计时
         # 恢复 wlan0 管控（_ap_bring_up 曾 nmcli managed no 释放；幂等，NM 会重新接管）。
         # 无残留时也执行：覆盖 bring_up 中途崩溃导致 wlan0 保持 unmanaged 的残留态。
         r_nm = subprocess.run(
@@ -2188,6 +2382,9 @@ class WifiSmartSwitch:
                 capture_output=True, text=True, timeout=5,
             )
             if r.stdout.strip() != "active":
+                # v0.3.1.58(F4)：hostapd 不在运行（如被外部 kill）→ 结束"带客户端持续开启"计时，
+                # 避免标记残留导致 SystemMonitor 误报「AP 已持续开启」
+                _clear_ap_client_stuck()
                 return
             # R6：AP 起停进行中（可能 Web 正在操作）→ 跳过
             if _ap_transition_active():
@@ -2198,9 +2395,13 @@ class WifiSmartSwitch:
             _write_had_clients(has_clients)
             if has_clients:
                 # 有手机连着 AP → 不打断配置（2C：不记录 try，避免"断开后仍等满退避"）
+                # v0.3.1.58(F4)：记录「AP 带客户端持续开启」起始时间，
+                # 超 30min 由常驻 Web 进程的 SystemMonitor 推提醒（不踢客户端）
+                _note_ap_client_stuck()
                 self.log.info("AP 有客户端连接，跳过自愈探测（不打断配置）")
                 return
             if client_just_left:
+                _clear_ap_client_stuck()  # v0.3.1.58(F4)：客户端断开 → 结束计时
                 # 2A：客户端「有→无」断开事件 = 用户配置完成/放弃 → 立即让出回连
                 # （跳过宽限期/退避/冷却：bring_down 已含 NM restart+轮询确认 wlan0
                 #   connected，依赖 NM 自动连接已保存 WiFi，不调 _switch_to 免冷却干扰）
@@ -2220,6 +2421,7 @@ class WifiSmartSwitch:
                     _record_ap_try()
                 return
             # ── 常规路径（无客户端、非断开事件）：宽限期 → 冷却 → 退避 ──
+            _clear_ap_client_stuck()  # v0.3.1.58(F4)：无客户端 → 计时归零
             # R5/B1：AP 启动宽限期内不自愈让出（手动 3min / fallback 15min）
             if not _ap_grace_period_elapsed():
                 return

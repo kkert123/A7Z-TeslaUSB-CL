@@ -50,6 +50,11 @@ CRITICAL_SERVICES = [
 HEALTH_STATUS_FILE = "/opt/radxa_data/teslausb/data/health_status.json"
 LOG_FILE = "/var/log/teslausb-watchdog.log"
 
+# 外部重启请求（v0.3.1.57 / M80）：usb_guard 在 L1/L2 均无法恢复 USB 链路时写入，
+# 看门狗消费该文件并触发硬件复位。TTL 防陈旧文件在重启后被误消费 → 重启循环。
+REBOOT_REQUEST_FILE = "/opt/radxa_data/teslausb/data/usb_guard_reboot_request.json"
+REBOOT_REQUEST_TTL = 600  # 秒
+
 
 class HardwareWatchdog:
     """硬件看门狗监控器"""
@@ -351,6 +356,44 @@ class HardwareWatchdog:
         except Exception as e:
             logger.error("保存健康状态失败: %s", e)
 
+    def consume_reboot_request(self) -> Optional[str]:
+        """消费外部重启请求（v0.3.1.57 / M80，由 usb_guard 写入）。
+
+        返回原因字符串；无请求返回 None。
+
+        无论请求是否有效都会删除该文件 —— 避免陈旧请求在下次开机后被重复消费
+        造成重启循环。超过 TTL 的请求视为过期，只删除、不触发。
+        """
+        path = REBOOT_REQUEST_FILE
+        if not os.path.isfile(path):
+            return None
+
+        payload = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f) or {}
+        except (OSError, IOError, ValueError) as e:
+            logger.warning("重启请求文件不可解析(%s)，已忽略并删除", e)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        try:
+            req_at = float(payload.get("requested_at") or 0)
+        except (TypeError, ValueError):
+            req_at = 0
+        age = (time.time() - req_at) if req_at else (REBOOT_REQUEST_TTL + 1)
+        if age > REBOOT_REQUEST_TTL:
+            logger.warning("忽略过期的重启请求（age=%.0fs > %ds）", age, REBOOT_REQUEST_TTL)
+            return None
+
+        reason = str(payload.get("reason") or "外部重启请求")
+        logger.critical("收到外部重启请求（age=%.0fs）：%s | %s",
+                        age, reason, payload.get("detail") or "")
+        return reason
+
     def run_daemon(self, interval: int = 60) -> None:
         """
         以守护进程方式运行看门狗
@@ -391,6 +434,12 @@ class HardwareWatchdog:
                     # 喂狗（确保看门狗在健康检查前已被喂过）
                     if watchdog_active:
                         self.pet_watchdog()
+
+                    # v0.3.1.57 / M80：外部重启请求（usb_guard 层级恢复失败）优先处理。
+                    # 命中后不再喂狗 → 交由硬件看门狗超时复位。
+                    if self.consume_reboot_request():
+                        want_reboot = True
+                        continue
 
                     status = self.run_health_check()
 

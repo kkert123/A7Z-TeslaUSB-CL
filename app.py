@@ -125,7 +125,7 @@ if __name__ == '__main__':
             elif _ok is False:
                 app.logger.warning(f"启动自愈失败：{_msg}")
             else:
-                app.logger.info("启动自愈：无遗留 usb-gadget.service 需处理")
+                app.logger.info("启动自愈：无待处理项（遗留 gadget 单元 / USB 守护单元）")
         except Exception as _e:
             app.logger.warning(f"启动自愈异常（不影响主服务）: {_e}")
 
@@ -169,12 +169,23 @@ if __name__ == '__main__':
         except Exception:
             upgraded = None
         if upgraded and upgraded.get('version'):
-            notifier.send_text(get_push_template('upgrade_success').format(version=upgraded['version']))
+            _ver = upgraded['version']
+            # 模板可由用户在 /system 自定义，占位符写错不能让整条开机通知挂掉
             try:
-                _os.remove(marker_path)
-            except OSError:
-                pass
-            app.logger.info(f"升级成功通知已发送: v{upgraded['version']}")
+                _txt = get_push_template('upgrade_success').format(version=_ver)
+            except Exception:
+                _txt = f"系统升级成功 V{_ver}"
+            # M78: 仅在发送成功时删除标记。原实现无条件删除——若推送失败
+            # （网络/Webhook 抖动），本次升级文案会永久丢失，下次启动退化为
+            # 普通"开机启动"。失败时保留标记，下次启动自动重试。
+            if notifier.send_text(_txt):
+                try:
+                    _os.remove(marker_path)
+                except OSError:
+                    pass
+                app.logger.info(f"升级成功通知已发送: v{_ver}")
+            else:
+                app.logger.warning(f"升级成功通知发送失败，保留标记待下次启动重试: v{_ver}")
         else:
             notifier.send_text(get_push_template('boot'))
             app.logger.info("开机通知已发送")

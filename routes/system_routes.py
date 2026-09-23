@@ -456,6 +456,45 @@ def _write_sentry_json(cfg):
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
+# USB 链路守护配置（与 usb_guard.py DEFAULT_CFG / config/sentry.json 的 usb_guard 段保持一致）
+USB_GUARD_DEFAULTS = {
+    'enabled': True,
+    'poll_interval_seconds': 3,
+    'confirm_l1_seconds': 15,
+    'confirm_l2_seconds': 30,
+    'confirm_l3_seconds': 90,
+    'breaker_window_seconds': 1800,
+    'push_cooldown_seconds': 30,
+}
+USB_GUARD_RANGES = {
+    'poll_interval_seconds': (1, 60),
+    'confirm_l1_seconds': (5, 600),
+    'confirm_l2_seconds': (6, 900),
+    'confirm_l3_seconds': (7, 1800),
+    'breaker_window_seconds': (60, 86400),
+    'push_cooldown_seconds': (1, 3600),
+}
+
+
+def _merged_usb_guard(cfg):
+    """读取 usb_guard 段并与默认值合并（缺键补齐、越界收敛、阶梯单调、非法回落）。"""
+    sect = cfg.get('usb_guard') or {}
+    out = dict(USB_GUARD_DEFAULTS)
+    if isinstance(sect, dict):
+        if 'enabled' in sect:
+            out['enabled'] = bool(sect['enabled'])
+        for k, (lo, hi) in USB_GUARD_RANGES.items():
+            if k in sect:
+                try:
+                    out[k] = min(max(int(sect[k]), lo), hi)
+                except (TypeError, ValueError):
+                    pass
+    # 阶梯必须单调递增（与 usb_guard.py 运行时修正保持一致，避免"文件与实况不符"）
+    out['confirm_l2_seconds'] = max(out['confirm_l2_seconds'], out['confirm_l1_seconds'] + 1)
+    out['confirm_l3_seconds'] = max(out['confirm_l3_seconds'], out['confirm_l2_seconds'] + 1)
+    return out
+
+
 @system_bp.route('/api/system/push-config', methods=['GET'])
 def api_push_config_get():
     """推送与报警配置读取（M72：胎压阈值 + 推送模板）"""
@@ -469,6 +508,7 @@ def api_push_config_get():
             'tpms_alarm_threshold': get_tpms_threshold(),
             'templates': merged,
             'defaults': PUSH_TEMPLATE_DEFAULTS,
+            'usb_guard': _merged_usb_guard(cfg),
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -494,6 +534,12 @@ def api_push_config_post():
         clean_tpl = {str(k): str(v)[:500] for k, v in templates.items()
                      if str(k) in ('boot', 'upgrade_success', 'tpms_alert', 'tpms_recovered')}
         cfg['push_templates'] = clean_tpl
+        # USB 链路守护参数（usb_guard 段）；未提交则保持原值不动
+        ug = data.get('usb_guard')
+        if ug is not None:
+            if not isinstance(ug, dict):
+                return jsonify({'success': False, 'error': 'usb_guard 必须为对象'}), 400
+            cfg['usb_guard'] = _merged_usb_guard({'usb_guard': ug})
         _write_sentry_json(cfg)
         return jsonify({'success': True})
     except Exception as e:
