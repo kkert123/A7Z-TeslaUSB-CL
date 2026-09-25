@@ -392,6 +392,21 @@ def _pick_best_bssid(ssid: str) -> Optional[str]:
         return None
 
 
+def _ip_is_ap_subnet(addr: str) -> bool:
+    """判断地址是否落在 AP 静态网段（由 AP_STATIC_IP 前3段推导）。
+
+    用于排除「AP 已停但 wlan0 仍挂 AP 静态 IP」造成的假阳性 —— 该 IP 只说明 AP
+    接口残留地址，不代表已获得 station 侧可用地址（交叉审查 R2）。
+    """
+    if not addr:
+        return False
+    ip = addr.split("/")[0].strip()
+    parts = AP_STATIC_IP.split(".")
+    if len(parts) != 4 or len(ip.split(".")) != 4:
+        return False
+    return ".".join(ip.split(".")[:3]) == ".".join(parts[:3])
+
+
 def _wlan0_has_ip() -> bool:
     """探测 wlan0 是否已获得 IPv4 地址。
 
@@ -403,6 +418,11 @@ def _wlan0_has_ip() -> bool:
     交叉审查 P2-1：此前只跑 `ip` 一条命令，一旦它抛异常（超时/二进制缺失）就会被
     外层 except 吞掉 → 兜底静默失效。故改为多手段探测，nmcli 兜底
     （本模块处处依赖 nmcli，可用性最高）。
+
+    交叉审查 R2：两条探测分支**必须排除 AP 静态 IP（192.168.42.0/24）**——
+    AP 让出后 wlan0 可能仍挂着 AP 静态地址 192.168.42.1，若只看 "inet " 是否存在
+    会被误判为"已有可用 IP"，使 _restore_ap_after_failed_switch 跳过重开 AP → 设备失联。
+    仅当存在**非 AP 子网**的 IPv4 地址才返回 True。
     """
     try:
         r = subprocess.run(
@@ -410,7 +430,15 @@ def _wlan0_has_ip() -> bool:
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0:
-            return "inet " in (r.stdout or "")
+            # R2：逐行解析 `inet <addr>/<len>`，只认非 AP 子网地址
+            for line in (r.stdout or "").splitlines():
+                if "inet " in line:
+                    toks = line.split()
+                    for i, tok in enumerate(toks):
+                        if tok == "inet" and i + 1 < len(toks):
+                            addr = toks[i + 1]
+                            if not _ip_is_ap_subnet(addr):
+                                return True
     except Exception:
         pass
     try:
@@ -419,9 +447,13 @@ def _wlan0_has_ip() -> bool:
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0:
-            # 形如 "IP4.ADDRESS[1]:192.168.1.5/24"；无地址时该值为空
-            return any("IP4.ADDRESS" in l and "/" in l
-                       for l in (r.stdout or "").splitlines())
+            # R2：形如 "IP4.ADDRESS[1]:192.168.1.5/24"；取 ":" 后、"/" 前地址，
+            # 只认非 AP 子网地址
+            for l in (r.stdout or "").splitlines():
+                if "IP4.ADDRESS" in l and "/" in l:
+                    addr = l.split(":", 1)[-1].split("/")[0].strip()
+                    if addr and not _ip_is_ap_subnet(addr):
+                        return True
     except Exception:
         pass
     return False
@@ -458,22 +490,44 @@ def _restore_ap_after_failed_switch() -> None:
         logging.getLogger(__name__).error("兜底重开 AP 失败: %s", e)
 
 
-def _ap_settle_after_down(max_wait: int = 30, interval: int = 3) -> None:
+def _ap_settle_after_down(max_wait: int = 30, interval: int = 3, target_ssid: str = "") -> None:
     """AP 让出后等待 wlan0 完成 AP→station 沉降（AIC8800 单射频需 10-30s）。
 
     对齐 _ap_self_heal 的轮询式等待（v0.3.1.39 修复，'AIC8800 从 AP 切回 station 后
     扫描需 10-30s'）。不加等待直接 _pick_best_bssid / 连接，新 SSID 常因扫描为空而报
     「找不到网络」（交叉审查 P1-2）。
-    先 rescan，随后轮询 `nmcli dev wifi list`，拿到非空结果即提前返回。
-    注意 `nmcli dev wifi list` 可能先返回切模式前的旧缓存（非空）→ 提前返回属预期，
-    旧 SSID 是真实存在过的网络，后续连接会实际验证。
 
-    交叉审查 P2-3：原实现用 `waited += interval` 计数，**没有计入子进程自身耗时**，
-    最坏情况（扫描持续失败）实际约 15+10×(3+10)=145s，远超 docstring 声称的 30s，
-    会让前端点击后卡住两分多钟。改为 **wall-clock 截止**：总耗时严格受 max_wait 约束，
-    且 rescan / list 的超时也各自按剩余时间收敛。
+    缺陷修复（交叉审查 R1）：原实现轮询里「只要 nmcli dev wifi list 非空即返回」，而
+    list 常先吐切模式前的**旧缓存（非空）** → 函数几乎立即返回 → 沉降窗口形同虚设。
+    改为「目标出现 或 达到最小沉降下限」二选一才返回：
+        (a) 目标 ssid 已出现在当前列表中 → 立即返回（最强信号，说明扫描已刷新）；
+        (b) 距进入函数已过的 wall-clock 时间达到最小沉降下限 min_settle=8s
+            → 返回（目标始终扫不到时不必白等满 max_wait；连接本身还会再扫）。
+    刻意**不**采用「列表与基线不同即提前返回」：rescan 常因邻频 SSID 抖动导致集合
+    微变，会在射频尚未沉降时误判「已刷新」→ 重蹈 R1 的早返回覆辙。故以固定下限兜底，
+    宁可多等数秒，也不给「新 SSID 首连失败」留窗口。
+
+    交叉审查 P2-3：wall-clock 截止确保总耗时严格受 max_wait 约束，rescan/list 超时
+    各自按剩余时间收敛。
     """
+    min_settle = 8
     deadline = time.monotonic() + max_wait
+    started = time.monotonic()
+
+    def _list_ssids():
+        """返回当前可见 SSID 列表；失败返回 None（与「空列表」区分）。"""
+        try:
+            r = subprocess.run(
+                ["nmcli", "-t", "-f", "SSID", "dev", "wifi", "list"],
+                capture_output=True, text=True,
+                timeout=max(1, min(10, int(deadline - time.monotonic()))),
+            )
+            if r.returncode == 0:
+                return [l.strip() for l in (r.stdout or "").splitlines() if l.strip()]
+        except Exception:
+            return None
+        return None
+
     try:
         remain = deadline - time.monotonic()
         subprocess.run(["nmcli", "dev", "wifi", "rescan"],
@@ -486,18 +540,12 @@ def _ap_settle_after_down(max_wait: int = 30, interval: int = 3) -> None:
         if remain <= 0:
             return
         time.sleep(min(interval, remain))
-        remain = deadline - time.monotonic()
-        if remain <= 0:
+        cur = _list_ssids()
+        if cur is None:
             return
-        try:
-            r = subprocess.run(
-                ["nmcli", "-t", "-f", "SSID", "dev", "wifi", "list"],
-                capture_output=True, text=True,
-                timeout=max(1, min(10, int(remain))),
-            )
-            if r.returncode == 0 and any(l.strip() for l in r.stdout.splitlines()):
-                return
-        except Exception:
+        if target_ssid and target_ssid in cur:
+            return
+        if time.monotonic() - started >= min_settle:
             return
 
 
@@ -541,7 +589,7 @@ def switch_wifi(ssid: str, password: str = "", prefer_5ghz: bool = True) -> dict
                 _save_wifi_status(status)
                 return status
             # P1-2：等 wlan0 完成 AP→station 沉降，否则随后的扫描/连接会误报「找不到网络」
-            _ap_settle_after_down()
+            _ap_settle_after_down(target_ssid=ssid)
     except Exception as _ap_e:
         # AP 探测/让出异常不阻断切换（fail-open），但记录日志以免静默
         logging.getLogger(__name__).warning("AP 前置让出异常（忽略，继续切换）: %s", _ap_e)

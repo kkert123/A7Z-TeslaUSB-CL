@@ -929,6 +929,9 @@ def _disable_legacy_gadget_service(new_dir: str = ""):
 GUARD_SVC = "teslausb-usb-guard.service"
 GUARD_SVC_DST = "/etc/systemd/system/" + GUARD_SVC
 
+KLOG_SVC = "teslausb-kernel-log.service"
+KLOG_SVC_DST = "/etc/systemd/system/" + KLOG_SVC
+
 
 def _ensure_usb_guard_service():
     """启动期幂等自愈（v0.3.1.57 / M80）——确保 USB 链路守护单元已安装并运行。
@@ -1012,6 +1015,78 @@ def _ensure_usb_guard_service():
         return False, f"确保 {GUARD_SVC} 异常: {e}"
 
 
+def _ensure_kernel_log_service():
+    """启动期幂等自愈（v0.3.1.58）——确保持久化内核日志采集单元已安装并运行。
+
+    背景：设备 journald 归档曾出现"整份 system journal 缺失"（9-23 触碰测试那次
+    boot 内核行=0），关键取证窗口不可复原。为绕开 journald 不确定性，新增
+    kernel_log_capture.py 直读 /dev/kmsg 落盘到 data/kernel_live.log（SD 卡持久）。
+
+    单元与 usb-guard 同样是"无主资产"，必须随包分发 + 常驻服务幂等自愈（M45/M75）：
+    deploy_manager 的 MANAGED_FILES 只做上传白名单，不做 enable/daemon-reload，
+    真正安装/启用靠本钩子。
+
+    步骤（全部幂等，重复调用无副作用）：
+      1) services/teslausb-kernel-log.service → /etc/systemd/system/（缺失或内容不一致时）
+      2) systemctl daemon-reload
+      3) systemctl enable（未启用时）+ start/restart（未运行或已在运行时刷新代码）
+
+    采集器是被动日志进程，restart 无副作用（不像 usb-guard 故障期需避让），
+    故运行中一律 restart 以刷上本次升级的新代码（M75 同源）。
+
+    返回 (ok, msg)：True 已处理 / None 无需处理 / False 失败（警告不阻断）。
+    """
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "services", KLOG_SVC)
+    if not os.path.isfile(src):
+        return False, f"单元源文件缺失: {src}"
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            want = f.read()
+
+        have = ""
+        if os.path.isfile(KLOG_SVC_DST):
+            try:
+                with open(KLOG_SVC_DST, "r", encoding="utf-8") as f:
+                    have = f.read()
+            except OSError:
+                have = ""
+
+        changed = (have != want)
+        if changed:
+            tmp = "/tmp/" + KLOG_SVC
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(want)
+            os.chmod(tmp, 0o644)
+            rc, _o, err = _run(["cp", "-f", tmp, KLOG_SVC_DST], timeout=30)
+            if rc != 0:
+                return False, f"安装 {KLOG_SVC} 失败: {err}"
+            _run(["systemctl", "daemon-reload"], timeout=30)
+
+        rc, out, _e = _run(["systemctl", "is-enabled", KLOG_SVC], timeout=15)
+        enabled = (out or "").strip().startswith("enabled")
+        if not enabled:
+            _run(["systemctl", "enable", KLOG_SVC], timeout=30)
+
+        rc, out, _e = _run(["systemctl", "is-active", KLOG_SVC], timeout=15)
+        active = (out or "").strip() == "active"
+        restarted = False
+        if active:
+            _run(["systemctl", "restart", KLOG_SVC], timeout=30)
+            restarted = True
+        else:
+            _run(["systemctl", "start", KLOG_SVC], timeout=30)
+            rc, out, _e = _run(["systemctl", "is-active", KLOG_SVC], timeout=15)
+            active = (out or "").strip() == "active"
+
+        if changed or not enabled or not active or restarted:
+            return True, (f"{KLOG_SVC} 已安装并拉起"
+                          f"（changed={changed} enabled={enabled} active={active} "
+                          f"restarted={restarted}）")
+        return None, ""
+    except Exception as e:
+        return False, f"确保 {KLOG_SVC} 异常: {e}"
+
+
 def startup_self_heal():
     """启动期幂等自愈（v0.3.1.56 / M75）——供 app.py 开机调用，补齐钩子自举缺口。
 
@@ -1022,11 +1097,15 @@ def startup_self_heal():
     v0.3.1.57 / M80 起同时负责安装并拉起 teslausb-usb-guard.service（同理：新服务的
     systemd 单元不能依赖升级后置钩子自举）。
 
+    v0.3.1.58 起再增 teslausb-kernel-log.service（持久化内核日志采集，绕开 journald
+    归档缺失盲区），同样靠本启动期钩子安装并拉起。
+
     幂等、best-effort；返回 (ok, msg)：
       True 有项目被处理 / None 全部无需处理 / False 有项目失败（调用方警告不阻断）。
     """
     done, failed = [], []
-    for fn in (_disable_legacy_gadget_service, _ensure_usb_guard_service):
+    for fn in (_disable_legacy_gadget_service, _ensure_usb_guard_service,
+               _ensure_kernel_log_service):
         try:
             ok, msg = fn()
         except Exception as e:

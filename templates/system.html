@@ -272,7 +272,8 @@
     <div style="font-size:0.78rem;color:var(--text-muted);margin:16px 0 6px" data-page-node-id="UgHdrWrapTitle01">USB 链路守护（线在位但车机识别不到 U 盘时自动恢复）</div>
     <div style="font-size:0.68rem;color:var(--text-muted);margin-bottom:8px" data-page-node-id="UgHdrWrapHint01">
       判据：线在位（VBUS online）且 UDC state ≠ configured。拔线时不动作；L1（轻量重绑）无损，
-      不消耗熔断预算、可反复执行；熔断仅由 L2/L3 这类重动作武装，窗口内只记录不动作。
+      不消耗熔断预算、可反复执行；熔断仅由 L2/L2.5/L3 这类重动作武装，窗口内只记录不动作。
+      L2.5（平台重绑，默认关闭）对 12.usbc2 做 unbind/bind，软件等价物理插拔，需手动启用。
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 14px;font-size:0.72rem" data-page-node-id="UgGridBlock001">
       <label style="display:flex;align-items:center;gap:6px" data-page-node-id="UgLabelEnable00">
@@ -293,6 +294,10 @@
       <label data-page-node-id="UgLabelL2000000">L2 完整重启（秒）
         <input type="number" id="ug-l2" min="6" max="900" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL2000000">
       </label>
+      <label data-page-node-id="UgLabelL2500000">L2.5 平台重绑（秒）
+        <input type="number" id="ug-l25" min="7" max="1500" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL2500000">
+      </label>
+      <label style="display:flex;align-items:center;gap:6px" data-page-node-id="UgLabelRebind00"><input type="checkbox" id="ug-allow-rebind" data-page-node-id="UgInputRebind00"> 启用 L2.5 平台重绑（高级）</label>
       <label data-page-node-id="UgLabelL3000000">L3 请求复位（秒）
         <input type="number" id="ug-l3" min="7" max="1800" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL3000000">
       </label>
@@ -955,18 +960,22 @@ function applyUsbGuardCfg(ug) {
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
   const chk = document.getElementById('ug-enabled');
   if (chk) chk.checked = (ug.enabled !== false);
+  const rebindChk = document.getElementById('ug-allow-rebind');
+  if (rebindChk) rebindChk.checked = (ug.allow_platform_rebind === true);
   set('ug-poll', ug.poll_interval_seconds != null ? ug.poll_interval_seconds : 3);
   set('ug-cooldown', ug.push_cooldown_seconds != null ? ug.push_cooldown_seconds : 30);
   set('ug-breaker', Math.round((ug.breaker_window_seconds != null ? ug.breaker_window_seconds : 1800) / 60));
   set('ug-l1', ug.confirm_l1_seconds != null ? ug.confirm_l1_seconds : 15);
   set('ug-l2', ug.confirm_l2_seconds != null ? ug.confirm_l2_seconds : 30);
-  set('ug-l3', ug.confirm_l3_seconds != null ? ug.confirm_l3_seconds : 90);
+  set('ug-l25', ug.confirm_l25_seconds != null ? ug.confirm_l25_seconds : 60);
+  set('ug-l3', ug.confirm_l3_seconds != null ? ug.confirm_l3_seconds : 150);
   const sm = document.getElementById('ug-summary');
   if (sm) {
     sm.textContent = (ug.enabled !== false ? '已启用' : '已停用') +
       ' · L1/' + (ug.confirm_l1_seconds != null ? ug.confirm_l1_seconds : 15) + 's' +
       ' → L2/' + (ug.confirm_l2_seconds != null ? ug.confirm_l2_seconds : 30) + 's' +
-      ' → L3/' + (ug.confirm_l3_seconds != null ? ug.confirm_l3_seconds : 90) + 's' +
+      ' → L2.5/' + (ug.confirm_l25_seconds != null ? ug.confirm_l25_seconds : 60) + 's' +
+      ' → L3/' + (ug.confirm_l3_seconds != null ? ug.confirm_l3_seconds : 150) + 's' +
       ' · 熔断 ' + Math.round((ug.breaker_window_seconds != null ? ug.breaker_window_seconds : 1800) / 60) + 'min' +
       ' · 冷却 ' + (ug.push_cooldown_seconds != null ? ug.push_cooldown_seconds : 30) + 's';
   }
@@ -980,14 +989,17 @@ function collectUsbGuardCfg() {
     return Math.min(Math.max(v, lo), hi);
   };
   const chk = document.getElementById('ug-enabled');
+  const rebindChk = document.getElementById('ug-allow-rebind');
   return {
     enabled: chk ? !!chk.checked : true,
+    allow_platform_rebind: rebindChk ? !!rebindChk.checked : false,
     poll_interval_seconds: num('ug-poll', 3, 1, 60),
     push_cooldown_seconds: num('ug-cooldown', 30, 1, 3600),
     breaker_window_seconds: num('ug-breaker', 30, 1, 1440) * 60,
     confirm_l1_seconds: num('ug-l1', 15, 5, 600),
     confirm_l2_seconds: num('ug-l2', 30, 6, 900),
-    confirm_l3_seconds: num('ug-l3', 90, 7, 1800)
+    confirm_l25_seconds: num('ug-l25', 60, 7, 1500),
+    confirm_l3_seconds: num('ug-l3', 150, 7, 1800)
   };
 }
 

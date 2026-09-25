@@ -1,0 +1,21 @@
+[Unit]
+Description=TeslaUSB A7Z Persistent Kernel Log Capture
+Documentation=https://github.com/kkert123/A7Z-TeslaUSB-CL
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/radxa_data/teslausb
+# -u 关闭 stdout 缓冲，保证 journal 实时可见（排障关键）
+ExecStart=/usr/bin/python3 -u /opt/radxa_data/teslausb/kernel_log_capture.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

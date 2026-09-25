@@ -38,7 +38,7 @@ usb_guard.py — USB Gadget 链路守护（独立常驻服务）
               （2026-09-20 离线回放实证：L1 若也计数，同窗口第二次故障被完全剥夺）；
            ② 上限为 3 而非 1——连续两次故障都应被救；真正的重启环（一夜数百次）
               仍会被卡住（2026-09-20 回放场景A 实证：上限 1 会让第二次故障零动作）
-3. 同故障期内 L1/L2/L3 各最多一次，恢复即清零（只升不重来）
+3. 同故障期内 L1/L2/L2.5/L3 各最多一次，恢复即清零（只升不重来）
 4. 所有 gadget 写操作在 /var/run/usb_gadget_init.lock 全局锁内（M74 防抢绑）
 5. DRY-RUN: 环境变量 USB_GUARD_DRY_RUN=1 时只判定不动作
 
@@ -46,6 +46,7 @@ usb_guard.py — USB Gadget 链路守护（独立常驻服务）
 --------------------------
     t >= confirm_l1 → L1 soft_connect 循环（不可用则 UDC 重绑回原控制器）
     t >= confirm_l2 → L2 usb_gadget_init.sh restart（完整兜底）
+    t >= confirm_l25 → L2.5 平台驱动重绑（unbind/bind 12.usbc2，软件等价物理插拔）
     t >= confirm_l3 → L3 告警 + 写重启请求 → 硬件看门狗复位 A7Z
 
 回滚
@@ -79,6 +80,15 @@ UDC_CLASS_DIR = "/sys/class/udc"
 GADGET_INIT_SCRIPT = "/opt/radxa_data/usb_gadget_init.sh"
 LOCK_FILE = "/var/run/usb_gadget_init.lock"
 
+# L2.5 平台驱动重绑：故障实证（9-12 journal）显示 xhci-hcd remove / USB bus deregistered
+# 发生在 12.usbc2（USB2 复合体）父设备层，gadget UDC 是其子设备。
+# 对父设备做 unbind/bind = 触发驱动 remove()→probe() = 整条 USB2 复合体全量重探，
+# 是"软件等价物理插拔"，且不必整机复位。
+DWC3_PLATFORM_DRIVER = "/sys/bus/platform/drivers/sunxi-plat-dwc3"
+DWC3_PLATFORM_DEVICE = "12.usbc2"
+PLATFORM_REBIND_SETTLE = 2   # unbind → bind 之间的间隔（秒）
+PLATFORM_REBIND_WAIT = 12    # bind 后等设备树重建的最长等待（秒）
+
 # 线在位判据：ET7304 (i2c 14-004e) 的 TCPM 电源节点。
 # online=1/voltage=5000000 表示车机侧 VBUS 在位；online=0/voltage=0 表示线离位。
 PSU_DIR = "/sys/class/power_supply/tcpm-source-psy-14-004e"
@@ -99,7 +109,9 @@ DEFAULT_CFG = {
     "poll_interval_seconds": 3,
     "confirm_l1_seconds": 15,
     "confirm_l2_seconds": 30,
-    "confirm_l3_seconds": 90,
+    "confirm_l25_seconds": 60,
+    "confirm_l3_seconds": 150,
+    "allow_platform_rebind": False,
     "breaker_window_seconds": 1800,
     "push_cooldown_seconds": 30,
 }
@@ -108,6 +120,7 @@ CFG_RANGES = {
     "poll_interval_seconds": (1, 60),
     "confirm_l1_seconds": (5, 600),
     "confirm_l2_seconds": (6, 900),
+    "confirm_l25_seconds": (7, 1500),
     "confirm_l3_seconds": (7, 1800),
     "breaker_window_seconds": (60, 86400),
     "push_cooldown_seconds": (1, 3600),
@@ -115,7 +128,7 @@ CFG_RANGES = {
 CFG_RELOAD_INTERVAL = 60  # 秒，定期重读配置，UI 改动免重启生效
 
 # 重动作阶梯集合：只有这些计入熔断（L1 无损，不计数）。
-HEAVY_STAGES = ("L2", "L3")
+HEAVY_STAGES = ("L2", "L2.5", "L3")
 # 熔断上限：breaker_window 内允许的重动作次数，超过才静默。
 # 取 3 而非 1 —— 连续两次故障都应被救；真正的重启环（一夜数百次）仍被卡住。
 MAX_HEAVY_ACTIONS_PER_WINDOW = 3
@@ -158,7 +171,8 @@ def _load_cfg() -> dict:
     # 阶梯必须单调递增，否则修正（防 UI 填错导致 L2 早于 L1）
     l1 = cfg["confirm_l1_seconds"]
     cfg["confirm_l2_seconds"] = max(cfg["confirm_l2_seconds"], l1 + 1)
-    cfg["confirm_l3_seconds"] = max(cfg["confirm_l3_seconds"], cfg["confirm_l2_seconds"] + 1)
+    cfg["confirm_l25_seconds"] = max(cfg["confirm_l25_seconds"], cfg["confirm_l2_seconds"] + 1)
+    cfg["confirm_l3_seconds"] = max(cfg["confirm_l3_seconds"], cfg["confirm_l25_seconds"] + 1)
     return cfg
 
 
@@ -312,6 +326,35 @@ def _run_l2_restart() -> tuple:
         return False, "restart 异常: %s" % e
 
 
+def _op_l25_platform_rebind() -> tuple:
+    """L2.5 处置：对 12.usbc2 平台设备 unbind/bind，迫使整条 USB2 复合体重探。
+    调用方须已持有全局锁。返回 (成功, 说明)。"""
+    unbind = os.path.join(DWC3_PLATFORM_DRIVER, "unbind")
+    bind = os.path.join(DWC3_PLATFORM_DRIVER, "bind")
+    if not (os.path.exists(unbind) and os.path.exists(bind)):
+        return False, "平台驱动 bind/unbind 节点不存在: %s" % DWC3_PLATFORM_DRIVER
+    dev_dir = "/sys/bus/platform/devices/" + DWC3_PLATFORM_DEVICE
+    try:
+        with open(unbind, "w") as f:
+            f.write(DWC3_PLATFORM_DEVICE)
+        time.sleep(PLATFORM_REBIND_SETTLE)
+        with open(bind, "w") as f:
+            f.write(DWC3_PLATFORM_DEVICE)
+    except (OSError, IOError) as e:
+        return False, "平台 unbind/bind 异常: %s" % e
+    # 等设备树重建 + configfs 重新绑回 UDC
+    deadline = time.monotonic() + PLATFORM_REBIND_WAIT
+    while time.monotonic() < deadline:
+        if os.path.isdir(dev_dir) and _read_text(UDC_FILE):
+            break
+        time.sleep(1)
+    if not os.path.isdir(dev_dir):
+        return False, "平台设备 %s 未回来（bind 失败）" % DWC3_PLATFORM_DEVICE
+    if not _read_text(UDC_FILE):
+        return False, "平台设备已回来但 UDC 未重新绑定"
+    return True, "平台重绑 %s 完成" % DWC3_PLATFORM_DEVICE
+
+
 def _write_json_atomic(path: str, payload: dict) -> bool:
     """原子写 JSON（tmp + os.replace），避免看门狗读到半截文件。"""
     tmp = path + ".tmp"
@@ -336,7 +379,7 @@ class UsbGuard(object):
         self.cfg = cfg
         self.cfg_loaded_at = time.time()
         self.fault_since = None       # 本次故障期起点（None = 无故障）
-        self.stages_done = set()      # 本故障期已执行的阶梯 {L1,L2,L3}
+        self.stages_done = set()      # 本故障期已执行的阶梯 {L1,L2,L2.5,L3}
         self.heavy_action_times = []  # 窗口内重动作时刻列表（L2/L3；L1 不计数）
         self.last_push_at = 0.0       # 上次告警推送时刻（冷却用）
         self.last_state = ""          # 上一轮 state，用于变化日志
@@ -399,8 +442,33 @@ class UsbGuard(object):
         logger.warning("L2 结果：%s — %s", "成功" if ok else "失败", note)
         return True
 
+    def _do_l25(self, snap: dict) -> bool:
+        logger.warning("L2.5 触发：平台驱动重绑（%s / %s）", DWC3_PLATFORM_DEVICE, DWC3_PLATFORM_DRIVER)
+        if not self.cfg.get("allow_platform_rebind", False):
+            logger.warning("L2.5 未启用（allow_platform_rebind=false）—— 跳过真动作，继续交由 L3 兜底")
+            return True
+        if DRY_RUN:
+            logger.info("[DRY-RUN] 本应执行 L2.5：unbind/bind %s + 重跑 gadget init", DWC3_PLATFORM_DEVICE)
+            return True
+        res = _with_gadget_lock(_op_l25_platform_rebind)
+        if res is None:
+            logger.warning("L2.5 未取得全局锁（另有实例在操作），本轮让行、下轮重试")
+            return False
+        ok, note = res
+        logger.warning("L2.5 平台重绑结果：%s — %s", "成功" if ok else "失败", note)
+        if not ok:
+            # bind 失败 = USB2 复合体可能已消失，不能干等 L3 阈值，立即走整机复位
+            logger.critical("L2.5 失败：平台设备未恢复，立即请求整机复位（不等 L3 阈值）")
+            self._do_l3(snap)
+            self.stages_done.add("L3")
+            return True
+        # 平台回来了 → 重跑 gadget init 重新绑定 configfs（不持锁：脚本自带 flock）
+        ok2, note2 = _run_l2_restart()
+        logger.warning("L2.5 后重绑 gadget：%s — %s", "成功" if ok2 else "失败", note2)
+        return True
+
     def _do_l3(self, snap: dict) -> bool:
-        logger.critical("L3 触发：L1/L2 均未恢复链路，请求看门狗硬件复位 A7Z")
+        logger.critical("L3 触发：L1/L2/L2.5 均未恢复链路，请求看门狗硬件复位 A7Z")
         detail = "udc=%s state=%s online=%s voltage=%s" % (
             snap["udc"] or "(无)", snap["state"] or "(空)",
             snap["online"] or "(无)", snap["voltage"] or "(无)")
@@ -410,16 +478,17 @@ class UsbGuard(object):
         wrote = _write_json_atomic(REBOOT_REQUEST_FILE, {
             "requested_at": time.time(),
             "requested_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "reason": "usb_guard: 线在位但 UDC 链路持续未 configured，L1/L2 无效",
+            "reason": "usb_guard: 线在位但 UDC 链路持续未 configured，L1/L2/L2.5 无效",
             "detail": detail,
         })
         if not wrote:
             logger.error("重启请求写入失败，本轮不计入、下轮重试")
             return False
+        _tried = ",".join(sorted(self.stages_done)) or "无"
         self._push(
             "【TeslaUSB】USB 存储链路卡死且软件层恢复无效，已请求重启设备。\n"
             "现象：线在位但车机识别不到 U 盘（%s）。\n"
-            "已尝试：UDC 重绑 → gadget restart，均未恢复。" % detail)
+            "已尝试阶梯：%s，均未恢复。" % (detail, _tried))
         return True
 
     # ── 故障期管理 ──
@@ -475,11 +544,11 @@ class UsbGuard(object):
             else:
                 logger.warning(
                     "检测到故障：线在位(online=%s) 但 UDC state=%s（udc=%s, gadget_ok=%s），"
-                    "进入确认期（L1@%ds / L2@%ds / L3@%ds）",
+                    "进入确认期（L1@%ds / L2@%ds / L2.5@%ds / L3@%ds）",
                     snap["online"] or "(无)", snap["state"] or "(空)",
                     snap["udc"] or "(未绑定)", snap["gadget_ok"],
                     self.cfg["confirm_l1_seconds"], self.cfg["confirm_l2_seconds"],
-                    self.cfg["confirm_l3_seconds"])
+                    self.cfg["confirm_l25_seconds"], self.cfg["confirm_l3_seconds"])
 
         elapsed = now - self.fault_since
         self._write_status(snap, "fault", elapsed)
@@ -491,6 +560,7 @@ class UsbGuard(object):
         ladder = (
             ("L1", self.cfg["confirm_l1_seconds"], self._do_l1),
             ("L2", self.cfg["confirm_l2_seconds"], self._do_l2),
+            ("L2.5", self.cfg["confirm_l25_seconds"], self._do_l25),
             ("L3", self.cfg["confirm_l3_seconds"], self._do_l3),
         )
         for name, threshold, action in ladder:
@@ -528,6 +598,7 @@ class UsbGuard(object):
             "heavy_actions_in_window": len(self.heavy_action_times),
             "max_heavy_actions_per_window": MAX_HEAVY_ACTIONS_PER_WINDOW,
             "dry_run": DRY_RUN,
+            "allow_platform_rebind": bool(self.cfg.get("allow_platform_rebind", False)),
         })
 
     def run_forever(self) -> None:

@@ -21,7 +21,9 @@
     "poll_interval_seconds": 3,
     "confirm_l1_seconds": 15,
     "confirm_l2_seconds": 30,
-    "confirm_l3_seconds": 90,
+    "confirm_l25_seconds": 60,
+    "confirm_l3_seconds": 150,
+    "allow_platform_rebind": false,
     "breaker_window_seconds": 1800,
     "push_cooldown_seconds": 30
   }

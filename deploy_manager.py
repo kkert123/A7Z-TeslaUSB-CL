@@ -184,6 +184,9 @@ class Config:
         # 判据 = 线在位(online) + UDC state == configured；含拔线闸/熔断/五步阶梯
         "usb_guard.py",
         "services/teslausb-usb-guard.service",
+        # 持久化内核日志捕获（2026-09-25）：直采 /dev/kmsg，绕开 journald 的 kernel transport 盲区
+        "kernel_log_capture.py",
+        "services/teslausb-kernel-log.service",
         # requirements (2026-07-26 v0.3.0 — 升级包必须包含，否则新 venv 无依赖)
         "requirements.txt",
         # boombox + lightshow + wrap + license_plate (2026-07-26 — app_helpers.py 依赖)

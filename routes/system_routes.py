@@ -462,7 +462,9 @@ USB_GUARD_DEFAULTS = {
     'poll_interval_seconds': 3,
     'confirm_l1_seconds': 15,
     'confirm_l2_seconds': 30,
-    'confirm_l3_seconds': 90,
+    'confirm_l25_seconds': 60,
+    'confirm_l3_seconds': 150,
+    'allow_platform_rebind': False,
     'breaker_window_seconds': 1800,
     'push_cooldown_seconds': 30,
 }
@@ -470,6 +472,7 @@ USB_GUARD_RANGES = {
     'poll_interval_seconds': (1, 60),
     'confirm_l1_seconds': (5, 600),
     'confirm_l2_seconds': (6, 900),
+    'confirm_l25_seconds': (7, 1500),
     'confirm_l3_seconds': (7, 1800),
     'breaker_window_seconds': (60, 86400),
     'push_cooldown_seconds': (1, 3600),
@@ -481,8 +484,9 @@ def _merged_usb_guard(cfg):
     sect = cfg.get('usb_guard') or {}
     out = dict(USB_GUARD_DEFAULTS)
     if isinstance(sect, dict):
-        if 'enabled' in sect:
-            out['enabled'] = bool(sect['enabled'])
+        for bk in ('enabled', 'allow_platform_rebind'):
+            if bk in sect:
+                out[bk] = bool(sect[bk])
         for k, (lo, hi) in USB_GUARD_RANGES.items():
             if k in sect:
                 try:
@@ -491,7 +495,8 @@ def _merged_usb_guard(cfg):
                     pass
     # 阶梯必须单调递增（与 usb_guard.py 运行时修正保持一致，避免"文件与实况不符"）
     out['confirm_l2_seconds'] = max(out['confirm_l2_seconds'], out['confirm_l1_seconds'] + 1)
-    out['confirm_l3_seconds'] = max(out['confirm_l3_seconds'], out['confirm_l2_seconds'] + 1)
+    out['confirm_l25_seconds'] = max(out['confirm_l25_seconds'], out['confirm_l2_seconds'] + 1)
+    out['confirm_l3_seconds'] = max(out['confirm_l3_seconds'], out['confirm_l25_seconds'] + 1)
     return out
 
 
