@@ -60,3 +60,7 @@ _ssh_*.py
 _sync_*.py
 _*.sh
 _*.ps1
+.github-pat
+
+# Signing private key — NEVER commit (Ed25519 upgrade signing key)
+upgrade_key
