@@ -37,7 +37,8 @@ logging.basicConfig(
 logger = logging.getLogger('preview_generator')
 
 # 常量
-BASE_CAM_PATH = Path('/media/cnlvan/cam/TeslaCam')
+from config import PARTITIONS
+BASE_CAM_PATH = Path(PARTITIONS["cam"]) / "TeslaCam"
 QUEUE_FILE = Path('/opt/teslausb-web/data/preview_queue.json')
 THUMB_DIR = Path('/opt/teslausb-web/static/thumbnails')
 PREVIEW_DIR = Path('/opt/teslausb-web/data/previews')

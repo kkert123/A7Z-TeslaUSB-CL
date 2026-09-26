@@ -190,39 +190,47 @@ def strip_emulation_prevention_bytes(data: bytes) -> bytes:
 
 def extract_proto_payload(nal: bytes) -> Optional[bytes]:
     """Extract protobuf payload from SEI NAL unit (H.264 and H.265).
-    
-    For H.265/HEVC: SEI message with payloadType=5 (user_data_unregistered)
-    contains Tesla UUID followed by protobuf data.
-    Tesla UUID: f69665f7-1162-4a27-a4bb-2e0a143c5885
+
+    Three strategies, tried in order:
+    1. HEVC: search for Tesla UUID (f69665f7-1162-4a27-a4bb-2e0a143c5885)
+    2. H.264: skip NAL header + payloadType, skip 0x42 fillers, find 0x69 marker
+    3. Raw: search entire cleaned NAL for plausible protobuf data
     """
     if not isinstance(nal, bytes) or len(nal) < 20:
         return None
 
-    # Try HEVC SEI message parsing first (NAL header is 2 bytes in HEVC)
     uuid_bytes = bytes.fromhex('f69665f711624a27a4bb2e0a143c5885')
-    
-    # Strip emulation prevention first
     clean = strip_emulation_prevention_bytes(nal)
-    
-    # Search for Tesla UUID in the SEI payload
+
+    # Strategy 1: HEVC — search for Tesla UUID
     uuid_pos = clean.find(uuid_bytes)
     if uuid_pos >= 0:
-        # Protobuf data starts after UUID (16 bytes)
         proto_start = uuid_pos + 16
         if proto_start < len(clean):
             return clean[proto_start:]
-    
-    # Fallback: old H.264 magic byte search
-    for i in range(2, len(nal) - 1):
-        byte = nal[i]
-        if byte == 0x42:
-            continue
-        if byte == 0x69:
-            if i > 2:
-                return strip_emulation_prevention_bytes(nal[i + 1:-1])
-            break
-        break
-    
+
+    # Strategy 2: H.264 — skip variable-length header, then 0x42 fillers → 0x69
+    # NAL structure: [header(1)] [payloadType(1)] [payloadSize(variable)] [0x42...] [0x69] [proto] [0x80]
+    # The payloadSize uses H.264 SEI variable-length encoding (MSB=1 means more bytes)
+    i = 2  # skip NAL header byte + payloadType byte
+    if i < len(nal):
+        # Skip payloadSize (variable-length encoding: MSB=1 → next byte is continuation)
+        while i < len(nal) and (nal[i] & 0x80) and i < 8:
+            i += 1
+        if i < len(nal):
+            i += 1  # skip last payloadSize byte (MSB=0)
+    # Skip 0x42 filler bytes
+    while i < len(nal) - 1 and nal[i] == 0x42:
+        i += 1
+    # Expect 0x69 marker
+    if i < len(nal) - 1 and nal[i] == 0x69:
+        return strip_emulation_prevention_bytes(nal[i + 1:-1])
+
+    # Strategy 3: Raw — search cleaned NAL for 0x69 byte and return data after it
+    for pos in range(4, len(clean) - 4):
+        if clean[pos] == 0x69:
+            return clean[pos + 1:]
+
     return None
 
 
@@ -538,6 +546,94 @@ def clear_telemetry_cache(folder: Optional[str] = None,
                 os.remove(os.path.join(root, f))
                 removed += 1
     return removed
+
+
+# ---------------------------------------------------------------------------
+# SeiClient — 哨兵上传决策适配器
+# ---------------------------------------------------------------------------
+
+class SeiClient:
+    """
+    哨兵事件上传决策客户端
+    
+    在上传前咨询车辆 SEI 遥测数据，做出智能决策：
+    - 充电中 → 跳过上传（网络用于下载固件）
+    - 地库/信号差 → 建议压缩后上传
+    - 正常状态 → 放行
+    """
+
+    def __init__(self, cam_root: str = "/mnt/teslacam"):
+        """
+        Args:
+            cam_root: TeslaCam 根目录路径
+        """
+        self.cam_root = cam_root
+        logger.info("SeiClient 初始化完成")
+
+    def decide_upload(self, event_path: str, event_id: str) -> dict:
+        """
+        判断是否应上传此哨兵事件
+
+        Args:
+            event_path: 事件文件夹完整路径
+            event_id: 事件标识符
+
+        Returns:
+            {
+                "should_upload": bool,
+                "reason": str,
+                "suggest_compress": bool,
+            }
+        """
+        result = {
+            "should_upload": True,
+            "reason": "default_allow",
+            "suggest_compress": False,
+        }
+
+        try:
+            from pathlib import Path as _Path
+            event_dir = _Path(event_path)
+            if not event_dir.exists():
+                result["should_upload"] = False
+                result["reason"] = "event_path_not_found"
+                return result
+
+            folder_name = event_dir.parent.name if event_dir.parent.name in (
+                "SentryClips", "SavedClips", "RecentClips"
+            ) else "SentryClips"
+
+            telemetry = get_telemetry(folder_name, event_id, "front")
+            if not telemetry:
+                logger.debug(f"sei: 无遥测数据，默认放行 event={event_id}")
+                return result
+
+            p_count = sum(1 for f in telemetry if f.get("gear") == "P")
+            total = len(telemetry)
+            if total > 0 and p_count / total > 0.95:
+                logger.info(
+                    f"sei: 高 P 档占比 ({p_count}/{total})，建议跳过上传 "
+                    f"event={event_id}"
+                )
+                result["should_upload"] = False
+                result["reason"] = "high_p_gear_ratio_likely_charging"
+
+        except Exception as e:
+            logger.warning(f"sei: 决策异常，默认放行 event={event_id}: {e}")
+
+        return result
+
+
+# ── 模块级单例 ──
+_sei_client: Optional["SeiClient"] = None
+
+
+def get_sei_client() -> "SeiClient":
+    """获取 SeiClient 单例"""
+    global _sei_client
+    if _sei_client is None:
+        _sei_client = SeiClient()
+    return _sei_client
 
 
 # ---------------------------------------------------------------------------

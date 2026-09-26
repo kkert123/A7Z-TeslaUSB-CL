@@ -1,62 +1,64 @@
 {% extends "base.html" %}
 {% block title %} — 哨兵事件{% endblock %}
 {% block content %}
-<div class="page-header"><h2>🛡️ 哨兵事件</h2></div>
+<div class="page-header" data-page-node-id="ENf2my7JNBzexJH4zmuXbR"><h2 data-page-node-id="JZ1FUhfC4pecwCzPRDelFY">🛡️ 哨兵事件</h2></div>
 
 {% if error %}
-<div class="alert alert-danger">{{ error }}</div>
+<div class="alert alert-danger" data-page-node-id="AoO9E5n8MDHXarTTH8NP4j">{{ error }}</div>
 {% endif %}
 
 {% if not event %}
-<div class="card" style="max-width:480px;margin:var(--s8) auto;">
-  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s4);">输入确认码</h3>
-  <form action="/sentry" method="get">
-    <div style="display:flex;gap:var(--s3);">
-      <input type="text" name="code" class="code-input" placeholder="123456" maxlength="6" pattern="[0-9]{6}" required value="{{ code or '' }}" autocomplete="off">
-      <button type="submit" class="btn btn-primary btn-lg">查看</button>
+<div class="card" style="max-width:480px;margin:var(--s8) auto;" data-page-node-id="uv5EqwaunB4kxQbmeljJgQ">
+  <h3 style="font-size:var(--text-base);font-weight:600;margin-bottom:var(--s4);" data-page-node-id="57QYOzbhyqo5ygBlJFI0lg">输入确认码</h3>
+  <form action="/sentry" method="get" data-page-node-id="xpjQdXM7YeR5EPgtWOZusI">
+    <div style="display:flex;gap:var(--s3);" data-page-node-id="oDECzeFUfUBZ8WIC2dgrbA">
+      <input type="text" name="code" class="code-input" placeholder="123456" maxlength="6" pattern="[0-9]{6}" required value="{{ code or '' }}" autocomplete="off" data-page-node-id="jmpkGG9728QQsqWOK5xQ4F">
+      <button type="submit" class="btn btn-primary btn-lg" data-page-node-id="5kFwRRNZYEhaE4uxr3AQda">查看</button>
     </div>
   </form>
-  <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:var(--s4);">确认码已发送至企业微信，请在有效期内输入。</p>
+  <p style="font-size:var(--text-xs);color:var(--text-muted);margin-top:var(--s4);" data-page-node-id="O45mqbjvKFgIsJMcAmI4ca">确认码已发送至企业微信，请在有效期内输入。</p>
 </div>
 {% endif %}
 
 {% if event %}
-<div class="card" style="margin-bottom:var(--s4);">
+<div class="card" style="margin-bottom:var(--s4);" data-page-node-id="GAIpupm2WCo8HakTiKfy1a">
   {% if preview_url %}
-  <img src="{{ preview_url }}" alt="事件预览" class="thumb" style="aspect-ratio:auto;max-height:400px;object-fit:contain;margin:0 auto var(--s4);border-radius:var(--r-lg);" id="preview-img">
+  <img src="{{ preview_url }}" alt="事件预览" class="thumb" style="aspect-ratio:auto;max-height:400px;object-fit:contain;margin:0 auto var(--s4);border-radius:var(--r-lg);" id="preview-img" data-page-node-id="QIZvXkDRRbumyo8y5sq0ep">
   {% else %}
-  <div class="empty" style="padding:var(--s8) var(--s4);"><div class="empty-icon">📷</div><div class="empty-text">预览图生成中...</div></div>
+  <div class="empty" style="padding:var(--s8) var(--s4);" data-page-node-id="pAIVlMgyyzKMc82JFONzeL"><div class="empty-icon" data-page-node-id="XibfJ6WqvLwYuFyfIgAmL6">📷</div><div class="empty-text" data-page-node-id="1XgjJpnHzLo4yNawheJhNz">预览图生成中...</div></div>
   {% endif %}
 </div>
 
-<div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:var(--s4);">
-  <div class="stat-card"><div class="stat-label">检测时间</div><div class="stat-value" style="font-size:var(--text-base)">{{ detect_time or '未知' }}</div></div>
-  <div class="stat-card"><div class="stat-label">位置</div><div class="stat-value {% if event.location_status == 'home' %}status-ok{% endif %}" style="font-size:var(--text-base)">{{ '在家' if event.location_status == 'home' else '外出' }}</div></div>
-  <div class="stat-card"><div class="stat-label">文件数</div><div class="stat-value" style="font-size:var(--text-base)">{{ event.file_count or 0 }} 个</div></div>
-  <div class="stat-card"><div class="stat-label">状态</div><div class="stat-value" style="font-size:var(--text-base)">
-    {% if event.status == 'pending_confirm' %}<span class="status status-warn">待确认</span>
-    {% elif event.status == 'confirmed' %}<span class="status status-ok">已确认</span>
-    {% elif event.status == 'uploading' %}<span class="badge badge-info">上传中</span>
-    {% elif event.status == 'completed' %}<span class="status status-ok">已完成</span>
-    {% elif event.status == 'expired' %}<span class="status status-err">已过期</span>
+<div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:var(--s4);" data-page-node-id="o3cmuriiPXtB0nJdm2IQiq">
+  <div class="stat-card" data-page-node-id="SIBWMIl7QkfiJyUiLxCPCZ"><div class="stat-label" data-page-node-id="Llo4vRZlL50xT0DtrBNno1">检测时间</div><div class="stat-value" style="font-size:var(--text-base)" data-page-node-id="698Z7EqCFyCzH35tid8ZGt">{{ detect_time or '未知' }}</div></div>
+  <div class="stat-card" data-page-node-id="0LZwb5l0RXQAogKx0ICIeg"><div class="stat-label" data-page-node-id="OkH8uEVKCMAQV5JkTKA0ja">位置</div><div class="stat-value {% if event.location_status == 'home' %}status-ok{% endif %}" style="font-size:var(--text-base)" data-page-node-id="qeAguRhLZjMX3MJrDhiVA1">{{ '在家' if event.location_status == 'home' else '外出' }}</div></div>
+  <div class="stat-card" data-page-node-id="x0oZkpqRzccmnCv2bkdjkv"><div class="stat-label" data-page-node-id="aldmYUe1IGI5eqHNPMfQqE">文件数</div><div class="stat-value" style="font-size:var(--text-base)" data-page-node-id="FCKhIszDsmXUkpbJSNZsmE">{{ event.file_count or 0 }} 个</div></div>
+  <div class="stat-card" data-page-node-id="A2Hl3WHZWv5pOGtEsHxU08"><div class="stat-label" data-page-node-id="ztYuAG8l6ABuxj5p8INIJm">状态</div><div class="stat-value" style="font-size:var(--text-base)" data-page-node-id="oKorDvh7mSTadNuzteNZnt">
+    {% if event.status == 'pending_confirm' %}<span class="status status-warn" data-page-node-id="gs6kE2zgLPOEDKMRvElYBp">待确认</span>
+    {% elif event.status == 'confirmed' %}<span class="status status-ok" data-page-node-id="aWFxawITS948GmmGQ1xKGT">已确认</span>
+    {% elif event.status == 'uploading' %}<span class="badge badge-info" data-page-node-id="at0rS7pR6wnnNbSf7HQYII">上传中</span>
+    {% elif event.status == 'completed' %}<span class="status status-ok" data-page-node-id="HvKLwOnWPFmCFHZkGgf0hS">已完成</span>
+    {% elif event.status == 'expired' %}<span class="status status-err" data-page-node-id="DmbboKemRBaXsv16o4qZpI">已过期</span>
     {% else %}{{ event.status }}{% endif %}
   </div></div>
 </div>
 
-{% if event.status == 'pending_confirm' and deadline %}
-<div class="card" style="text-align:center;">
-  <div class="stat-label" style="margin-bottom:var(--s2)">确认倒计时</div>
-  <div class="countdown-value" id="countdown" data-deadline="{{ deadline }}">计算中...</div>
-  <button id="confirm-btn" class="btn btn-success btn-lg btn-block" style="margin-top:var(--s4)" onclick="confirmUpload()">✅ 确认上传</button>
+{% if event.status == 'pending_confirm' %}
+<div class="card" style="text-align:center;" data-page-node-id="L8IANRHDhbr7bCG14uAhFo">
+  {% if deadline %}
+  <div class="stat-label" style="margin-bottom:var(--s2)" data-page-node-id="Kk0VtT8XgKv4jENTyCUxKZ">确认倒计时</div>
+  <div class="countdown-value" id="countdown" data-deadline="{{ deadline }}" data-page-node-id="243mwAooNL3ll2SrtgfGij">计算中...</div>
+  {% endif %}
+  <button id="confirm-btn" class="btn btn-success btn-lg btn-block" style="margin-top:var(--s4)" onclick="confirmUpload()" data-page-node-id="zGQ8CwrEuw5xkGoLxJBu94">✅ 确认上传</button>
 </div>
 {% elif event.status == 'confirmed' %}
-<div class="alert alert-success" style="justify-content:center;font-weight:600;">✅ 上传已确认，正在处理中...</div>
+<div class="alert alert-success" style="justify-content:center;font-weight:600;" data-page-node-id="ObrAZuRTi3pSaNcHVtZzJu">✅ 上传已确认，正在处理中...</div>
 {% elif event.status == 'uploading' %}
-<div class="alert alert-info" style="justify-content:center;">⬆️ 上传进度: {{ "%.1f"|format(event.upload_progress or 0) }}%</div>
+<div class="alert alert-info" style="justify-content:center;" data-page-node-id="HwkT8ITRbK02DNnhUwWDh7">⬆️ 上传进度: {{ "%.1f"|format(event.upload_progress or 0) }}%</div>
 {% elif event.status == 'completed' %}
-<div class="alert alert-success" style="justify-content:center;font-weight:600;">🎉 上传完成，文件已保存到 NAS</div>
+<div class="alert alert-success" style="justify-content:center;font-weight:600;" data-page-node-id="tzBORsD0KmSJtRNHEmisxe">🎉 上传完成，文件已保存到 NAS</div>
 {% elif event.status == 'expired' %}
-<div class="alert alert-danger" style="justify-content:center;">⏰ 确认已超时</div>
+<div class="alert alert-danger" style="justify-content:center;" data-page-node-id="zCf9tFbsqRHPA2ZYaMfdFn">⏰ 确认已超时</div>
 {% endif %}
 {% endif %}
 {% endblock %}
