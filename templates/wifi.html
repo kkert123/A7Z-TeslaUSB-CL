@@ -132,6 +132,9 @@
     <button class="btn btn-primary btn-sm" onclick="apAction('start')">▶ 开启</button>
     <button class="btn btn-danger btn-sm" onclick="apAction('stop')">⏹ 关闭</button>
   </div>
+  <!-- v0.3.1.59：关闭抑制剩余时间提示（10-01 事故 A1/B3） -->
+  <div id="ap-manual-off-hint" style="display:none;background:rgba(64,158,255,.12);border:1px solid #409eff;border-radius:6px;padding:6px 10px;font-size:var(--text-xs);margin-bottom:var(--s3)"></div>
+  <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s3)">「关闭」= 临时关闭（默认 30 分钟内不会自动重开热点，之后无网会兜底恢复）；「强制关闭」模式 = 永久不自动开启。</div>
   <!-- v0.3.1.31：AP 配置显式表单（替代原 prompt 弹窗，解决"找不到密码设置入口"） -->
   <div style="border:1px solid var(--border-color);border-radius:8px;padding:var(--s3);background:var(--bg-card)">
     <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--s2)">⚙️ AP 配置</div>
@@ -216,6 +219,15 @@ function loadApStatus(){
     document.getElementById('ap-active-text').textContent=active?'已开启':'已关闭';
     document.getElementById('ap-status-text').textContent=active?'AP 开启':'AP 关闭';
     document.getElementById('ap-status-text').className='status '+(active?'status-ok':'status-muted');
+    // v0.3.1.59：手动关闭抑制期内显示剩余时间（10-01 事故 B3）
+    const hint=document.getElementById('ap-manual-off-hint');
+    if(hint){
+      const rem=parseInt(d.manual_off_remaining||0,10);
+      if(!active&&rem>0){
+        hint.style.display='block';
+        hint.textContent='已手动关闭，约 '+Math.ceil(rem/60)+' 分钟内不会自动重开热点（之后若无网络会兜底恢复）。';
+      }else{hint.style.display='none';}
+    }
   }).catch(()=>{});
   // 获取 AP 配置（v0.3.1.31：填充表单 + 默认密码提醒）
   fetch('/api/ap/config').then(r=>r.json()).then(d=>{
@@ -229,8 +241,39 @@ function loadApStatus(){
   fetch('/api/ap/mode?t='+Date.now()).catch(()=>{}); // 读取模式（如果有 GET 接口）
 }
 function apAction(a){
+  // v0.3.1.59（10-01 事故 R2）：关闭 AP 的请求跑在它自己要切断的 AP 链路上 →
+  // 原实现必然走到 catch → 误报「请求失败」（假失败，100% 可复现）。
+  // 复用 switchTo 的 /api/ap/status 预检 + AbortController 3s 超时，并按 apOn 区分文案。
+  let done=false;
+  const go=apOn=>{if(done)return;done=true;doApAction(a,apOn);};
+  const ctl=('AbortController' in window)?new AbortController():null;
+  const timer=setTimeout(()=>{if(ctl)ctl.abort();go(a==='stop');},3000);
+  const opts=ctl?{signal:ctl.signal}:{};
+  fetch('/api/ap/status',opts).then(r=>r.json()).then(ap=>{
+    clearTimeout(timer);go(!!(ap.active||ap.ap_active));
+  }).catch(()=>{clearTimeout(timer);go(a==='stop');});
+}
+function doApAction(a,apOn){
+  if(a==='stop'&&apOn){
+    if(!confirm('关闭 AP 会立刻中断本机与设备的连接，页面将暂时不可访问（约 30~60 秒）。\n\n'
+      +'关闭后设备默认 30 分钟内不会自动重开热点；如需彻底关闭，请把 AP 模式改为「强制关闭」。\n\n继续？'))return;
+  }
   fetch('/api/ap/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})})
-  .then(r=>r.json()).then(d=>{if(d.success)location.reload();else alert(d.message||d.error||'操作失败');}).catch(()=>alert('请求失败'));
+  .then(r=>r.json()).then(d=>{
+    if(d.success){
+      if(d.warning){
+        // v0.3.1.59.1（P2-5）：AP 已关但当下无网（R3）→ 本页链路多半已断，
+        // reload 只会得到错误页；停在原地把提示读清楚。
+        alert(d.message+'\n'+d.warning+'\n\n设备会尝试回连已保存的 WiFi，请稍后手动刷新本页。');
+      }else{
+        location.reload();
+      }
+    }else{alert(d.message||d.error||'操作失败');}
+  }).catch(()=>{
+    if(a==='stop'&&apOn){
+      alert('AP 正在关闭，本机与设备的连接已中断。\n约 30~60 秒后设备会回连已保存 WiFi，请重新打开本页面查看（30 分钟内不会自动重开热点）。');
+    }else{alert('请求失败');}
+  });
 }
 const AP_MODES=['auto','force-on','force-off'];
 const AP_MODE_LABELS={'auto':'自动','force-on':'强制开启','force-off':'强制关闭'};

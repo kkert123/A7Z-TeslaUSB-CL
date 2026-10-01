@@ -13,6 +13,7 @@ TeslaUSB Neo - 系统监控告警模块
 6. 智能心跳 (每 60 分钟, 强制每 6 小时)
 7. 服务异常告警
 8. AP 带客户端持续开启提醒 (v0.3.1.58, 超 30min 提示可关闭 AP 回连 WiFi)
+9. 手动关闭 AP 抑制期提醒 (v0.3.1.59, 提示"X 分钟内不会自动重开热点")
 
 基于旧版 sentry_monitor.py 重构，集成到当前架构
 
@@ -65,6 +66,17 @@ try:
     from wifi_service import AP_CLIENT_STUCK_FILE
 except Exception:  # pragma: no cover - 兜底路径
     AP_CLIENT_STUCK_FILE = "/var/run/teslausb-ap-client-stuck"
+
+# 手动关闭 AP 抑制期提醒（v0.3.1.59 / 10-01 事故 A3）
+# 背景：点「关闭 AP」后进入 30min 抑制期（不自动重开热点）。若用户不知道这个语义，
+# 会以为"关了以后彻底失联"或反复点按钮。stop_ap() 写标记后在此推一条一次性提醒。
+# v0.3.1.59.1（P1-B）/ .59.2（P2-4）：语义 = 按「抑制标记」one-shot
+#   （notified_at 持久去重 + 内存 seen_ts 去重），不用时间间隔节流。
+#   原用 60s 间隔 == run_daemon 周期 60s → 每轮都触发，30min 刷 ~30 条。
+try:
+    from wifi_service import AP_MANUAL_OFF_FILE
+except Exception:  # pragma: no cover - 兜底路径
+    AP_MANUAL_OFF_FILE = "/var/run/teslausb-ap-manual-off"
 
 # 存储
 STORAGE_WARN_GB = 5       # 存储警告阈值 (GB)
@@ -462,6 +474,7 @@ class SystemMonitor:
         self._net_offline_since: Optional[float] = None
         self._was_online: Optional[bool] = None
         self._ap_stuck_last_alert: float = 0.0   # v0.3.1.58(F4)：AP 带客户端提醒上次发送时间
+        self._ap_manual_off_seen_ts: int = 0         # v0.3.1.59.2(A3)：已处理的抑制标记 ts（按标记去重，one-shot）
 
         # 通知器
         self._notifier = None
@@ -643,6 +656,80 @@ class SystemMonitor:
             level="info",
         )
 
+    def check_ap_manual_off(self):
+        """手动关闭 AP 抑制期提醒（v0.3.1.59 / 10-01 事故 A3）。
+
+        stop_ap() 成功关闭后写抑制标记（默认 30min）→ 自动开 AP 的路径在抑制期内
+        跳过（不再出现"点了关闭却被 timer 自动开回"）。此处进入抑制时推一条提醒，
+        避免"关了就彻底失联且无人知道"。标记在用户手动开 AP / 改模式 / 系统兜底重开
+        时被清除 → 本检查自动静默。
+
+        只读文件 + 校验 hostapd 未运行，不做任何网络操作，不依赖 sudo。
+        """
+        try:
+            with open(AP_MANUAL_OFF_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            ts = int(data.get("ts", 0))
+            ttl = int(data.get("ttl", 0))
+            notified_at = int(data.get("notified_at", 0))
+        except Exception:
+            return  # 无标记（未进入该状态）或文件损坏 → 静默跳过
+        if ts <= 0 or ttl <= 0:
+            return
+        remain = ts + ttl - int(time.time())
+        if remain <= 0:
+            return
+        # 双重校验：hostapd 必须确实不在运行。防标记残留误报 —— 若热点已被手动「开启」
+        # 或系统兜底重开（标记本应被清除但异常残留），此处不再推"已关闭"的假消息。
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", "hostapd"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.stdout.strip() in ("active", "activating"):
+                return
+        except Exception:
+            return
+        now = time.time()
+        # v0.3.1.59.1（P1-B）+ v0.3.1.59.2（P2-4）：one-shot 双重去重，均按「标记」而非「时间」：
+        #   ① 持久层：标记内已有 notified_at → 已提醒过（跨进程重启有效）
+        #   ② 内存层：同一 ts 已处理过 → 跳过（覆盖 notified_at 落盘失败的极端情况）
+        # 按标记去重可正确放行「关闭→开启→再关闭」产生的第二次合法提醒（时间型节流会误吞）。
+        if notified_at > 0:
+            return
+        if getattr(self, "_ap_manual_off_seen_ts", 0) == ts:
+            return
+        self._ap_manual_off_seen_ts = ts
+        # 先落盘再推送：即使推送失败/进程崩溃也不会在重启后立刻重复发。
+        # （notified_at 仅供本检查节流；_ap_manual_off_remaining 不读它，不影响抑制判定。）
+        # v0.3.1.59.1（P2-1）：原子写（临时文件 + os.replace），避免与 stop_ap()
+        # 的 _note_ap_manual_off() 并发时读者读到半截 JSON。
+        # v0.3.1.59.2（P2-5）：写回前确认标记未被 stop_ap() 重写（ts 变 = 用户又关了一次）
+        # → 否则会把本次 notified_at 覆盖到新标记上、吞掉新标记的提醒。tmp 名带 pid（P2-3）。
+        try:
+            with open(AP_MANUAL_OFF_FILE, "r", encoding="utf-8") as f:
+                if int(json.load(f).get("ts", 0)) != ts:
+                    return
+        except Exception:
+            return
+        try:
+            data["notified_at"] = int(now)
+            _tmp = "%s.%d.tmp" % (AP_MANUAL_OFF_FILE, os.getpid())
+            with open(_tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(_tmp, AP_MANUAL_OFF_FILE)
+        except Exception:
+            pass
+        mins = (remain + 59) // 60
+        self._send_alert(
+            "ℹ️ A7Z 热点已按你的操作关闭",
+            f"手动关闭 AP 已生效，约 {mins} 分钟内不会自动重开热点。\n"
+            f"若在车内需要上行网络，请连上手机热点/已保存 WiFi；\n"
+            f"如需恢复热点，可在 WiFi 页面点「开启」（或把 AP 模式改为「强制开启」）。\n"
+            f"时间: {time.strftime('%F %T')}",
+            level="info",
+        )
+
     def check_storage(self):
         """检查存储空间（仅监控 TeslaCam 分区）"""
         path = PARTITIONS["cam"]
@@ -781,6 +868,7 @@ class SystemMonitor:
         self.check_memory()
         self.check_network()
         self.check_ap_client_stuck()
+        self.check_ap_manual_off()
         self.check_storage()
         self.check_heartbeat()
         self.save_health_status()

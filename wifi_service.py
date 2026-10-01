@@ -51,6 +51,22 @@ AP_YIELD_DELAY_SEC = 15                                # 断开后宽限秒数�
 # 但若用户配置完不主动关 AP，设备会一直停在热点模式、无上行网络。
 # 对策：wifi_service 写「起始时间」标记 → 常驻 Web 进程的 SystemMonitor 读取并推提醒（不踢客户端）。
 AP_CLIENT_STUCK_FILE = "/var/run/teslausb-ap-client-stuck"
+# ── v0.3.1.59: 手动「关闭 AP」抑制（10-01 事故 R1）──
+# 现象：AP 模式下点「关闭 AP」→ hostapd 确实被停掉，但 ≤2min 后被
+# wifi-quick-check.timer → quick_check → full_check → _start_ap_fallback()
+# 自动重开，用户观感为「关闭失效」。根因：stop_ap() 不带「手动关闭」语义，
+# _start_ap_fallback() 唯一闸门是语义不符的持久 force-off 模式。
+# 对策：stop_ap() 成功后写抑制标记（30min）→ 自动开 AP 的路径在抑制期内跳过；
+# 用户手动开 AP / 显式改 AP 模式均清除标记。
+# 注：只抑制「自动开 AP」，不抑制「连 WiFi」——用户关 AP 的目的正是回连 WiFi。
+AP_MANUAL_OFF_FILE = "/var/run/teslausb-ap-manual-off"
+AP_MANUAL_OFF_TTL_SEC = 1800                            # 抑制时长：30min（用户确认值）
+# ── v0.3.1.59: web 层 wifi 动作持久日志（10-01 事故取证盲区）──
+# 现状：stop_ap/start_ap/_ap_bring_down/switch_wifi 让出等模块级动作只经
+# logging.getLogger("wifi_service") → Flask stderr → journald；而 journald 会出现
+# 整段时间断层（09-29~10-01 实测），导致关键动作事后不可复原。
+# 对策：补一个 SD 卡持久文件（与 kernel_log_capture 同思路），不再依赖 journald。
+WIFI_SERVICE_LOG_FILE = "/var/log/teslausb-wifi.log"
 
 # captive portal（v0.3.1.36）：AP 模式下 dnsmasq 提供 DNS（任意域名 → AP 网关）
 # + iptables 将 80 端口重定向到 Web 5000，手机连 AP 开任意网页自动跳 A7Z 配置页。
@@ -961,22 +977,45 @@ def set_ap_config(ssid: str, passphrase: str) -> dict:
         return {"success": False, "message": f"保存配置失败: {e}"}
 
 
+def _ap_is_running() -> bool:
+    """hostapd 是否在运行（active/activating）。
+
+    stop_ap() 专用：与 _ap_bring_down() 的「wlan0 是否恢复联网」口径**分离**——
+    「关掉了但当下没 WiFi 可连」属正常，不应报失败（10-01 事故 R3）。
+    查询失败保守返回 True（宁可不报「已关闭」，也不误报成功）。
+    """
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", "hostapd"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() in ("active", "activating")
+    except Exception:
+        return True
+
+
 def get_ap_status() -> dict:
-    """获取 AP 状态（检查 hostapd 是否运行）"""
+    """获取 AP 状态（hostapd 是否运行 + 手动关闭抑制剩余时间）"""
     try:
         result = subprocess.run(
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
         )
         ap_active = result.stdout.strip() == "active"
+        remain = _ap_manual_off_remaining()
         return {
             "available": True,
             "ap_active": ap_active,
             "active": ap_active,
+            "manual_off_active": remain > 0,
+            "manual_off_remaining": remain,
+            "manual_off_ttl": _ap_manual_off_ttl(),
             "message": "AP 已开启" if ap_active else "AP 已关闭"
         }
     except Exception:
-        return {"available": False, "ap_active": False, "active": False, "message": "检查失败"}
+        return {"available": False, "ap_active": False, "active": False,
+                "manual_off_active": False, "manual_off_remaining": 0,
+                "manual_off_ttl": AP_MANUAL_OFF_TTL_SEC, "message": "检查失败"}
 
 
 def get_ap_force_mode() -> str:
@@ -1001,6 +1040,7 @@ def set_ap_force_mode(mode: str) -> dict:
         else:
             with open(FORCE_MODE_FILE, "w") as f:
                 f.write(mode)
+        _clear_ap_manual_off()   # v0.3.1.59：显式改 AP 模式 = 用户接管，取消「关闭」抑制
         return {"success": True, "message": f"AP 模式已设置为: {mode}"}
     except Exception as e:
         return {"success": False, "message": f"设置 AP 模式失败: {e}"}
@@ -1160,6 +1200,124 @@ def _clear_ap_client_stuck():
             os.remove(AP_CLIENT_STUCK_FILE)
     except Exception:
         pass
+
+
+# ── v0.3.1.59: 手动「关闭 AP」抑制标记（10-01 事故 R1）──
+
+def _ap_manual_off_ttl() -> int:
+    """手动关闭抑制时长（秒）。固定 30min（用户确认值，v0.3.1.59）。"""
+    return AP_MANUAL_OFF_TTL_SEC
+
+
+def _write_json_atomic(path: str, obj: dict) -> None:
+    """原子写 JSON（临时文件 + os.replace），避免并发读者读到半截文件（P2-1）。
+
+    临时名带 pid（P2-3）：wifi_service.py --quick 每 2min 起独立进程，
+    与常驻 Flask 进程可能并发写同一标记 → 共用 `.tmp` 会互相踩。
+    """
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def _note_ap_manual_off(reason: str = "") -> None:
+    """v0.3.1.59：记录「用户手动关闭 AP」抑制标记（ts + ttl）。
+
+    stop_ap() 成功关闭后调用 → _start_ap_fallback() 在抑制期内跳过自动重开，
+    避免手动关闭后 ≤2min 被 timer 自动开回（10-01 事故 R1）。
+    每次手动关闭都重写：刷新 ttl、并重置提醒节流基准（notified_at 由消费者写入）。
+    """
+    try:
+        _write_json_atomic(AP_MANUAL_OFF_FILE,
+                           {"ts": int(time.time()), "ttl": _ap_manual_off_ttl(),
+                            "reason": reason})
+    except Exception:
+        pass
+
+
+def _clear_ap_manual_off() -> None:
+    """v0.3.1.59：清除手动关闭抑制标记。
+
+    调用点（均为「用户或系统显式接管 AP」）：
+      - 用户手动开 AP（start_ap）
+      - 用户显式改 AP 模式（set_ap_force_mode：auto / force-on / force-off）
+    注：抑制标记本身**不**由系统兜底重开 AP 清除 —— 抑制期内
+    ``_start_ap_fallback()`` 直接跳过自动开 AP（见其内注释），这是既定设计
+    （用户关 AP 后 30min 内不被自动重开）。超时后标记自然失效，兜底恢复。
+    """
+    try:
+        if os.path.exists(AP_MANUAL_OFF_FILE):
+            os.remove(AP_MANUAL_OFF_FILE)
+    except Exception:
+        pass
+
+
+def _ap_manual_off_remaining() -> int:
+    """手动关闭抑制剩余秒数；无标记 / 已过期 / 文件损坏 一律返回 0。
+
+    返回 0 = 不抑制（fail-open）：标记损坏绝不能把设备永久钉死在「不开 AP」状态。
+    """
+    try:
+        with open(AP_MANUAL_OFF_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        ts = int(d.get("ts", 0))
+        ttl = int(d.get("ttl", 0)) or AP_MANUAL_OFF_TTL_SEC
+        left = ts + ttl - int(time.time())
+        return left if left > 0 else 0
+    except Exception:
+        return 0
+
+
+def _attach_persistent_handler(lg: logging.Logger) -> None:
+    """给指定 logger 幂等挂 SD 卡持久 handler（D2）。
+
+    v0.3.1.59.1（P2-2）：用 **plain FileHandler（append）+ 外部每日轮转**，
+    而不是 in-process RotatingFileHandler。原因：`wifi-quick-check.service` 是
+    oneshot，每 2 分钟起一个**新进程**跑 `wifi_service.py --quick` → 每个进程各持
+    一份轮转逻辑，与常驻 Flask 进程并发轮转会互相截断。项目既有约定是
+    `utils/log_rotator.py`（teslausb-logrotate.timer 每日、copytruncate 语义）统一
+    处理 `/var/log/*.log`；本文件已登记进其 LOG_FILES。append 模式（O_APPEND）
+    对 copytruncate 天然安全。
+
+    幂等判据：已存在指向 WIFI_SERVICE_LOG_FILE 的 FileHandler 则跳过。
+    不用 logger 私有属性做标记，因为 ``WifiSmartSwitch._setup_logging()``
+    会 ``self.log.handlers.clear()`` —— 标记还在、handler 已被清，会误判为"已挂"。
+    """
+    try:
+        want = os.path.abspath(WIFI_SERVICE_LOG_FILE)
+        for h in lg.handlers:
+            if isinstance(h, logging.FileHandler) and \
+                    os.path.abspath(getattr(h, "baseFilename", "")) == want:
+                return
+        fh = logging.FileHandler(WIFI_SERVICE_LOG_FILE, encoding="utf-8")
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        lg.addHandler(fh)
+        if lg.level == logging.NOTSET or lg.level > logging.INFO:
+            lg.setLevel(logging.INFO)
+    except Exception:
+        pass
+
+
+def _ensure_wifi_file_logging() -> None:
+    """v0.3.1.59（D2）：给 web 层 wifi 相关 logger 挂 SD 卡持久文件 handler。
+
+    背景（10-01 事故取证盲区）：AP 控制动作（stop_ap / start_ap / _ap_bring_down /
+    switch_wifi 让出）只经 journald；而 journald 实测会出现整段时间断层，
+    导致「谁在什么时候关/开了 AP」事后不可复原。此处补一个不依赖 journald 的
+    持久文件（与 kernel_log_capture 同思路，落 /var/log/teslausb-wifi.log）。
+
+    v0.3.1.59.1（P1-2）：覆盖 **两个** logger —— 模块级动作走 "wifi_service"
+    （``logging.getLogger(__name__)``），而自动检测/让出/fallback 全走
+    ``WifiSmartSwitch`` 实例的 ``self.log``（同名 "WifiSmartSwitch"）。
+    只挂前者会漏掉"自动开 AP"这条最关键的时间线，取证只达一半。
+
+    /var/log 不可写时静默跳过（不影响主流程）。
+    有界：由 `utils/log_rotator.py`（每日 timer）统一轮转（10MB 强制 + 保留 7 份）。
+    """
+    _attach_persistent_handler(logging.getLogger("wifi_service"))
+    _attach_persistent_handler(logging.getLogger("WifiSmartSwitch"))
 
 
 def _ap_add_portal_iptables():
@@ -1705,7 +1863,9 @@ def start_ap() -> dict:
     重置自愈退避到初始值 + 宽限期缩短（manual 标记，_ap_grace_period_elapsed 读取）。
     否则设备在断网 fallback 期间退避可能已积累到 30min，手动开 AP 后
     手机断开也要等满退避 → "不切回 WiFi"。
+    v0.3.1.59：手动开 AP 同时取消「关闭」抑制（用户接管 = 撤回先前的关闭意图）。
     """
+    _clear_ap_manual_off()            # v0.3.1.59：手动开 AP = 取消关闭抑制
     _write_backoff(AP_BACKOFF_INIT)   # 2B：手动开 AP 退避归 5min
     _write_had_clients(False)         # 重置客户端状态（断开事件检测基准）
     try:
@@ -1714,13 +1874,56 @@ def start_ap() -> dict:
     except Exception:
         pass
     ok, msg = _ap_bring_up(manual=True)
+    logging.getLogger("wifi_service").info(
+        "手动开启 AP（已清除关闭抑制）：%s（%s）", "成功" if ok else "失败", msg)
     return {"success": ok, "message": msg}
 
 
 def stop_ap() -> dict:
-    """手动停止 AP（完整 bring-down + 恢复 station）"""
+    """手动停止 AP（完整 bring-down + 恢复 station）。
+
+    v0.3.1.59（A2 / R3）：_ap_bring_down() 的返回值口径是「wlan0 是否恢复联网」
+    （switch_wifi / _ap_self_heal / _yield_ap 需要真联网，故其语义保持不变）。
+    但「关闭 AP」按钮只关心 **hostapd 是否停掉** —— 关掉后当下无可用 WiFi 属正常，
+    不应报失败（否则前端/脚本误读为「没关成」）。故此处独立判定 ap_stopped。
+
+    v0.3.1.59（A1 / R1）：成功关闭后写「手动关闭」抑制标记（默认 30min），
+    阻止 wifi-quick-check.timer → _start_ap_fallback() 在抑制期内自动重开。
+
+    v0.3.1.59.1（P1-1）：AP **本就没开**时属幂等 no-op —— 不跑 _ap_bring_down()、
+    不写抑制标记，直接成功返回。原因：station 模式下 _ap_bring_down() 会
+    ①``nmcli device connect wlan0`` 打断当前正常 WiFi；②打上 30min 抑制 →
+    驶离已保存 WiFi 覆盖时不再自动开热点（离线隐患，用户最忌讳场景）。
+
+    v0.3.1.59.2（P2-1/P2-2）：抑制标记 **先于** _ap_bring_down() 写入。原实现
+    「bring_down 返回后再写」存在窗口：_ap_bring_down() 返回前就 _clear_ap_transition()，
+    而 transition TTL 仅 120s < bring_down 最坏耗时（15 轮 ×2s + 兜底 ≈186s），
+    窗口内 `_start_ap_fallback()` 的 transition 护栏已失效、抑制标记又未落盘 → timer
+    可抢先重开热点。先占位后校验：若最终关闭失败（hostapd 仍在运行）再清除标记回滚。
+    """
+    _log = logging.getLogger("wifi_service")
+    if not _ap_is_running():
+        _log.info("手动关闭 AP：AP 当前未开启，幂等跳过（不碰网络、不写抑制）")
+        return {"success": True, "message": "AP 当前未开启（无需关闭）",
+                "manual_off": False, "manual_off_remaining": 0}
+    # P2-1/P2-2：先写抑制标记（关闭失败则回滚）
+    _note_ap_manual_off(reason="web stop_ap")
     ok, msg = _ap_bring_down()
-    return {"success": ok, "message": msg}
+    ap_stopped = not _ap_is_running()
+    if ap_stopped:
+        remain = _ap_manual_off_remaining()
+        _log.info("手动关闭 AP 成功（抑制 %d 分钟，station 恢复=%s）：%s",
+                  (remain + 59) // 60, ok, msg)
+        if ok:
+            return {"success": True, "message": msg,
+                    "manual_off": True, "manual_off_remaining": remain}
+        return {"success": True, "message": "AP 已关闭",
+                "warning": f"当前无可连 WiFi，wlan0 未重连（{msg}）",
+                "manual_off": True, "manual_off_remaining": remain}
+    # 关闭失败（hostapd 仍在运行）→ 回滚抑制标记，避免"标记在但 AP 开着"的脏状态
+    _clear_ap_manual_off()
+    _log.warning("手动关闭 AP 未成功（hostapd 仍在运行，已回滚抑制标记）：%s", msg)
+    return {"success": False, "message": msg}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1796,6 +1999,9 @@ class WifiSmartSwitch:
             sh.setFormatter(fmt)
             self.log.addHandler(sh)
             WifiSmartSwitch._stream_handler_attached = True
+        # v0.3.1.59.1（P1-2）：上面的 handlers.clear() 会清掉模块导入时挂的
+        # SD 卡持久 handler → 每实例化一次就会丢一次取证。这里补挂（幂等）。
+        _attach_persistent_handler(self.log)
 
     # ── 锁机制 ──
 
@@ -2388,9 +2594,26 @@ class WifiSmartSwitch:
     def _start_ap_fallback(self) -> None:
         """当所有 WiFi 不可用时自动启用 AP 热点（复用完整 bring-up 流程）"""
         try:
+            # v0.3.1.59.1（P1-3）：AP 起/停动作进行中（Web 手动 stop_ap = _ap_bring_down
+            # 持 transition 标记）→ 跳过。否则存在竞态：hostapd 已停、但 stop_ap()
+            # 尚未写入抑制标记，timer 抢先调本函数会把热点重开 —— 正是用户报告的
+            # "点关闭失效、≤2min 热点自己回来"的残留窗口。与 _ap_self_heal/_ap_ensure_down
+            # 的 R6 护栏同一设计（transition TTL 120s，覆盖整个 bring-down 过程）。
+            if _ap_transition_active():
+                self.log.info("AP 起停进行中（手动操作），跳过自动启用")
+                return
+
             force_mode = get_ap_force_mode()
             if force_mode == "force-off":
                 self.log.info("AP 强制关闭，跳过自动启用")
+                return
+
+            # v0.3.1.59（10-01 事故 R1）：用户手动点「关闭 AP」后的抑制期内不自动重开。
+            # 只挡「自动开 AP」，不挡「连 WiFi」——抑制期内仍会正常尝试回连已保存网络。
+            _remain = _ap_manual_off_remaining()
+            if _remain > 0:
+                self.log.info("用户手动关闭 AP 中（抑制剩余约 %d 分钟），跳过自动启用",
+                              (_remain + 59) // 60)
                 return
 
             # 检查 hostapd 是否已在运行
@@ -3144,6 +3367,11 @@ def run_upload_speed_test() -> dict:
         result["error"] = next((s.get("error", "") for s in reversed(result["stages"]) if s.get("error")), "未知错误")
 
     return result
+
+
+# v0.3.1.59（D2）：导入即挂 SD 卡持久文件 handler（幂等，失败静默）。
+# 放在模块末尾调用，确保所需常量/函数均已定义。
+_ensure_wifi_file_logging()
 
 
 # 命令行直接执行

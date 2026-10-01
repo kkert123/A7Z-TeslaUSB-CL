@@ -932,6 +932,9 @@ GUARD_SVC_DST = "/etc/systemd/system/" + GUARD_SVC
 KLOG_SVC = "teslausb-kernel-log.service"
 KLOG_SVC_DST = "/etc/systemd/system/" + KLOG_SVC
 
+RTC_SVC = "teslausb-rtc-sync.service"
+RTC_TIMER = "teslausb-rtc-sync.timer"
+
 
 def _ensure_usb_guard_service():
     """启动期幂等自愈（v0.3.1.57 / M80）——确保 USB 链路守护单元已安装并运行。
@@ -1087,6 +1090,74 @@ def _ensure_kernel_log_service():
         return False, f"确保 {KLOG_SVC} 异常: {e}"
 
 
+def _ensure_rtc_sync_service():
+    """启动期幂等自愈（v0.3.1.59）——确保 RTC 回写单元（service + timer）已安装并启用。
+
+    背景（10-01 事故 F1，设备实测）：A7Z 的 sunxi-rtc 掉电不保时——冷启动内核读到
+    复位默认值（``dmesg: sunxi-rtc ... setting system clock to 1970-01-01T00:00:12``），
+    NTP 同步前系统时钟错误 → journald 归档按错误时间戳排序，关键取证窗口被优先
+    轮转删除（实测 09-29 / 09-30 连续两天各仅剩 2 行）。
+
+    rtc_sync.py 只做软件侧能做的部分：时钟一旦有效就立即回写 RTC；脚本内部校验
+    ``NTPSynchronized=yes``（未同步绝不写）→ 定时触发无副作用，不会把 1970 写进 RTC。
+
+    与 usb-guard / kernel-log 同样是"无主资产"：随包分发 + 常驻服务幂等自愈（M45/M75）。
+    装的是 **timer**（oneshot service 由 timer 拉起），service 不设 [Install]。
+
+    返回 (ok, msg)：True 已处理 / None 无需处理 / False 失败（警告不阻断）。
+    """
+    pairs = [
+        (RTC_SVC, "/etc/systemd/system/" + RTC_SVC),
+        (RTC_TIMER, "/etc/systemd/system/" + RTC_TIMER),
+    ]
+    base = os.path.dirname(os.path.abspath(__file__))
+    try:
+        changed = False
+        for name, dst in pairs:
+            src = os.path.join(base, "services", name)
+            if not os.path.isfile(src):
+                return False, f"单元源文件缺失: {src}"
+            with open(src, "r", encoding="utf-8") as f:
+                want = f.read()
+            have = ""
+            if os.path.isfile(dst):
+                try:
+                    with open(dst, "r", encoding="utf-8") as f:
+                        have = f.read()
+                except OSError:
+                    have = ""
+            if have != want:
+                tmp = "/tmp/" + name
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(want)
+                os.chmod(tmp, 0o644)
+                rc, _o, err = _run(["cp", "-f", tmp, dst], timeout=30)
+                if rc != 0:
+                    return False, f"安装 {name} 失败: {err}"
+                changed = True
+        if changed:
+            _run(["systemctl", "daemon-reload"], timeout=30)
+
+        rc, out, _e = _run(["systemctl", "is-enabled", RTC_TIMER], timeout=15)
+        enabled_before = (out or "").strip().startswith("enabled")
+        rc, out, _e = _run(["systemctl", "is-active", RTC_TIMER], timeout=15)
+        active_before = (out or "").strip() == "active"
+        if not enabled_before or not active_before:
+            _run(["systemctl", "enable", "--now", RTC_TIMER], timeout=60)
+        # 再读一次真实状态（避免用陈旧值导致每次开机都误报"已处理"）
+        rc, out, _e = _run(["systemctl", "is-enabled", RTC_TIMER], timeout=15)
+        enabled = (out or "").strip().startswith("enabled")
+        rc, out, _e = _run(["systemctl", "is-active", RTC_TIMER], timeout=15)
+        active = (out or "").strip() == "active"
+
+        if changed or not enabled or not active:
+            return True, (f"{RTC_TIMER} 已安装并启用"
+                          f"（changed={changed} enabled={enabled} active={active}）")
+        return None, ""
+    except Exception as e:
+        return False, f"确保 {RTC_TIMER} 异常: {e}"
+
+
 def startup_self_heal():
     """启动期幂等自愈（v0.3.1.56 / M75）——供 app.py 开机调用，补齐钩子自举缺口。
 
@@ -1100,12 +1171,15 @@ def startup_self_heal():
     v0.3.1.58 起再增 teslausb-kernel-log.service（持久化内核日志采集，绕开 journald
     归档缺失盲区），同样靠本启动期钩子安装并拉起。
 
+    v0.3.1.59 起再增 teslausb-rtc-sync.timer（时钟有效即回写 RTC；RTC 掉电不保时
+    导致冷启动时钟错、journald 归档被错误时间戳拖累，见 10-01 事故 F1）。
+
     幂等、best-effort；返回 (ok, msg)：
       True 有项目被处理 / None 全部无需处理 / False 有项目失败（调用方警告不阻断）。
     """
     done, failed = [], []
     for fn in (_disable_legacy_gadget_service, _ensure_usb_guard_service,
-               _ensure_kernel_log_service):
+               _ensure_kernel_log_service, _ensure_rtc_sync_service):
         try:
             ok, msg = fn()
         except Exception as e:

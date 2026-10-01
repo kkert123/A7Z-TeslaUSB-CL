@@ -187,6 +187,11 @@ class Config:
         # 持久化内核日志捕获（2026-09-25）：直采 /dev/kmsg，绕开 journald 的 kernel transport 盲区
         "kernel_log_capture.py",
         "services/teslausb-kernel-log.service",
+        # RTC 回写（2026-10-02 v0.3.1.59）：时钟有效即回写 RTC，缓解冷启动时钟错导致的
+        # journald 归档断层（10-01 事故 F1）。oneshot service 由 timer 拉起。
+        "rtc_sync.py",
+        "services/teslausb-rtc-sync.service",
+        "services/teslausb-rtc-sync.timer",
         # requirements (2026-07-26 v0.3.0 — 升级包必须包含，否则新 venv 无依赖)
         "requirements.txt",
         # boombox + lightshow + wrap + license_plate (2026-07-26 — app_helpers.py 依赖)

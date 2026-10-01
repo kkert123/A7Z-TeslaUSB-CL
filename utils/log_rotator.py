@@ -25,6 +25,7 @@ LOG_FILES = [
     '/var/log/teslausb-boot-notify.log',
     '/var/log/teslausb-notify-retry.log',
     '/var/log/wifi-smart-switch.log',
+    '/var/log/teslausb-wifi.log',      # v0.3.1.59：web 层 wifi 动作持久日志（D2）
 ]
 ROTATE_KEEP = 7       # 保留最近 7 份
 MAX_SIZE = 10 * 1024 * 1024  # 10MB 强制轮转

@@ -1,0 +1,13 @@
+[Unit]
+Description=TeslaUSB A7Z RTC Write-back Timer
+Documentation=https://github.com/kkert123/A7Z-TeslaUSB-CL
+
+[Timer]
+# 开机 3 分钟后首次（给 NTP 留出同步时间），此后每 30 分钟一次。
+# 脚本自带 NTPSynchronized 校验：未同步的轮次直接跳过，无副作用。
+OnBootSec=3min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=TeslaUSB A7Z RTC Write-back (system clock -> hardware RTC)
+Documentation=https://github.com/kkert123/A7Z-TeslaUSB-CL
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/radxa_data/teslausb
+# 仅当时钟已由 NTP 校准（NTPSynchronized=yes）才写 RTC，脚本内部自校验；
+# 未同步时脚本直接跳过 → 定时触发不会把错误时间写进 RTC。
+ExecStart=/usr/bin/python3 -u /opt/radxa_data/teslausb/rtc_sync.py
+StandardOutput=journal
+StandardError=journal
