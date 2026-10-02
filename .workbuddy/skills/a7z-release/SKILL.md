@@ -136,6 +136,16 @@ api("POST", "/releases", {"tag_name": TAG, "name": TAG, "body": BODY,
 api("POST", f"/releases/{rel['id']}/assets?name={name}", binary=blob, host="uploads.github.com")
 ```
 
+**⚠️ 先验活 PAT（M88）**——PAT 会到期，而 `git push` 走 SSH Deploy Key、**与 PAT 无关**，push 成功会掩盖 PAT 已死，直到建 Release 才炸 401：
+
+```bash
+TOK=$(cat .github-pat | tr -d '\r\n')
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $TOK" -H "User-Agent: a7z" https://api.github.com/user)
+[ "$code" = "200" ] || { echo "!! PAT 失效（HTTP $code），先换新 token 再发版（M88）"; exit 1; }
+```
+
+401 的判据是「**带 token 与无认证基线返回相同**」——相同即 token 问题（权限不足通常返 403，不是 401）。
+
 运行前 `unset HTTP_PROXY HTTPS_PROXY`，用 PAT（`cat .github-pat`，勿打印）：`python _release<N>.py`
 
 > **body 的 SHA256 行必须是纯文本 `SHA256: <64hex>`** —— 禁止反引号/引号等任何包裹字符（M76）。
@@ -209,3 +219,4 @@ ssh.close()
             print("DIFF/MISSING:",m.name)
     ```
 11. **签名私钥绝不能进仓库**（M84）：`upgrade_key`（Ed25519 签名私钥）必须被 `.gitignore` 精确忽略。提交前 `git check-ignore -v upgrade_key` 确认命中；`upgrade_key.pub`（公钥）则需**可跟踪**（要随包分发）。新增文件提交前跑一遍密钥正则扫描。**本机禁用 `git add -A`**（工作树常年有历史 drift，会夹带无关改动与潜在密钥）。
+12. **发版第 0 步先验活 PAT**（M88）：`curl -o /dev/null -w '%{http_code}' -H "Authorization: token $TOK" https://api.github.com/user` 必须 `200`。PAT 有有效期（个人发布建议设长/不过期）。**push 走 SSH，成功不代表 PAT 可用**——Release 创建与资产上传**只有 API+PAT 一条路**（无 `gh` CLI、GitHub 连接器无此工具、无 SSH 兜底），PAT 是发布链路的单点，失效即整条链路停摆。
