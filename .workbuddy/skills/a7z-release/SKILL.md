@@ -146,6 +146,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $TOK" -H 
 
 401 的判据是「**带 token 与无认证基线返回相同**」——相同即 token 问题（权限不足通常返 403，不是 401）。
 
+**⚠️ 脚本内验活必须打「根端点」，不得复用它自己的 `api()` helper（M91）**：`_release<N>.py` 里的 `api(method, path)` 会**无条件**拼 `https://{host}/repos/{REPO}{path}`；若把 `/user` 交给它 → 实际请求 `https://api.github.com/repos/{owner}/{repo}/user`（**不存在的端点**）→ **404**，脚本误报「PAT 失效」，而同一 token 直打 `https://api.github.com/user` 是 200。**最坑**：GitHub 对「坏端点」与「坏凭据」**都回 404**，只看状态码无法区分。做法：给 `api()` 留 `abs_url=None` 逃生口（`/user` 走绝对 URL），或直接 `urllib` 打根端点；排查「凭据失效」时**必须打印命中的绝对 URL**。**守卫本身也是代码、也会拼错——上线前必须用真实请求实证一次「该亮绿灯时确实绿灯」，不能只在坏输入上验过就算。**
+
 运行前 `unset HTTP_PROXY HTTPS_PROXY`，用 PAT（`cat .github-pat`，勿打印）：`python _release<N>.py`
 
 > **body 的 SHA256 行必须是纯文本 `SHA256: <64hex>`** —— 禁止反引号/引号等任何包裹字符（M76）。
@@ -192,6 +194,8 @@ print(f"current={d['current']}, latest={d['latest']}, has_update={d['has_update'
 ssh.close()
 ```
 
+> **一键升级（`POST /api/version/upgrade`）比 SFTP 热部署更干净**：设备端会备份 → 下载 → SHA256/Ed25519 验签 → 解压到 `-v<ver>` → 切 symlink → 重启，并保留用户数据（一并清除版本漂移）。**两个坑（M92）**：① **耗时可达数分钟**（`.sig` 优先走 `ghproxy.net` 镜像，镜像 stall 时单次 `urlopen` 阻塞 300s 再重试）——客户端 `curl` 超时/空响应 **≠ 失败**，判据只看 `GET /api/version/upgrade/progress`（`running`）+ `readlink /opt/radxa_data/teslausb` + `config.py:APP_VERSION`；② **禁并发升级**——同时发起多次会共用同一 `/tmp/upgrade-v<ver>.tar.gz` 互踩，报出假性「SHA-256 校验失败：文件不存在」。发起前先查 `progress.running`。
+
 ---
 
 ## 关键约束（每次必读）
@@ -220,3 +224,6 @@ ssh.close()
     ```
 11. **签名私钥绝不能进仓库**（M84）：`upgrade_key`（Ed25519 签名私钥）必须被 `.gitignore` 精确忽略。提交前 `git check-ignore -v upgrade_key` 确认命中；`upgrade_key.pub`（公钥）则需**可跟踪**（要随包分发）。新增文件提交前跑一遍密钥正则扫描。**本机禁用 `git add -A`**（工作树常年有历史 drift，会夹带无关改动与潜在密钥）。
 12. **发版第 0 步先验活 PAT**（M88）：`curl -o /dev/null -w '%{http_code}' -H "Authorization: token $TOK" https://api.github.com/user` 必须 `200`。PAT 有有效期（个人发布建议设长/不过期）。**push 走 SSH，成功不代表 PAT 可用**——Release 创建与资产上传**只有 API+PAT 一条路**（无 `gh` CLI、GitHub 连接器无此工具、无 SSH 兜底），PAT 是发布链路的单点，失效即整条链路停摆。
+13. **验活/预检要打「根端点」，别复用带 `/repos/{REPO}` 前缀的 `api()` helper**（M91）：`/user` 交给该 helper 会拼出 `https://api.github.com/repos/{owner}/{repo}/user` → **404**（GitHub 对坏端点与坏凭据都回 404，无法凭状态码区分）→ 误报「PAT 失效」。给 helper 留 `abs_url` 逃生口；排查时打印命中的**绝对 URL**；守卫上线前用真实请求实证「该亮绿灯时确实绿灯」。
+14. **真机部署验证以设备状态为准，不看发起请求的返回**（M92）：一键升级可能耗时数分钟（镜像 stall），客户端超时/空响应 ≠ 失败；判据 = `progress.running` + `readlink` symlink + `APP_VERSION`。**禁止并发发起升级**（共用 `/tmp` 包路径会互踩 → 假性 SHA-256 失败）。
+15. **对比设备/打包产物与 git blob 必须忽略 CRLF**（M93）：Windows 工作树 `core.autocrlf` → 包/设备文件常为 CRLF，而 `git show <ref>:<file>` 是 LF；直接比 sha256 会**整文件全红**被误判为「文件漂移」。先判行尾（`grep -qU $'\r'`），比对用 `diff --strip-trailing-cr` 或归一化后再哈希。「全红且行数相同」= 行尾差异指纹。
