@@ -513,7 +513,6 @@ def api_push_config_get():
             'tpms_alarm_threshold': get_tpms_threshold(),
             'templates': merged,
             'defaults': PUSH_TEMPLATE_DEFAULTS,
-            'usb_guard': _merged_usb_guard(cfg),
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -539,14 +538,42 @@ def api_push_config_post():
         clean_tpl = {str(k): str(v)[:500] for k, v in templates.items()
                      if str(k) in ('boot', 'upgrade_success', 'tpms_alert', 'tpms_recovered')}
         cfg['push_templates'] = clean_tpl
-        # USB 链路守护参数（usb_guard 段）；未提交则保持原值不动
-        ug = data.get('usb_guard')
-        if ug is not None:
-            if not isinstance(ug, dict):
-                return jsonify({'success': False, 'error': 'usb_guard 必须为对象'}), 400
-            cfg['usb_guard'] = _merged_usb_guard({'usb_guard': ug})
+        # v0.3.1.61：usb_guard 段改由独立端点 /api/system/usb-guard-config 管理，
+        # 此处不再读写，避免「推送与报警」与「USB 模式」两组各自保存时互相覆盖。
         _write_sentry_json(cfg)
         return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/system/usb-guard-config', methods=['GET'])
+def api_usb_guard_config_get():
+    """USB 链路守护配置读取（v0.3.1.61：从 push-config 解耦，仅供「USB 模式」组）"""
+    try:
+        cfg = _read_sentry_json()
+        return jsonify({'success': True, 'usb_guard': _merged_usb_guard(cfg)})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/system/usb-guard-config', methods=['POST'])
+def api_usb_guard_config_post():
+    """USB 链路守护配置保存（v0.3.1.61：独立端点，只读写 usb_guard 段）
+
+    与 push-config 解耦——前端块内自带保存按钮，不再依赖「保存全部」，
+    避免「勾了 L2.5 却找不到保存入口」以及两组互相覆盖。
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        ug = data.get('usb_guard')
+        if not isinstance(ug, dict):
+            return jsonify({'success': False, 'error': 'usb_guard 必须为对象'}), 400
+        cfg = _read_sentry_json()
+        merged = _merged_usb_guard({'usb_guard': ug})
+        cfg['usb_guard'] = merged
+        _write_sentry_json(cfg)
+        # 回传落库后的值，供前端回读校验（防"提示已保存实则未生效"）
+        return jsonify({'success': True, 'usb_guard': merged})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

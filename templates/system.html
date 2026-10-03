@@ -211,6 +211,47 @@
         <button class="btn btn-sm btn-outline" onclick="cancelAutoPresent()" style="margin-left:10px" data-page-node-id="qgSueLglC1NDFzPcJtIxDp">取消</button>
       </div>
     </div>
+
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)" data-page-node-id="UgSecWrap00001">
+      <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px" data-page-node-id="UgHdrWrapTitle01">USB 链路守护（线在位但车机识别不到 U 盘时自动恢复）</div>
+      <div style="font-size:0.68rem;color:var(--text-muted);margin-bottom:8px" data-page-node-id="UgHdrWrapHint01">
+        判据：线在位（VBUS online）且 UDC state ≠ configured。拔线时不动作；L1（轻量重绑）无损，
+        不消耗熔断预算、可反复执行；熔断仅由 L2/L2.5/L3 这类重动作武装，窗口内只记录不动作。
+        L2.5（平台重绑，默认关闭）对 12.usbc2 做 unbind/bind，软件等价物理插拔，需手动启用。
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 14px;font-size:0.72rem" data-page-node-id="UgGridBlock001">
+        <label style="display:flex;align-items:center;gap:6px" data-page-node-id="UgLabelEnable00">
+          <input type="checkbox" id="ug-enabled" data-page-node-id="UgInputEnable00"> 启用守护
+        </label>
+        <label data-page-node-id="UgLabelPoll0000">轮询间隔（秒）
+          <input type="number" id="ug-poll" min="1" max="60" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputPoll0000">
+        </label>
+        <label data-page-node-id="UgLabelCool0000">推送冷却（秒）
+          <input type="number" id="ug-cooldown" min="1" max="3600" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputCool0000">
+        </label>
+        <label data-page-node-id="UgLabelBreak000">熔断窗口（分钟）
+          <input type="number" id="ug-breaker" min="1" max="1440" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputBreak000">
+        </label>
+        <label data-page-node-id="UgLabelL1000000">L1 轻量重绑（秒）
+          <input type="number" id="ug-l1" min="5" max="600" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL1000000">
+        </label>
+        <label data-page-node-id="UgLabelL2000000">L2 完整重启（秒）
+          <input type="number" id="ug-l2" min="6" max="900" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL2000000">
+        </label>
+        <label data-page-node-id="UgLabelL2500000">L2.5 平台重绑（秒）
+          <input type="number" id="ug-l25" min="7" max="1500" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL2500000">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px" data-page-node-id="UgLabelRebind00"><input type="checkbox" id="ug-allow-rebind" data-page-node-id="UgInputRebind00"> 启用 L2.5 平台重绑（高级）</label>
+        <label data-page-node-id="UgLabelL3000000">L3 请求复位（秒）
+          <input type="number" id="ug-l3" min="7" max="1800" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL3000000">
+        </label>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px" data-page-node-id="UgSaveRow0001">
+        <button id="ug-save-btn" class="btn btn-primary btn-sm" onclick="saveUsbGuardConfig()" data-page-node-id="UgSaveBtn00001">保存</button>
+        <span id="ug-status" style="font-size:0.72rem" data-page-node-id="UgStatusTxt0001"></span>
+      </div>
+      <div id="ug-summary" style="font-size:0.7rem;color:var(--text-muted);margin-top:6px" data-page-node-id="UgSummaryText00"></div>
+    </div>
   </div>
 </div>
 
@@ -269,40 +310,6 @@
     </div>
     <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px" data-page-node-id="i7KoBkCDg08ItDsr7wUOAA">推送内容模板（变量在保存时自动填充）</div>
     <div id="push-templates" style="display:flex;flex-direction:column;gap:10px" data-page-node-id="XSvC43sPTrkZfBssy4npV7">加载中...</div>
-    <div style="font-size:0.78rem;color:var(--text-muted);margin:16px 0 6px" data-page-node-id="UgHdrWrapTitle01">USB 链路守护（线在位但车机识别不到 U 盘时自动恢复）</div>
-    <div style="font-size:0.68rem;color:var(--text-muted);margin-bottom:8px" data-page-node-id="UgHdrWrapHint01">
-      判据：线在位（VBUS online）且 UDC state ≠ configured。拔线时不动作；L1（轻量重绑）无损，
-      不消耗熔断预算、可反复执行；熔断仅由 L2/L2.5/L3 这类重动作武装，窗口内只记录不动作。
-      L2.5（平台重绑，默认关闭）对 12.usbc2 做 unbind/bind，软件等价物理插拔，需手动启用。
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 14px;font-size:0.72rem" data-page-node-id="UgGridBlock001">
-      <label style="display:flex;align-items:center;gap:6px" data-page-node-id="UgLabelEnable00">
-        <input type="checkbox" id="ug-enabled" data-page-node-id="UgInputEnable00"> 启用守护
-      </label>
-      <label data-page-node-id="UgLabelPoll0000">轮询间隔（秒）
-        <input type="number" id="ug-poll" min="1" max="60" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputPoll0000">
-      </label>
-      <label data-page-node-id="UgLabelCool0000">推送冷却（秒）
-        <input type="number" id="ug-cooldown" min="1" max="3600" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputCool0000">
-      </label>
-      <label data-page-node-id="UgLabelBreak000">熔断窗口（分钟）
-        <input type="number" id="ug-breaker" min="1" max="1440" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputBreak000">
-      </label>
-      <label data-page-node-id="UgLabelL1000000">L1 轻量重绑（秒）
-        <input type="number" id="ug-l1" min="5" max="600" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL1000000">
-      </label>
-      <label data-page-node-id="UgLabelL2000000">L2 完整重启（秒）
-        <input type="number" id="ug-l2" min="6" max="900" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL2000000">
-      </label>
-      <label data-page-node-id="UgLabelL2500000">L2.5 平台重绑（秒）
-        <input type="number" id="ug-l25" min="7" max="1500" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL2500000">
-      </label>
-      <label style="display:flex;align-items:center;gap:6px" data-page-node-id="UgLabelRebind00"><input type="checkbox" id="ug-allow-rebind" data-page-node-id="UgInputRebind00"> 启用 L2.5 平台重绑（高级）</label>
-      <label data-page-node-id="UgLabelL3000000">L3 请求复位（秒）
-        <input type="number" id="ug-l3" min="7" max="1800" style="width:100%;box-sizing:border-box;margin-top:3px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" data-page-node-id="UgInputL3000000">
-      </label>
-    </div>
-    <div id="ug-summary" style="font-size:0.7rem;color:var(--text-muted);margin-top:6px" data-page-node-id="UgSummaryText00"></div>
   </div>
 </div>
 
@@ -921,7 +928,6 @@ async function loadPushConfig() {
     _pushDefaults = d.defaults || {};
     const thEl = document.getElementById('push-tpms-threshold');
     if (thEl) thEl.value = d.tpms_alarm_threshold;
-    applyUsbGuardCfg(d.usb_guard || {});
     box.innerHTML = PUSH_TEMPLATES_META.map(m =>
       '<div>' +
       '<div style="font-size:0.75rem;font-weight:600;margin-bottom:2px">' + m.label +
@@ -1003,6 +1009,46 @@ function collectUsbGuardCfg() {
   };
 }
 
+// v0.3.1.61：USB 链路守护独立加载/保存（端点 /api/system/usb-guard-config），
+// 与「推送与报警」解耦——块内自带保存按钮，不再依赖别处的「保存全部」。
+async function loadUsbGuardConfig() {
+  const st = document.getElementById('ug-status');
+  try {
+    const r = await fetch('/api/system/usb-guard-config');
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || '加载失败');
+    applyUsbGuardCfg(d.usb_guard || {});
+    if (st) st.textContent = '';
+  } catch (e) {
+    if (st) { st.textContent = '加载失败: ' + e; st.style.color = 'var(--danger)'; }
+  }
+}
+
+async function saveUsbGuardConfig() {
+  const st = document.getElementById('ug-status');
+  const payload = collectUsbGuardCfg();
+  try {
+    const r = await fetch('/api/system/usb-guard-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usb_guard: payload })
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || '保存失败');
+    // 回读服务端确认（防"提示已保存、实则未落库"）
+    const r2 = await fetch('/api/system/usb-guard-config');
+    const d2 = await r2.json();
+    const saved = (d2 && d2.usb_guard) || {};
+    if (!!saved.allow_platform_rebind !== !!payload.allow_platform_rebind ||
+        !!saved.enabled !== !!payload.enabled) {
+      throw new Error('回读不一致，保存未生效');
+    }
+    applyUsbGuardCfg(saved);
+    if (st) { st.textContent = '已保存'; st.style.color = 'var(--success)'; }
+  } catch (e) {
+    if (st) { st.textContent = '保存失败: ' + e; st.style.color = 'var(--danger)'; }
+  }
+}
+
 function resetTpl(key) {
   const el = document.getElementById('push-tpl-' + key);
   if (el && _pushDefaults[key]) {
@@ -1027,14 +1073,13 @@ async function savePushConfig() {
   try {
     const r = await fetch('/api/system/push-config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tpms_alarm_threshold: th, push_templates: templates, usb_guard: collectUsbGuardCfg() })
+      body: JSON.stringify({ tpms_alarm_threshold: th, push_templates: templates })
     });
     const d = await r.json();
     if (st) {
       st.textContent = d.success ? '已保存' : ('保存失败: ' + (d.error || ''));
       st.style.color = d.success ? 'var(--success)' : 'var(--danger)';
     }
-    if (d.success) applyUsbGuardCfg(collectUsbGuardCfg());
     const sm = document.getElementById('push-summary');
     if (sm && d.success) sm.textContent = '阈值 ' + th + ' bar';
   } catch (e) {
@@ -1042,6 +1087,7 @@ async function savePushConfig() {
   }
 }
 loadPushConfig();
+loadUsbGuardConfig();   // v0.3.1.61：USB 链路守护配置独立加载（已从「推送与报警」迁入「USB 模式」）
 
 // ═══ 挂载点 status ═══
 async function load挂载点Status() {
