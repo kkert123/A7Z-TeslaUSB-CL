@@ -32,6 +32,13 @@ AP_TRANSITION_TTL = 120                                   # transition 标记最
 AP_START_TIME_FILE = "/var/run/teslausb-ap-start-time"    # R5: AP 启动时间戳（宽限期防震荡）；内容 JSON {ts, manual}
 AP_GRACE_PERIOD_SEC = 900                                 # R5: fallback 自动开启 AP 的宽限期 15min（防震荡）
 AP_MANUAL_GRACE_PERIOD_SEC = 180                          # v0.3.1.36: 手动开启 AP 的宽限期 3min（用户主动开，无震荡风险）
+# v0.3.1.60（10-03 事故 R1）：fallback AP 的自愈「首探静默期」5min。
+# 原设计把 fallback 15min 整段静默（_ap_grace_period_elapsed）同时用于
+# ①full_check 全量扫描降频 ②_ap_self_heal 让出探测 —— 后者导致上游 WiFi 恢复了
+# 也 15min 内零探测（用户体感「自动切到 AP 就不再切回、得手动关」）。
+# 现将二者解耦：全量扫描仍 15min 降频（护住 v0.3.1.31 防子进程风暴目标），
+# 让出探测改由本「首探静默期」+ 后续指数退避 + 切换冷却 + 客户端感知共同限流。
+AP_FALLBACK_QUIET_SEC = 300                               # 自愈让出探测首探静默 5min（= AP_BACKOFF_INIT）
 AP_BACKOFF_FILE = "/var/run/teslausb-ap-backoff"          # 自愈退避分钟数（持久化，timer 新进程可见）
 AP_LAST_TRY_FILE = "/var/run/teslausb-ap-last-try"        # 自愈上次探测时间戳
 AP_HAD_CLIENTS_FILE = "/var/run/teslausb-ap-had-clients"  # v0.3.1.36: 上次探测时是否有客户端（断开事件检测）
@@ -1158,6 +1165,31 @@ def _ap_grace_period_elapsed() -> bool:
     return True
 
 
+def _ap_quiet_period_elapsed() -> bool:
+    """v0.3.1.60（10-03 R1）：自愈「让出探测」的首探静默期是否已过。
+
+    与 _ap_grace_period_elapsed 的区别（二者已解耦）：
+      - _ap_grace_period_elapsed：服务 full_check 全量扫描降频，fallback **15min**
+        （护住 v0.3.1.31 防子进程风暴目标，保持不变）；
+      - 本函数：只服务 _ap_self_heal 的让出探测，把原「15min 整段静默」缩为
+        fallback **5min** / 手动 **3min**，之后交由 指数退避 + 切换冷却 + 客户端感知
+        继续限流（见 _ap_self_heal 常规路径）。
+
+    无记录 / 文件损坏时视为已过（fail-open，绝不把设备钉在 AP 模式）。
+    """
+    try:
+        if os.path.exists(AP_START_TIME_FILE):
+            with open(AP_START_TIME_FILE) as f:
+                data = json.load(f)
+            ts = int(data.get("ts", 0))
+            manual = bool(data.get("manual", False))
+            quiet = AP_MANUAL_GRACE_PERIOD_SEC if manual else AP_FALLBACK_QUIET_SEC
+            return (time.time() - ts) >= quiet
+    except Exception:
+        pass
+    return True
+
+
 def _read_had_clients() -> bool:
     """读取上次探测时的客户端状态（v0.3.1.36 断开事件检测）"""
     try:
@@ -2259,11 +2291,21 @@ class WifiSmartSwitch:
         except Exception:
             pass
 
-    def _switch_to(self, ssid: str) -> bool:
-        """切换到指定 WiFi（优先 5GHz），返回是否成功"""
+    def _switch_to(self, ssid: str, force: bool = False) -> bool:
+        """切换到指定 WiFi（优先 5GHz），返回是否成功。
+
+        v0.3.1.60（10-03 R2）：force=True 供「断网恢复」路径（full_check 的重连
+        分支）使用 —— 此时设备已无上行网络，切换冷却（本意防「两个网络间来回
+        抖动切换」）不该否决唯一可连网络，否则会把「能救」误判成「所有网络均
+        无法连接」→ 凭空多开一次 AP。前台「切到更优网络」仍走默认 force=False，
+        保持 300s 冷却防抖。
+        """
         if not self._can_switch():
-            self.log.info("切换冷却中，跳过切换到 %s", ssid)
-            return False
+            if not force:
+                self.log.info("切换冷却中，跳过切换到 %s", ssid)
+                return False
+            # 恢复路径强制切换：打印以留取证（区分「冷却否决」vs「强制绕过」）
+            self.log.info("恢复路径强制切换（绕过切换冷却）: %s", ssid)
 
         # 5GHz 优先：扫描同名 SSID 的最佳 BSSID
         best_bssid = _pick_best_bssid(ssid)
@@ -2496,7 +2538,7 @@ class WifiSmartSwitch:
 
                 if signal >= SIGNAL_THRESHOLD_DBM:
                     self.log.info("尝试连接: %s (信号: %d%%)", ssid, signal)
-                    if self._switch_to(ssid):
+                    if self._switch_to(ssid, force=True):   # v0.3.1.60 R2：恢复路径绕冷却
                         reconnected = True
                         break
 
@@ -2506,7 +2548,7 @@ class WifiSmartSwitch:
                 saved = self._get_saved_connections()
                 for ssid in saved:
                     self.log.info("尝试已保存网络: %s", ssid)
-                    if self._switch_to(ssid):
+                    if self._switch_to(ssid, force=True):   # v0.3.1.60 R2：恢复路径绕冷却
                         reconnected = True
                         break
 
@@ -2629,6 +2671,12 @@ class WifiSmartSwitch:
             ok, msg = _ap_bring_up()
             if ok:
                 self.log.info("AP 热点已启动 (SSID: %s)", get_ap_config().get("ssid", "TeslaUSB-Setup"))
+                # v0.3.1.60（10-03 R1）：新一轮 fallback 起 AP → 退避归初始值。
+                # 使自愈首探在静默期（_ap_quiet_period_elapsed, 5min）结束后立即进行，
+                # 不再被上一轮累积的大退避（最多 30min）推迟——这正是「切到 AP 后长时间
+                # 不回连」的另一半原因。仅本函数（真·全新起 AP）会走到这里；
+                # AP 已在运行时在函数上方已 return，不会重置。
+                _write_backoff(AP_BACKOFF_INIT)
             else:
                 self.log.error("AP 启动失败: %s", msg)
         except Exception as e:
@@ -2691,10 +2739,15 @@ class WifiSmartSwitch:
                     _write_backoff(min(_read_backoff() * 2, AP_BACKOFF_MAX))
                     _record_ap_try()
                 return
-            # ── 常规路径（无客户端、非断开事件）：宽限期 → 冷却 → 退避 ──
+            # ── 常规路径（无客户端、非断开事件）：首探静默 → 冷却 → 退避 ──
             _clear_ap_client_stuck()  # v0.3.1.58(F4)：无客户端 → 计时归零
-            # R5/B1：AP 启动宽限期内不自愈让出（手动 3min / fallback 15min）
-            if not _ap_grace_period_elapsed():
+            # v0.3.1.60（10-03 R1）：原「fallback 15min 整段静默（_ap_grace_period_elapsed）」
+            # 改为「降频探测」——首探静默缩到 fallback 5min / 手动 3min，
+            # 之后由下方 切换冷却 + 指数退避 + 客户端感知 三重限流继续约束。
+            # 背景：15min 内零探测 + 全量扫描也被降频跳过 → 上游 WiFi 恢复了设备也回不去，
+            # 用户体感「自动切到 AP 就不再切回、得手动进页面关掉才行」。
+            # _ap_grace_period_elapsed（15min）仍服务 full_check 全量扫描降频，此处不再引用。
+            if not _ap_quiet_period_elapsed():
                 return
             # S2：切换冷却期内不让出（避免 _switch_to 被冷却挡住 → 误判失败重启 AP）
             if not self._can_switch():

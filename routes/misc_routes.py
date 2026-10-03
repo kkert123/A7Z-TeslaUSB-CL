@@ -486,6 +486,7 @@ LOG_FILE_MAP = {
     'bg_preview': '/var/log/teslausb-bgpreview.log',
     'sentry': '/var/log/teslausb-sentry.log',
     'wifi': '/var/log/wifi-smart-switch.log',
+    'wifi_service': '/var/log/teslausb-wifi.log',   # v0.3.1.60：补 v59 新增的 WiFi 持久日志（此前排障不可见）
     'boot': '/var/log/teslausb-boot-notify.log',
     'notify': '/var/log/teslausb-notify-retry.log',
     'web_log': '/var/log/teslausb.log',
@@ -495,7 +496,7 @@ LOG_FILE_MAP = {
 @misc_bp.route('/api/logs/file-stream')
 def api_logs_file_stream():
     """SSE 实时日志流 — 基于日志文件（非 journalctl）。
-    支持 ?name=bg_preview|sentry|wifi|boot|notify|web_log
+    支持 ?name=bg_preview|sentry|wifi|wifi_service|boot|notify|web_log
     """
     name = request.args.get('name', '').strip()
     if name not in LOG_FILE_MAP:
