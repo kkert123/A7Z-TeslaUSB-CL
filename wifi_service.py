@@ -1218,6 +1218,21 @@ def _ap_grace_period_elapsed() -> bool:
     return True
 
 
+def _ap_started_manually() -> bool:
+    """本轮 AP 是否由**用户手动**开启（读启动时间标记的 manual 字段）。
+
+    并发路径下 STA 恒在线——若不加区分，用户手动开的 AP 会被自愈"一开就关"。
+    手动开 = 用户明确意图，自愈不应自动关闭它（交回用户控制）。
+    """
+    try:
+        if os.path.exists(AP_START_TIME_FILE):
+            with open(AP_START_TIME_FILE) as f:
+                return bool(json.load(f).get("manual", False))
+    except Exception:
+        pass
+    return False
+
+
 def _ap_quiet_period_elapsed() -> bool:
     """v0.3.1.60（10-03 R1）：自愈「让出探测」的首探静默期是否已过。
 
@@ -1502,19 +1517,120 @@ def _freq_to_channel(freq: int) -> Optional[int]:
     return None
 
 
-def _sta_current_channel() -> int:
-    """STA(wlan0) 当前信道（并发 AP 必须同信道）。取不到回退 6。"""
+def _sta_link_freq() -> Optional[int]:
+    """STA(wlan0) 已关联的频率(MHz)；未关联返回 None（区别于 _sta_current_channel 的回退 6）。"""
     try:
         r = subprocess.run(["/sbin/iw", "dev", WIFI_INTERFACE, "link"],
                            capture_output=True, text=True, timeout=5)
         m = re.search(r"freq:\s*(\d+)", r.stdout)
         if m:
-            ch = _freq_to_channel(int(m.group(1)))
-            if ch:
-                return ch
+            return int(m.group(1))
     except Exception:
         pass
+    return None
+
+
+def _sta_current_channel() -> int:
+    """STA(wlan0) 当前信道（并发 AP 必须同信道）。取不到回退 6。"""
+    f = _sta_link_freq()
+    if f:
+        ch = _freq_to_channel(f)
+        if ch:
+            return ch
     return 6
+
+
+def _channel_to_freq(ch: int) -> int:
+    """信道号→频率(MHz)。2.4G(1-14) 与 5G(36+) 覆盖，未知回退 2412。"""
+    if ch == 14:
+        return 2484
+    if 1 <= ch <= 13:
+        return 2407 + ch * 5
+    if 36 <= ch <= 177:
+        return 5000 + ch * 5
+    return 2412
+
+
+def _ap_vif_current_channel(ifname: str) -> Optional[int]:
+    """AP vif 当前信道（iw dev <if> info → channel/ch<N>）。取不到返回 None。"""
+    try:
+        r = subprocess.run(["/sbin/iw", "dev", ifname, "info"],
+                           capture_output=True, text=True, timeout=5)
+        # 形如 "channel 1 (2412 MHz), width: 20 MHz"
+        m = re.search(r"channel\s+(\d+)", r.stdout)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _hostapd_cli_chan_switch(ifname: str, freq: int) -> bool:
+    """尝试用 CSA 平滑切换 AP 信道（客户端无感）。成功返回 True。"""
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "/usr/sbin/hostapd_cli", "-p", AP_VIF_CTRL_DIR,
+             "-i", ifname, "chan_switch", "10", str(freq)],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = (r.stdout or "").strip()
+        # hostapd_cli 成功时通常回 "OK"
+        return r.returncode == 0 and "FAIL" not in out.upper()
+    except Exception:
+        return False
+
+
+def _sync_ap_channel() -> Tuple[bool, str]:
+    """v0.3.1.62（M3）：并发 AP 跟随 STA 信道（单射频必须同信道）。
+
+    触发：STA（wlan0）在 AP 运行期间换了信道（漫游/重连到不同信道）→
+    ap0 必须跟随，否则并发失效（AP 射频与 STA 不在同一信道）。
+
+    策略：① CSA（hostapd_cli chan_switch，客户端无感）——优先；
+          ② 兜底：重启独立 hostapd（AP 客户端会瞬断一次）。
+    返回 (ok, msg)；非并发/AP 未运行/信道一致 → 视为成功（no-op）。
+    """
+    if not _use_concurrent():
+        return True, "非并发路径"
+    if _ap_transition_active():
+        return True, "AP 起停进行中，跳过信道同步"
+    if not _ap_vif_hostapd_running():
+        return True, "AP 未运行"
+    ifname = _ap_vif_actual_name()
+    if not ifname:
+        return True, "无 AP vif"
+    # 必须确认 STA **已关联**才能取其真实信道——否则 _sta_current_channel 会回退
+    # 到默认 ch6，可能把运行中的 AP 误跟到 ch6（STA 掉线瞬间的危险误判）。
+    sta_freq = _sta_link_freq()
+    if not sta_freq:
+        return True, "STA 未关联，跳过信道跟随（保持 AP 当前信道）"
+    sta_ch = _freq_to_channel(sta_freq)
+    if not sta_ch:
+        return True, "STA 信道未知，跳过"
+    ap_ch = _ap_vif_current_channel(ifname)
+    if ap_ch is None or ap_ch == sta_ch:
+        return True, f"信道一致(ch{sta_ch})"
+    freq = _channel_to_freq(sta_ch)
+    logger = logging.getLogger("wifi_service")
+    logger.info("AP 信道跟随：STA ch%s → ap0 ch%s（freq=%s）", ap_ch, sta_ch, freq)
+    # ① CSA 优先
+    if _hostapd_cli_chan_switch(ifname, freq):
+        time.sleep(2)
+        if _ap_vif_current_channel(ifname) == sta_ch:
+            logger.info("AP 信道跟随：CSA 成功（ap0 → ch%s）", sta_ch)
+            return True, f"CSA 切换至 ch{sta_ch}"
+    # ② 兜底：重启 hostapd（改 conf 后重启）
+    logger.info("AP 信道跟随：CSA 未生效，重启 hostapd（ap0 → ch%s）", sta_ch)
+    _hostapd_ap_stop()
+    if not _write_hostapd_conf(ifname=ifname, channel=sta_ch, conf_path=AP_VIF_HOSTAPD_CONF):
+        logger.warning("AP 信道跟随：重写配置失败")
+        _hostapd_ap_start()  # 尽力恢复（按旧信道）
+        return False, "重写 hostapd 配置失败"
+    if not _hostapd_ap_start():
+        logger.warning("AP 信道跟随：hostapd 重启失败")
+        return False, "hostapd 重启失败"
+    logger.info("AP 信道跟随：完成（ap0 → ch%s）", sta_ch)
+    return True, f"重启至 ch{sta_ch}"
 
 
 def _ap_vif_hostapd_running() -> bool:
@@ -2277,7 +2393,40 @@ def _ap_has_clients() -> bool:
         return True  # 查询失败时保守处理：视为有客户端，不打断
 
 
-def start_ap() -> dict:
+def _remote_lock_risk() -> Tuple[bool, str]:
+    """v0.3.1.62（M94）：评估「手动开 AP 是否会自断唯一上行链路」的风险。
+
+    仅 **legacy 路径**（并发关闭）有风险：legacy `_ap_bring_up` 会
+    `nmcli device set wlan0 managed no` + 停 wpa_supplicant → 释放 wlan0；
+    若此时 wlan0 是**唯一默认路由**（如运维经它接入），则设备失联。
+    并发路径不释放 wlan0，无此风险。
+
+    判据（保守）：legacy + wlan0 已连 + wlan0 承载默认路由 + **无其它默认路由**
+    → 判为有风险。任何判定异常一律视为**有风险**（宁可不误开，也不自断链路）。
+    """
+    if _use_concurrent():
+        return False, "并发路径不释放 wlan0"
+    try:
+        r = subprocess.run(["nmcli", "-t", "-f", "DEVICE,STATE", "dev", "status"],
+                           capture_output=True, text=True, timeout=10)
+        if "wlan0:connected" not in r.stdout:
+            return False, "wlan0 未连接（无自锁风险）"
+        rr = subprocess.run(["ip", "route"], capture_output=True, text=True, timeout=5)
+        defaults = [l for l in rr.stdout.splitlines() if l.strip().startswith("default")]
+        on_wlan0 = [l for l in defaults if "dev wlan0" in l]
+        if not on_wlan0:
+            return False, "wlan0 非默认路由（无自锁风险）"
+        # 只要有**任何**非 wlan0 的默认路由，即视为有备份上行（更严谨：
+        # 不能只看条数——两条默认路由可能都在 wlan0）。
+        off_wlan0 = [l for l in defaults if "dev wlan0" not in l]
+        if off_wlan0:
+            return False, "存在非 wlan0 默认路由（有备份上行，风险低）"
+        return True, "将释放 wlan0（当前唯一默认路由），可能导致远程失联"
+    except Exception as e:
+        return True, f"无法判定上行拓扑（{e}），保守拒绝"
+
+
+def start_ap(force: bool = False) -> dict:
     """手动启动 AP（完整 bring-up）。
 
     v0.3.1.36（2B）：手动开启 = 用户主动操作（无 fallback 震荡风险）→
@@ -2285,7 +2434,19 @@ def start_ap() -> dict:
     否则设备在断网 fallback 期间退避可能已积累到 30min，手动开 AP 后
     手机断开也要等满退避 → "不切回 WiFi"。
     v0.3.1.59：手动开 AP 同时取消「关闭」抑制（用户接管 = 撤回先前的关闭意图）。
+    v0.3.1.62（M94）：远程自锁安全闸——legacy 路径 + wlan0 为唯一上行时拒绝
+    （除非 force=True），防止手动开 AP 自断链路（10-04 事故）。
     """
+    # M94：远程自锁安全闸（放在最前，未通过则不改动任何状态）
+    if not force:
+        risk, why = _remote_lock_risk()
+        if risk:
+            logging.getLogger("wifi_service").warning("拒绝手动开 AP（远程自锁风险）：%s", why)
+            return {"success": False,
+                    "message": f"已拒绝以免自断链路：{why}。"
+                               f"如确需（人已在设备旁），请带 force=true 重试；"
+                               f"或启用「AP+STA 并发」开关（并发不释放 wlan0）。",
+                    "risk": "remote_self_lock"}
     _clear_ap_manual_off()            # v0.3.1.59：手动开 AP = 取消关闭抑制
     _write_backoff(AP_BACKOFF_INIT)   # 2B：手动开 AP 退避归 5min
     _write_had_clients(False)         # 重置客户端状态（断开事件检测基准）
@@ -2786,6 +2947,14 @@ class WifiSmartSwitch:
         except Exception:
             pass
 
+        # v0.3.1.62（M3）：并发 AP 跟随 STA 信道（单射频必须同信道；
+        # STA 漫游/重连换信道 → ap0 需跟随，否则并发失效）。非并发为 no-op。
+        try:
+            if _use_concurrent():
+                _sync_ap_channel()
+        except Exception:
+            pass
+
         # v0.3.1.31 AP 自愈：AP 运行中按退避周期探测可回连网络
         # （客户端感知：有手机连接时不打断；扫描驱动：确认已知 WiFi 才让出）
         try:
@@ -3088,6 +3257,10 @@ class WifiSmartSwitch:
                     _clear_ap_client_stuck()
                     return
                 if _ap_transition_active():
+                    return
+                # 手动开启的 AP → 不自动关闭（并发下 STA 恒在线，否则会"一开就关"）。
+                # 手动 = 用户明确意图，交回用户控制（用户可显式关闭）。
+                if _ap_started_manually():
                     return
                 # STA 是否已连上 WiFi（并发下 wlan0 始终是 STA）
                 if not self._get_current_ssid():

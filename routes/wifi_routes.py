@@ -196,7 +196,9 @@ def ap_control_api():
     action = data.get("action", "")
     
     if action == "start":
-        result = wifi_service.start_ap()
+        # M94：force=true 跳过「远程自锁」安全闸（人已在设备旁时使用）
+        force = bool(data.get("force", False))
+        result = wifi_service.start_ap(force=force)
     elif action == "stop":
         result = wifi_service.stop_ap()
     else:

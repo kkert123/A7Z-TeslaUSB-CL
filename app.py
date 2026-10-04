@@ -155,41 +155,50 @@ if __name__ == '__main__':
         app.logger.warning(f"云归档自动同步恢复失败: {e}")
     
     # ── 开机通知（M72：升级成功走模板推送版本号，普通启动推固定文案）──
-    try:
-        import json as _json
-        import os as _os
-        from weixin_notifier import WeixinNotifier
-        from utils.app_helpers import get_push_template
-        notifier = WeixinNotifier(bot_name="系统通知")
-        marker_path = '/opt/radxa_data/teslausb/data/upgrade_success.json'
-        upgraded = None
+    # M95（v0.3.1.62）：改为**后台线程**发送。原实现同步执行——若发送失败，
+    # weixin send_text 会退避重试 10/30/60s（+请求超时），最长阻塞 ~3.5min，
+    # 期间 app.run() 永不执行 → 5000 端口不监听。断网场景（如 AP fallback，
+    # 本身无上行）下会导致**用户连上 A7Z 的 AP 也打不开配置页**。
+    # 放到 daemon 线程后，Web 立即监听，通知自行重试。
+    def _send_boot_notification():
         try:
-            with open(marker_path, 'r', encoding='utf-8') as _f:
-                upgraded = _json.load(_f)
-        except Exception:
+            import json as _json
+            import os as _os
+            from weixin_notifier import WeixinNotifier
+            from utils.app_helpers import get_push_template
+            notifier = WeixinNotifier(bot_name="系统通知")
+            marker_path = '/opt/radxa_data/teslausb/data/upgrade_success.json'
             upgraded = None
-        if upgraded and upgraded.get('version'):
-            _ver = upgraded['version']
-            # 模板可由用户在 /system 自定义，占位符写错不能让整条开机通知挂掉
             try:
-                _txt = get_push_template('upgrade_success').format(version=_ver)
+                with open(marker_path, 'r', encoding='utf-8') as _f:
+                    upgraded = _json.load(_f)
             except Exception:
-                _txt = f"系统升级成功 V{_ver}"
-            # M78: 仅在发送成功时删除标记。原实现无条件删除——若推送失败
-            # （网络/Webhook 抖动），本次升级文案会永久丢失，下次启动退化为
-            # 普通"开机启动"。失败时保留标记，下次启动自动重试。
-            if notifier.send_text(_txt):
+                upgraded = None
+            if upgraded and upgraded.get('version'):
+                _ver = upgraded['version']
+                # 模板可由用户在 /system 自定义，占位符写错不能让整条开机通知挂掉
                 try:
-                    _os.remove(marker_path)
-                except OSError:
-                    pass
-                app.logger.info(f"升级成功通知已发送: v{_ver}")
+                    _txt = get_push_template('upgrade_success').format(version=_ver)
+                except Exception:
+                    _txt = f"系统升级成功 V{_ver}"
+                # M78: 仅在发送成功时删除标记。原实现无条件删除——若推送失败
+                # （网络/Webhook 抖动），本次升级文案会永久丢失，下次启动退化为
+                # 普通"开机启动"。失败时保留标记，下次启动自动重试。
+                if notifier.send_text(_txt):
+                    try:
+                        _os.remove(marker_path)
+                    except OSError:
+                        pass
+                    app.logger.info(f"升级成功通知已发送: v{_ver}")
+                else:
+                    app.logger.warning(f"升级成功通知发送失败，保留标记待下次启动重试: v{_ver}")
             else:
-                app.logger.warning(f"升级成功通知发送失败，保留标记待下次启动重试: v{_ver}")
-        else:
-            notifier.send_text(get_push_template('boot'))
-            app.logger.info("开机通知已发送")
-    except Exception as e:
-        app.logger.warning(f"开机通知发送失败: {e}")
-    
+                notifier.send_text(get_push_template('boot'))
+                app.logger.info("开机通知已发送")
+        except Exception as e:
+            app.logger.warning(f"开机通知发送失败: {e}")
+
+    threading.Thread(target=_send_boot_notification, daemon=True,
+                     name="boot-notification").start()
+
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
