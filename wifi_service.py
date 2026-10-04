@@ -95,6 +95,43 @@ AP_DNS_IPTABLES = [
      "--dport", "53", "-j", "REDIRECT", "--to-ports", str(AP_DNS_PORT)],
 ]
 
+# ── v0.3.1.62: AP+STA 并发（AIC8800D80 支持 managed+AP 共存）──
+# 旧路径（互斥切换）：wlan0 独占，AP 与 STA 二选一（上面 AP_PORTAL_IPTABLES/
+#   AP_DNS_IPTABLES 均绑 wlan0）。
+# 新路径（并发）：wlan0 恒为 STA，另建 ap0(__ap) 作紧急 AP；如下常量 + 独立
+#   hostapd/dnsmasq 实例。默认关闭（config.AP_STA_CONCURRENT_DEFAULT=False）。
+AP_VIF = "ap0"                                            # AP 虚拟接口名（phy0 第二 vif）
+AP_VIF_RUN_DIR = "/tmp/a7z_ap"                            # 独立实例 conf/pid 目录
+AP_VIF_HOSTAPD_CONF = "/tmp/a7z_ap/hostapd-ap0.conf"
+AP_VIF_HOSTAPD_PID = "/tmp/a7z_ap/hostapd-ap0.pid"
+AP_VIF_DNSMASQ_PID = "/tmp/a7z_ap/dnsmasq-ap0.pid"
+AP_VIF_CTRL_DIR = "/var/run/hostapd-ap0"                  # hostapd ctrl_interface
+AP_VIF_SETTLE_SEC = 1                                     # 建 vif 后等待秒数
+
+
+def _concurrent_default() -> bool:
+    """并发开关的编译期默认值（来自 config.py，缺失时 False）。"""
+    try:
+        import config as _cfg
+        return bool(getattr(_cfg, "AP_STA_CONCURRENT_DEFAULT", False))
+    except Exception:
+        return False
+
+
+def _use_concurrent() -> bool:
+    """是否走 AP+STA 并发路径（v0.3.1.62）。
+
+    优先级：config/ap_config.json 的 "ap_sta_concurrent" > config.py 默认值。
+    读取异常一律返回默认（fail-safe，绝不因配置错误误开新路径）。
+    """
+    try:
+        cfg = get_ap_config()
+        if "ap_sta_concurrent" in cfg:
+            return bool(cfg["ap_sta_concurrent"])
+    except Exception:
+        pass
+    return _concurrent_default()
+
 
 # ─────────────────────────────────────────────
 # WiFi 状态文件（切换结果持久化）
@@ -597,7 +634,7 @@ def switch_wifi(ssid: str, password: str = "", prefer_5ghz: bool = True) -> dict
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
         )
-        if _hap.stdout.strip() in ("active", "activating"):
+        if _hap.stdout.strip() in ("active", "activating") and not _use_concurrent():
             if get_ap_force_mode() == "force-on":
                 status = {"success": False, "action": "rejected", "ssid": ssid,
                           "message": "AP 处于「强制开启」模式，请先改为「自动」或手动关闭 AP 后再切换"}
@@ -985,13 +1022,16 @@ def set_ap_config(ssid: str, passphrase: str) -> dict:
 
 
 def _ap_is_running() -> bool:
-    """hostapd 是否在运行（active/activating）。
+    """hostapd 是否在运行（active/activating；并发路径 = 独立实例存活）。
 
     stop_ap() 专用：与 _ap_bring_down() 的「wlan0 是否恢复联网」口径**分离**——
     「关掉了但当下没 WiFi 可连」属正常，不应报失败（10-01 事故 R3）。
     查询失败保守返回 True（宁可不报「已关闭」，也不误报成功）。
     """
     try:
+        if _use_concurrent():
+            # v0.3.1.62：并发路径用独立 hostapd 实例（非 systemd hostapd.service）
+            return _ap_vif_hostapd_running()
         r = subprocess.run(
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
@@ -1004,16 +1044,13 @@ def _ap_is_running() -> bool:
 def get_ap_status() -> dict:
     """获取 AP 状态（hostapd 是否运行 + 手动关闭抑制剩余时间）"""
     try:
-        result = subprocess.run(
-            ["systemctl", "is-active", "hostapd"],
-            capture_output=True, text=True, timeout=5,
-        )
-        ap_active = result.stdout.strip() == "active"
+        ap_active = _ap_is_running()
         remain = _ap_manual_off_remaining()
         return {
             "available": True,
             "ap_active": ap_active,
             "active": ap_active,
+            "concurrent": _use_concurrent(),
             "manual_off_active": remain > 0,
             "manual_off_remaining": remain,
             "manual_off_ttl": _ap_manual_off_ttl(),
@@ -1021,6 +1058,7 @@ def get_ap_status() -> dict:
         }
     except Exception:
         return {"available": False, "ap_active": False, "active": False,
+                "concurrent": False,
                 "manual_off_active": False, "manual_off_remaining": 0,
                 "manual_off_ttl": AP_MANUAL_OFF_TTL_SEC, "message": "检查失败"}
 
@@ -1057,11 +1095,15 @@ def set_ap_force_mode(mode: str) -> dict:
 AP_STATIC_IP = "192.168.42.1"
 
 
-def _write_hostapd_conf() -> bool:
-    """按当前 AP 配置重写 /etc/hostapd/hostapd.conf，返回是否成功。
+def _write_hostapd_conf(ifname: str = None, channel: int = None, conf_path: str = None) -> bool:
+    """按当前 AP 配置重写 hostapd 配置，返回是否成功。
 
     始终重写（而非仅在文件缺失时生成），避免旧配置残留旧 SSID/密码，
     导致用户改过的 AP 名称不生效。
+
+    v0.3.1.62：加 `ifname`/`channel`/`conf_path` 以支持 AP+STA 并发路径
+    （AP 绑 ap0、信道跟随 STA、写入独立配置）。**不传参时行为与旧版完全一致**
+    （interface=wlan0 / channel=6 / /etc/hostapd/hostapd.conf），确保 legacy 零回归。
     """
     config = get_ap_config()
     ssid = config.get("ssid", "TeslaUSB-Setup")
@@ -1070,12 +1112,17 @@ def _write_hostapd_conf() -> bool:
     if not passphrase or len(passphrase) < 8:
         passphrase = "teslausb123"
 
-    conf = f"""interface=wlan0
+    iface = ifname or WIFI_INTERFACE
+    chan = channel or 6
+    hw_mode = "a" if chan > 14 else "g"          # >14 → 5G(802.11a)
+    ctrl = AP_VIF_CTRL_DIR if iface != WIFI_INTERFACE else "/var/run/hostapd"
+
+    conf = f"""interface={iface}
 driver=nl80211
-ctrl_interface=/var/run/hostapd
+ctrl_interface={ctrl}
 ssid={ssid}
-hw_mode=g
-channel=6
+hw_mode={hw_mode}
+channel={chan}
 wmm_enabled=0
 macaddr_acl=0
 auth_algs=1
@@ -1085,26 +1132,32 @@ wpa_passphrase={passphrase}
 wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 """
+    target = conf_path or "/etc/hostapd/hostapd.conf"
     try:
-        with open("/tmp/hostapd.conf.tmp", "w") as f:
+        if target.startswith("/etc/"):
+            # legacy：写临时文件 → sudo cp 到 /etc/hostapd/
+            with open("/tmp/hostapd.conf.tmp", "w") as f:
+                f.write(conf)
+            subprocess.run(
+                ["sudo", "-n", "mkdir", "-p", os.path.dirname(target)],
+                capture_output=True, timeout=10,
+            )
+            r = subprocess.run(
+                ["sudo", "-n", "cp", "/tmp/hostapd.conf.tmp", target],
+                capture_output=True, timeout=10,
+            )
+            try:
+                os.unlink("/tmp/hostapd.conf.tmp")
+            except Exception:
+                pass
+            return r.returncode == 0
+        # 并发：目标为 radxa 可写目录（/tmp/a7z_ap/），直接写
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w") as f:
             f.write(conf)
-        # 确保目录存在后再拷贝（/etc/hostapd 可能不存在）
-        subprocess.run(
-            ["sudo", "-n", "mkdir", "-p", "/etc/hostapd"],
-            capture_output=True, timeout=10,
-        )
-        r = subprocess.run(
-            ["sudo", "-n", "cp", "/tmp/hostapd.conf.tmp", "/etc/hostapd/hostapd.conf"],
-            capture_output=True, timeout=10,
-        )
-        return r.returncode == 0
+        return True
     except Exception:
         return False
-    finally:
-        try:
-            os.unlink("/tmp/hostapd.conf.tmp")
-        except Exception:
-            pass
 
 
 # ── AP 生命周期安全护栏辅助（v0.3.1.31） ──
@@ -1375,6 +1428,226 @@ def _ap_del_portal_iptables():
         pass
 
 
+# ── v0.3.1.62: AP+STA 并发辅助函数 ──
+
+def _ap_vif_actual_name() -> str:
+    """返回 phy 上除 wlan0 / p2p 外的命名接口（并发 AP vif 的实际名）。
+
+    udev 会把新建的 ap0 改名为 wlx<mac>，故必须以 iw dev 实际名引用。
+    """
+    try:
+        r = subprocess.run(["/sbin/iw", "dev"], capture_output=True, text=True, timeout=5)
+        names = []
+        for line in r.stdout.splitlines():
+            s = line.strip()
+            if s.startswith("Interface "):
+                names.append(s.split(None, 1)[1].strip())
+        for n in names:
+            if n != WIFI_INTERFACE:
+                return n
+    except Exception:
+        pass
+    return ""
+
+
+def _ap_vif_add() -> Tuple[bool, str]:
+    """并发路径：新建 AP vif。返回 (ok, 实际接口名 或 错误信息)。
+
+    时序（10-04 真机实测，顺序不可颠倒）：
+      1) iw dev wlan0 interface add ap0 type __ap  → phy 支持第二 vif，wlan0 不受扰
+      2) 立刻 nmcli device set <实际名> managed no → 否则 NM 抢管并把 vif 打回 managed
+      3) iw dev <实际名> set type __ap            → 强制 AP 类型
+    """
+    _ap_vif_del()  # 幂等：先清可能残留的旧 vif
+    r = subprocess.run(
+        ["sudo", "-n", "/sbin/iw", "dev", WIFI_INTERFACE,
+         "interface", "add", AP_VIF, "type", "__ap"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        return False, f"创建 {AP_VIF} 失败: {(r.stderr or r.stdout).strip()[:160]}"
+    time.sleep(AP_VIF_SETTLE_SEC)
+    name = _ap_vif_actual_name()
+    if not name:
+        return False, f"创建 {AP_VIF} 后未找到新接口"
+    subprocess.run(["sudo", "-n", "nmcli", "device", "set", name, "managed", "no"],
+                   capture_output=True, text=True, timeout=10)
+    subprocess.run(["sudo", "-n", "/sbin/iw", "dev", name, "set", "type", "__ap"],
+                   capture_output=True, text=True, timeout=10)
+    time.sleep(1)
+    return True, name
+
+
+def _ap_vif_del() -> None:
+    """幂等删除 AP vif（无则 no-op）。"""
+    name = _ap_vif_actual_name()
+    if not name:
+        return
+    subprocess.run(["sudo", "-n", "ip", "link", "set", name, "down"],
+                   capture_output=True, timeout=10)
+    subprocess.run(["sudo", "-n", "/sbin/iw", "dev", name, "del"],
+                   capture_output=True, timeout=10)
+
+
+def _freq_to_channel(freq: int) -> Optional[int]:
+    """频率→信道号（2.4G/5G/6G）。未知返回 None。"""
+    if freq == 2484:
+        return 14
+    if 2412 <= freq <= 2472:
+        return (freq - 2407) // 5
+    if 5180 <= freq <= 5825:
+        return (freq - 5000) // 5
+    if 5955 <= freq <= 7115:
+        return (freq - 5950) // 5
+    return None
+
+
+def _sta_current_channel() -> int:
+    """STA(wlan0) 当前信道（并发 AP 必须同信道）。取不到回退 6。"""
+    try:
+        r = subprocess.run(["/sbin/iw", "dev", WIFI_INTERFACE, "link"],
+                           capture_output=True, text=True, timeout=5)
+        m = re.search(r"freq:\s*(\d+)", r.stdout)
+        if m:
+            ch = _freq_to_channel(int(m.group(1)))
+            if ch:
+                return ch
+    except Exception:
+        pass
+    return 6
+
+
+def _ap_vif_hostapd_running() -> bool:
+    """独立 hostapd 实例是否在运行（读 pidfile + kill(0)）。"""
+    try:
+        if os.path.exists(AP_VIF_HOSTAPD_PID):
+            pid = int(open(AP_VIF_HOSTAPD_PID).read().strip())
+            os.kill(pid, 0)
+            return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # root 进程存在但不可 signal
+    except Exception:
+        pass
+    return False
+
+
+def _hostapd_ap_start() -> bool:
+    """启动独立 hostapd 实例（非 systemd，随 AP 生命周期）。"""
+    try:
+        os.makedirs(AP_VIF_RUN_DIR, exist_ok=True)
+        subprocess.run(["sudo", "-n", "mkdir", "-p", AP_VIF_CTRL_DIR],
+                       capture_output=True, timeout=10)
+        subprocess.run(["sudo", "-n", "/usr/sbin/hostapd", "-B",
+                        "-P", AP_VIF_HOSTAPD_PID, AP_VIF_HOSTAPD_CONF],
+                       capture_output=True, text=True, timeout=30)
+        time.sleep(3)
+        return _ap_vif_hostapd_running()
+    except Exception:
+        return False
+
+
+def _hostapd_ap_stop() -> None:
+    """停止独立 hostapd 实例（pidfile + pkill 兜底，幂等）。"""
+    try:
+        if os.path.exists(AP_VIF_HOSTAPD_PID):
+            pid = int(open(AP_VIF_HOSTAPD_PID).read().strip())
+            subprocess.run(["sudo", "-n", "kill", str(pid)], capture_output=True, timeout=10)
+    except Exception:
+        pass
+    subprocess.run(["sudo", "-n", "pkill", "-f", "hostapd-ap0.conf"],
+                   capture_output=True, timeout=10)
+    try:
+        os.remove(AP_VIF_HOSTAPD_PID)
+    except Exception:
+        pass
+
+
+def _ap_vif_dnsmasq_running() -> bool:
+    """独立 dnsmasq 实例是否在运行。"""
+    try:
+        if os.path.exists(AP_VIF_DNSMASQ_PID):
+            pid = int(open(AP_VIF_DNSMASQ_PID).read().strip())
+            os.kill(pid, 0)
+            return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        pass
+    return False
+
+
+def _dnsmasq_ap_start(ifname: str) -> bool:
+    """启动独立 dnsmasq 实例：仅绑 AP vif，DHCP + 上游 DNS（提供真实上网）。
+
+    与旧路径（系统 dnsmasq + 8053 + iptables 53→8053 + captive portal 劫持）
+    不同：并发路径**不劫持 DNS**，AP 客户端可正常上网（wlan0 STA 提供上游），
+    同时 192.168.42.1:5000 可达 A7Z Web。
+    """
+    _ap_prefix = ".".join(AP_STATIC_IP.split(".")[:3])
+    cmd = ["sudo", "-n", "/usr/sbin/dnsmasq", "--conf-file=/dev/null",
+           f"--interface={ifname}", "--bind-interfaces",
+           f"--dhcp-range={_ap_prefix}.10,{_ap_prefix}.100,12h",
+           f"--dhcp-option=3,{AP_STATIC_IP}",
+           f"--dhcp-option=6,{AP_STATIC_IP}",
+           f"--pid-file={AP_VIF_DNSMASQ_PID}"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        time.sleep(1)
+        if r.returncode != 0 and not _ap_vif_dnsmasq_running():
+            return False
+        return _ap_vif_dnsmasq_running()
+    except Exception:
+        return False
+
+
+def _dnsmasq_ap_stop() -> None:
+    """停止独立 dnsmasq 实例（幂等）。"""
+    try:
+        if os.path.exists(AP_VIF_DNSMASQ_PID):
+            pid = int(open(AP_VIF_DNSMASQ_PID).read().strip())
+            subprocess.run(["sudo", "-n", "kill", str(pid)], capture_output=True, timeout=10)
+    except Exception:
+        pass
+    subprocess.run(["sudo", "-n", "pkill", "-f", "dnsmasq-ap0"],
+                   capture_output=True, timeout=10)
+    try:
+        os.remove(AP_VIF_DNSMASQ_PID)
+    except Exception:
+        pass
+
+
+def _ap_concurrent_iptables(ifname: str, add: bool) -> None:
+    """并发路径 NAT + FORWARD 规则（AP 网段→wlan0 出，提供上网）。幂等。
+
+    add=True 先删后加；add=False 仅删。仅作用于该 AP vif，不碰 wlan0 的 STA 流量。
+    用绝对路径 /usr/sbin/iptables（非登录 shell/部分上下文 PATH 不含 /usr/sbin）。
+    """
+    prefix = ".".join(AP_STATIC_IP.split(".")[:3])
+    ipt = "/usr/sbin/iptables"
+    # (是否 nat 表, 参数列表[不含 -A/-D])
+    specs = [
+        (True, ["POSTROUTING", "-s", f"{prefix}.0/24", "-o", WIFI_INTERFACE, "-j", "MASQUERADE"]),
+        (False, ["FORWARD", "-i", ifname, "-o", WIFI_INTERFACE, "-j", "ACCEPT"]),
+        (False, ["FORWARD", "-i", WIFI_INTERFACE, "-o", ifname,
+                 "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]),
+    ]
+    for is_nat, params in specs:
+        base = [ipt] + (["-t", "nat"] if is_nat else [])
+        try:
+            # 先删（幂等）
+            subprocess.run(["sudo", "-n"] + base + ["-D"] + params,
+                           capture_output=True, text=True, timeout=10)
+            if add:
+                subprocess.run(["sudo", "-n"] + base + ["-A"] + params,
+                               capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass
+
+
 def _ap_ensure_resolved() -> bool:
     """保险：确保 systemd-resolved 正常运行（仅 failed 时修复，幂等）。
 
@@ -1541,6 +1814,92 @@ def _ap_stop_client_monitor() -> None:
         pass
 
 
+def _ap_bring_up_concurrent(manual: bool = False) -> Tuple[bool, str]:
+    """v0.3.1.62：AP+STA 并发启动（wlan0 保持 STA，另建 ap0 作紧急 AP）。
+
+    与 legacy 的根本区别：**不释放 wlan0 的 STA 管控** —— wlan0 全程保持联网/
+    探测，仅在 phy0 上新建 ap0 第二 vif 作 AP。故上游 WiFi 恢复时无需"切回"。
+    独立 hostapd/dnsmasq 实例，随 AP 生命周期起停（不碰系统服务）。
+    """
+    _set_ap_transition()
+    try:
+        _clear_ap_client_stuck()  # AP 重新拉起 → 计时从本轮起算
+        # 1) 新建 AP vif（不碰 wlan0）
+        ok, name = _ap_vif_add()
+        if not ok:
+            _clear_ap_transition()
+            return False, f"并发起 AP 失败：{name}"
+        ifname = name
+        # 2) 静态 IP + 接口 up
+        subprocess.run(["sudo", "-n", "ip", "addr", "add", f"{AP_STATIC_IP}/24", "dev", ifname],
+                       capture_output=True, text=True, timeout=10)
+        subprocess.run(["sudo", "-n", "ip", "link", "set", ifname, "up"],
+                       capture_output=True, text=True, timeout=10)
+        # 3) hostapd 配置（interface=ap0，channel 跟随 STA —— 单射频须同信道）
+        chan = _sta_current_channel()
+        if not _write_hostapd_conf(ifname=ifname, channel=chan, conf_path=AP_VIF_HOSTAPD_CONF):
+            _ap_vif_del()
+            _clear_ap_transition()
+            return False, "写并发 hostapd 配置失败"
+        # 4) 独立 hostapd 实例
+        if not _hostapd_ap_start():
+            _hostapd_ap_stop()
+            _ap_vif_del()
+            _clear_ap_transition()
+            return False, "并发 hostapd 未启动（AP-ENABLED 未达成）"
+        # 5) 独立 dnsmasq（DHCP + 上游 DNS，提供真实上网）
+        if not _dnsmasq_ap_start(ifname):
+            _hostapd_ap_stop()
+            _dnsmasq_ap_stop()
+            _ap_vif_del()
+            _clear_ap_transition()
+            return False, "并发 dnsmasq 未启动"
+        # 6) NAT + FORWARD（AP 网段 → wlan0 出）
+        _ap_concurrent_iptables(ifname, add=True)
+        # 7) 记录启动时间
+        #   注：并发路径**不**启用 hostapd_cli 事件监听——现有 ap_client_event.sh
+        #   硬编码 `iw dev wlan0 station dump` 与 `--yield-ap`，在并发下会误判
+        #   （wlan0 无 station → 误触发让出）。M2 交由 timer 自愈轮询
+        #   _ap_self_heal（正确查 ap0）处理关闭；事件回调的 ifname 化留待 M4。
+        _record_ap_start_time(manual=manual)
+        _clear_ap_transition()
+        return True, f"AP 已启动（并发 {ifname} @ ch{chan}，wlan0 保持 STA）"
+    except Exception as e:
+        try:
+            _hostapd_ap_stop()
+            _dnsmasq_ap_stop()
+            _ap_vif_del()
+        except Exception:
+            pass
+        _clear_ap_transition()
+        return False, f"并发启动 AP 异常: {e}"
+
+
+def _ap_bring_down_concurrent() -> Tuple[bool, str]:
+    """v0.3.1.62：并发路径关闭 AP（仅拆 ap0，wlan0 STA 零扰动）。
+
+    返回 (ok, msg)：ok = ap0 是否已成功移除。
+    与 legacy 不同：**不含**"恢复 wlan0 管控 / 重连等待"——STA 从未断开。
+    """
+    _set_ap_transition()
+    try:
+        ifname = _ap_vif_actual_name() or AP_VIF
+        _hostapd_ap_stop()
+        _dnsmasq_ap_stop()
+        _ap_concurrent_iptables(ifname, add=False)
+        _ap_vif_del()
+        _write_had_clients(False)
+        _clear_ap_client_stuck()
+        removed = _ap_vif_actual_name() == ""
+        _clear_ap_transition()
+        if removed:
+            return True, "AP 已关闭（并发，ap0 已移除，wlan0 未受影响）"
+        return False, "ap0 未能移除（需人工检查）"
+    except Exception as e:
+        _clear_ap_transition()
+        return False, f"并发关闭 AP 异常: {e}"
+
+
 def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
     """完整启动 AP 热点（对齐 ap_control.sh，补齐原实现缺失的关键步骤）。
 
@@ -1559,6 +1918,9 @@ def _ap_bring_up(manual: bool = False) -> Tuple[bool, str]:
     - captive portal：停 systemd-resolved 释放 53 → dnsmasq 提供 DNS
       （任意域名 → AP 网关）+ iptables 80→5000，手机连 AP 开任意网页跳 A7Z Web
     """
+    if _use_concurrent():
+        # v0.3.1.62：AP+STA 并发路径（wlan0 保持 STA）
+        return _ap_bring_up_concurrent(manual)
     _set_ap_transition()
     try:
         # v0.3.1.36：开 AP 前确保 resolved 正常（dnsmasq 8053 与 resolved 隔离，
@@ -1712,6 +2074,9 @@ def _ap_bring_down() -> Tuple[bool, str]:
     v0.3.1.31 增强：R6 transition 标记防并发；Y1 轮询追加 IP 确认（L2 connected
     但 DHCP 未完成不再误报"已重连"）。
     """
+    if _use_concurrent():
+        # v0.3.1.62：并发路径——仅拆 ap0，wlan0 STA 零扰动
+        return _ap_bring_down_concurrent()
     _set_ap_transition()
     try:
         # 1) 停 hostapd / dnsmasq
@@ -1816,6 +2181,23 @@ def _ap_ensure_down(only_cleanup: bool = False) -> Tuple[bool, str]:
         if _ap_transition_active():
             return True, "AP 起停进行中，跳过自愈"
 
+        # ── v0.3.1.62：并发路径 ──
+        if _use_concurrent():
+            if _ap_vif_hostapd_running():
+                if only_cleanup:
+                    return True, "AP 运行中（并发），跳过（由网络正常分支负责关闭）"
+                return _ap_bring_down_concurrent()
+            name = _ap_vif_actual_name()
+            if name:
+                _ap_concurrent_iptables(name, add=False)
+                _dnsmasq_ap_stop()
+                _hostapd_ap_stop()
+                _ap_vif_del()
+                _write_had_clients(False)
+                _clear_ap_client_stuck()
+                return True, "AP 残留已清理（并发）"
+            return True, "AP 已处于关闭状态（并发）"
+
         r = subprocess.run(
             ["systemctl", "is-active", "hostapd"],
             capture_output=True, text=True, timeout=5,
@@ -1876,8 +2258,15 @@ def _ap_has_clients() -> bool:
     否则配合断开事件检测会把正在配置的手机踢断。
     """
     try:
+        if _use_concurrent():
+            # v0.3.1.62：并发路径客户端挂在 ap0 上；ap0 不存在 = AP 未起 = 无客户端
+            iface = _ap_vif_actual_name()
+            if not iface:
+                return False
+        else:
+            iface = WIFI_INTERFACE
         r = subprocess.run(
-            ["sudo", "-n", "iw", "dev", WIFI_INTERFACE, "station", "dump"],
+            ["sudo", "-n", "iw", "dev", iface, "station", "dump"],
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode != 0:
@@ -2658,12 +3047,9 @@ class WifiSmartSwitch:
                               (_remain + 59) // 60)
                 return
 
-            # 检查 hostapd 是否已在运行
-            result = subprocess.run(
-                ["systemctl", "is-active", "hostapd"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.stdout.strip() == "active":
+            # 检查 hostapd 是否已在运行（v0.3.1.62：用 _ap_is_running，
+            # 兼容并发路径的独立 hostapd 实例——否则并发下会误判"未运行"并反复重建 ap0）
+            if _ap_is_running():
                 self.log.info("AP 已运行")
                 return
 
@@ -2695,6 +3081,33 @@ class WifiSmartSwitch:
         """
         try:
             if get_ap_force_mode() == "force-on":
+                return
+            # ── v0.3.1.62：并发路径自愈（方案 B —— STA 一直在探测，无需"让出"）──
+            if _use_concurrent():
+                if not _ap_vif_hostapd_running():
+                    _clear_ap_client_stuck()
+                    return
+                if _ap_transition_active():
+                    return
+                # STA 是否已连上 WiFi（并发下 wlan0 始终是 STA）
+                if not self._get_current_ssid():
+                    return  # 上游无网 → 保留 AP
+                has_clients = _ap_has_clients()
+                _write_had_clients(has_clients)
+                if has_clients:
+                    # 方案 B：有客户端 → 不关、不踢；记 30min 提醒「WiFi 已恢复」
+                    _note_ap_client_stuck()
+                    self.log.info("AP(并发) WiFi 已恢复，但有客户端连接 → 等其断开再关（不打断）")
+                    return
+                # 方案 B：无客户端且 WiFi 已恢复 → 立即关 ap0（紧急使命完成）
+                _clear_ap_client_stuck()
+                self.log.info("AP(并发) WiFi 已恢复且无客户端 → 关闭 ap0（方案 B）")
+                ok, msg = _ap_bring_down_concurrent()
+                if ok:
+                    _write_backoff(AP_BACKOFF_INIT)
+                    _record_ap_try()
+                else:
+                    self.log.warning("AP(并发) 关闭 ap0 失败：%s", msg)
                 return
             r = subprocess.run(
                 ["systemctl", "is-active", "hostapd"],

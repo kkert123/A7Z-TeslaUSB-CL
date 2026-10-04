@@ -10,6 +10,13 @@ import os
 # ─── 应用版本号 ───
 APP_VERSION = "0.3.1.61"
 
+# ─── AP+STA 并发开关（v0.3.1.62）───
+# True  = 允许 AP 与 STA 同时工作（wlan0 始终作 STA，另建 ap0 作紧急 AP）；
+# False = 旧「互斥切换」行为（wlan0 独占，AP↔STA 来回切）。
+# 默认 False（灰度）：部署即等价现状；运行时可由 config/ap_config.json 的
+# "ap_sta_concurrent" 覆盖（见 wifi_service._use_concurrent）。
+AP_STA_CONCURRENT_DEFAULT = False
+
 # ─── 升级系统 Ed25519 公钥（私钥 upgrade_key 本地保管，不进仓库） ───
 UPGRADE_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeYRpMBX5sn0tsR+IRuwtUbI6qWu+5VTcK4NWL2AOt6 a7z-upgrade"
 

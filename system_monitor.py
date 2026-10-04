@@ -621,13 +621,24 @@ class SystemMonitor:
         # 双重校验：AP 必须真的在运行。
         # 防标记残留误报 —— 若 hostapd 是被外部 kill/stop 掉的（不走 _ap_bring_down），
         # 标记不会被清除，此处若无校验就会推送「AP 已持续开启」的假消息。
+        # v0.3.1.62：改用 wifi_service._ap_is_running()（并发路径下 AP 是独立
+        # hostapd 实例，systemctl hostapd 非 active，直接用 systemctl 会误判"未运行"
+        # → 提醒永不触发）。导入失败时回退 systemctl 判据。
         try:
-            r = subprocess.run(
-                ["systemctl", "is-active", "hostapd"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if r.stdout.strip() != "active":
-                return
+            try:
+                from wifi_service import _ap_is_running as _ap_running
+            except Exception:
+                _ap_running = None
+            if _ap_running is not None:
+                if not _ap_running():
+                    return
+            else:
+                r = subprocess.run(
+                    ["systemctl", "is-active", "hostapd"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if r.stdout.strip() != "active":
+                    return
         except Exception:
             return
         duration = int(time.time() - since)
