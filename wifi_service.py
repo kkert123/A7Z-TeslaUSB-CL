@@ -1612,7 +1612,7 @@ def _sync_ap_channel() -> Tuple[bool, str]:
         return True, f"信道一致(ch{sta_ch})"
     freq = _channel_to_freq(sta_ch)
     logger = logging.getLogger("wifi_service")
-    logger.info("AP 信道跟随：STA ch%s → ap0 ch%s（freq=%s）", ap_ch, sta_ch, freq)
+    logger.info("AP 信道跟随：ap0 ch%s → STA ch%s（freq=%s）", ap_ch, sta_ch, freq)
     # ① CSA 优先
     if _hostapd_cli_chan_switch(ifname, freq):
         time.sleep(2)
@@ -2973,9 +2973,13 @@ class WifiSmartSwitch:
 
             # 确保 AP 处于关闭状态（幂等自愈：hostapd 运行中则完整关闭，
             # 仅配置残留则清理 ap.conf + 停 dnsmasq，防止干扰 station 模式）
+            # v0.3.1.62：**并发模式下不走这条"一刀切"关闭** —— 并发时 wlan0 恒为
+            # STA、网络恒"正常"，此路径会每 2min 无条件关掉 AP（含手动开的）。
+            # 改由 _ap_self_heal 关闭（它已按方案 B 处理：仅 fallback AP、STA 恢复
+            # 且无客户端时才关）。非并发（legacy）保持原行为。
             try:
                 force_mode = get_ap_force_mode()
-                if force_mode != "force-on":
+                if force_mode != "force-on" and not _use_concurrent():
                     ok, msg = _ap_ensure_down()
                     if not ok:
                         self.log.warning("AP 关闭/清理失败: %s", msg)
