@@ -8,7 +8,7 @@ A7Z TeslaUSB 统一配置文件
 import os
 
 # ─── 应用版本号 ───
-APP_VERSION = "0.3.1.61"
+APP_VERSION = "0.3.1.62"
 
 # ─── AP+STA 并发开关（v0.3.1.62）───
 # True  = 允许 AP 与 STA 同时工作（wlan0 始终作 STA，另建 ap0 作紧急 AP）；
