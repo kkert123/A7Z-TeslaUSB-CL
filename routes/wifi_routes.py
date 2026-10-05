@@ -167,12 +167,18 @@ def ap_config_api():
             "enabled": config.get("enabled", True),
             "has_passphrase": bool(passphrase),
             "is_default_passphrase": passphrase == "teslausb123",
+            # v0.3.1.62（M4）：返回**生效值**（含默认回退），供前端复选框显示
+            "ap_sta_concurrent": wifi_service._use_concurrent(),
         })
 
     data = request.get_json() or {}
     ssid = data.get("ssid", "").strip()
     passphrase = data.get("passphrase", "")
-    result = wifi_service.set_ap_config(ssid, passphrase)
+    # v0.3.1.62（M4）：并发开关（未提供 = 不改动）
+    conc = data.get("ap_sta_concurrent", None)
+    if conc is not None:
+        conc = bool(conc)
+    result = wifi_service.set_ap_config(ssid, passphrase, ap_sta_concurrent=conc)
     return jsonify(result)
 
 

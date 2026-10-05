@@ -144,6 +144,14 @@
       <div class="detail-item"><span class="label">密码</span><span class="value"><input id="ap-pass-input" type="password" maxlength="63" placeholder="8-63 字符，留空不修改" autocomplete="new-password" style="width:100%;max-width:280px;font-size:var(--text-sm);padding:4px 8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-card);color:var(--text-base)"></span></div>
     </div>
     <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--s2)">加密方式：WPA2-PSK（AES/CCMP）。密码留空则保持当前密码不变。</div>
+    <!-- v0.3.1.62（M4）：AP+STA 并发开关 -->
+    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin-bottom:var(--s2)">
+      <input type="checkbox" id="ap-concurrent-input" style="margin-top:2px">
+      <span>
+        <span style="font-size:var(--text-sm)">AP 与 WiFi 并发（推荐）</span>
+        <span style="display:block;font-size:var(--text-xs);color:var(--text-muted)">开启后：设备一边连 WiFi 一边广播热点（wlan0 保持联网），WiFi 恢复时无需"切回"。关闭则用旧的互斥切换方式。</span>
+      </span>
+    </label>
     <button class="btn btn-primary btn-sm" onclick="saveApConfig()">💾 保存配置</button>
     <span id="ap-save-status" style="font-size:var(--text-sm);color:var(--text-muted);margin-left:var(--s2)"></span>
   </div>
@@ -236,6 +244,9 @@ function loadApStatus(){
     if(ssidInput)ssidInput.value=d.ssid||'TeslaUSB-Setup';
     const warn=document.getElementById('ap-default-warning');
     if(warn)warn.style.display=d.is_default_passphrase?'block':'none';
+    // v0.3.1.62（M4）：并发开关状态（生效值）
+    const concInput=document.getElementById('ap-concurrent-input');
+    if(concInput)concInput.checked=!!d.ap_sta_concurrent;
   }).catch(()=>{});
   // 获取 AP 模式
   fetch('/api/ap/mode?t='+Date.now()).catch(()=>{}); // 读取模式（如果有 GET 接口）
@@ -301,7 +312,10 @@ function saveApConfig(){
   if(pass&&(pass.length<8||pass.length>63)){alert('密码必须为 8-63 字符（留空则不修改）');return;}
   const statusEl=document.getElementById('ap-save-status');
   statusEl.textContent='保存中...';
-  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,passphrase:pass})})
+  const concInput=document.getElementById('ap-concurrent-input');
+  const payload={ssid:ssid,passphrase:pass};
+  if(concInput)payload.ap_sta_concurrent=!!concInput.checked;
+  fetch('/api/ap/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
   .then(r=>r.json()).then(d=>{
     if(d.success){
       statusEl.textContent='✓ 已保存（下次开启 AP 生效）';

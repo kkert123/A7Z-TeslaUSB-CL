@@ -107,6 +107,7 @@ AP_VIF_HOSTAPD_PID = "/tmp/a7z_ap/hostapd-ap0.pid"
 AP_VIF_DNSMASQ_PID = "/tmp/a7z_ap/dnsmasq-ap0.pid"
 AP_VIF_CTRL_DIR = "/var/run/hostapd-ap0"                  # hostapd ctrl_interface
 AP_VIF_SETTLE_SEC = 1                                     # 建 vif 后等待秒数
+AP_VIF_IFNAME_FILE = "/tmp/a7z_ap/ifname"                 # 实际 vif 名（供事件回调读取）
 
 
 def _concurrent_default() -> bool:
@@ -1000,8 +1001,13 @@ def get_ap_config() -> dict:
         return {"ssid": "TeslaUSB-Setup", "passphrase": "teslausb123", "enabled": True}
 
 
-def set_ap_config(ssid: str, passphrase: str) -> dict:
-    """设置 AP 配置"""
+def set_ap_config(ssid: str, passphrase: str, ap_sta_concurrent: Optional[bool] = None) -> dict:
+    """设置 AP 配置
+
+    v0.3.1.62（M4）：新增 `ap_sta_concurrent`（None=不改动）。控制 AP 与 STA
+    是否并发（wlan0 恒作 STA、另建 ap0 作 AP）。切换该开关后，进行中的 AP
+    需重启才完全生效（下次开启 AP 时按新值）。
+    """
     if not ssid or len(ssid) < 1 or len(ssid) > 32:
         return {"success": False, "message": "SSID 必须为 1-32 字符"}
     if passphrase and (len(passphrase) < 8 or len(passphrase) > 63):
@@ -1010,6 +1016,8 @@ def set_ap_config(ssid: str, passphrase: str) -> dict:
         _ensure_ap_config_exists()
         config = get_ap_config()
         config["ssid"] = ssid
+        if ap_sta_concurrent is not None:
+            config["ap_sta_concurrent"] = bool(ap_sta_concurrent)
         # B2：密码留空 = 保持当前密码不变（前端"留空不修改"承诺），
         # 不得覆盖为空（空密码会在 bring_up 时回退默认 teslausb123，且 UI 警告失效）
         if passphrase:
@@ -1915,6 +1923,31 @@ def _ap_start_client_monitor() -> bool:
         return False
 
 
+def _ap_start_client_monitor_vif(ifname: str) -> bool:
+    """启动并发 AP 的 hostapd 事件监听（v0.3.1.62 M4）。
+
+    与 legacy `_ap_start_client_monitor` 的区别：目标 hostapd 是**独立实例**
+    （ctrl_interface=/var/run/hostapd-ap0）、接口是 AP vif（非 wlan0）。
+    回调脚本 `ap_client_event.sh` 从 AP_VIF_IFNAME_FILE 读实际 vif 名。
+    """
+    try:
+        _ap_stop_client_monitor()
+        time.sleep(1.0)
+        proc = subprocess.Popen(
+            ["sudo", "-n", "hostapd_cli", "-p", AP_VIF_CTRL_DIR,
+             "-a", AP_EVENT_CALLBACK, "-i", ifname],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        ok = proc.poll() is None
+        if not ok:
+            logging.getLogger("wifi_service").warning(
+                "hostapd_cli 事件监听(并发)启动即退出 rc=%s", proc.returncode)
+        return ok
+    except Exception:
+        return False
+
+
 def _ap_stop_client_monitor() -> None:
     """停止 hostapd 事件监听（bring_down 时兜底清理）。
 
@@ -1972,16 +2005,22 @@ def _ap_bring_up_concurrent(manual: bool = False) -> Tuple[bool, str]:
             return False, "并发 dnsmasq 未启动"
         # 6) NAT + FORWARD（AP 网段 → wlan0 出）
         _ap_concurrent_iptables(ifname, add=True)
-        # 7) 记录启动时间
-        #   注：并发路径**不**启用 hostapd_cli 事件监听——现有 ap_client_event.sh
-        #   硬编码 `iw dev wlan0 station dump` 与 `--yield-ap`，在并发下会误判
-        #   （wlan0 无 station → 误触发让出）。M2 交由 timer 自愈轮询
-        #   _ap_self_heal（正确查 ap0）处理关闭；事件回调的 ifname 化留待 M4。
+        # 7) 记录实际 vif 名（供 ap_client_event.sh 读取）+ 启动时间
+        try:
+            os.makedirs(AP_VIF_RUN_DIR, exist_ok=True)
+            with open(AP_VIF_IFNAME_FILE, "w") as f:
+                f.write(ifname)
+        except Exception:
+            pass
         _record_ap_start_time(manual=manual)
+        # 8) hostapd 事件监听（M4：ifname 化后并发也可用）——客户端断开即时响应，
+        #    不必等 timer（2min）。回调 ap_client_event.sh 读 ifname 文件 + --yield-ap。
+        _ap_start_client_monitor_vif(ifname)
         _clear_ap_transition()
         return True, f"AP 已启动（并发 {ifname} @ ch{chan}，wlan0 保持 STA）"
     except Exception as e:
         try:
+            _ap_stop_client_monitor()
             _hostapd_ap_stop()
             _dnsmasq_ap_stop()
             _ap_vif_del()
@@ -2000,10 +2039,15 @@ def _ap_bring_down_concurrent() -> Tuple[bool, str]:
     _set_ap_transition()
     try:
         ifname = _ap_vif_actual_name() or AP_VIF
+        _ap_stop_client_monitor()
         _hostapd_ap_stop()
         _dnsmasq_ap_stop()
         _ap_concurrent_iptables(ifname, add=False)
         _ap_vif_del()
+        try:
+            os.remove(AP_VIF_IFNAME_FILE)
+        except Exception:
+            pass
         _write_had_clients(False)
         _clear_ap_client_stuck()
         removed = _ap_vif_actual_name() == ""
@@ -3410,12 +3454,31 @@ class WifiSmartSwitch:
     def _yield_ap(self) -> int:
         """AP 客户端断开后让出回连（hostapd 事件回调触发，v0.3.1.54）。
 
-        让出逻辑与 timer 自愈共用 _ap_bring_down（单点，避免逻辑漂移）：
-        bring_down 内含恢复 wlan0 station + nmcli connect 回连已保存 WiFi。
+        legacy：让出逻辑与 timer 自愈共用 _ap_bring_down（恢复 wlan0 station + 回连）。
+        v0.3.1.62（M4）并发：客户端断开**即时**响应——若 STA 已连上 WiFi 则关 ap0
+        （方案 B 的即时版）；手动 AP 不关、STA 未恢复（fallback）不关、仍有客户端不关。
         """
         if not self._acquire_lock():
             return 0
         try:
+            if _use_concurrent():
+                if _ap_started_manually():
+                    self.log.info("AP 事件回调(并发): 手动 AP → 不自动关闭")
+                    return 0
+                if not self._get_current_ssid():
+                    self.log.info("AP 事件回调(并发): STA 未恢复 → 保留 AP")
+                    return 0
+                if _ap_has_clients():
+                    self.log.info("AP 事件回调(并发): 仍有客户端 → 不关闭")
+                    return 0
+                self.log.info("AP 事件回调(并发): 客户端断开且 WiFi 已恢复 → 关闭 ap0")
+                ok, msg = _ap_bring_down_concurrent()
+                if ok:
+                    _write_backoff(AP_BACKOFF_INIT)
+                    _record_ap_try()
+                else:
+                    self.log.warning("AP 事件回调(并发)关闭失败: %s", msg)
+                return 0 if ok else 1
             self.log.info("AP 事件回调: 客户端断开超宽限期，让出回连 WiFi")
             ok, msg = _ap_bring_down()
             if ok:

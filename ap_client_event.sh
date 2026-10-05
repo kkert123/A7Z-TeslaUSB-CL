@@ -17,12 +17,20 @@
 #     不能因一个断开就踢掉所有人）
 #   - 让出调用 wifi_service.py --yield-ap，与 timer 自愈共用 _ap_bring_down
 #     单点逻辑（内部 flock + transition 标记防并发，重复触发无实害）
+#
+# v0.3.1.62（M4）：ifname 化——并发模式下 AP 在 vif（如 ap0/wlxb62a…）上，
+# 实际名写在 /tmp/a7z_ap/ifname，回调据此做 station dump（legacy 回退 wlan0）。
+# 是否真关闭由 wifi_service._yield_ap 判定（并发下还要看 STA 是否恢复、
+# 是否手动 AP、是否仍有客户端）。
 WIFI_SERVICE="/opt/radxa_data/teslausb/wifi_service.py"
 PENDING="/var/run/ap-yield-pending"
+IFNAME_FILE="/tmp/a7z_ap/ifname"
 DELAY=15
 LOG="/tmp/ap-client-event.log"
 
 EVENT="$1"
+IFNAME="$(cat "$IFNAME_FILE" 2>/dev/null)"
+[ -z "$IFNAME" ] && IFNAME="wlan0"
 case "$EVENT" in
   AP-STA-CONNECTED*)
     # 客户端连上/重连 → 取消挂起的让出（配置中不打断）
@@ -35,9 +43,9 @@ case "$EVENT" in
     (
       sleep $DELAY
       # 双保险：宽限内重连（标记被清）或有其他客户端仍在 AP 上 → 取消
-      if [ -f "$PENDING" ] && ! iw dev wlan0 station dump 2>/dev/null | grep -q "Station "; then
+      if [ -f "$PENDING" ] && ! iw dev "$IFNAME" station dump 2>/dev/null | grep -q "Station "; then
         rm -f "$PENDING"
-        echo "$(date '+%F %T') yield-ap: 无客户端且断开超 ${DELAY}s 宽限，让出回连 WiFi" >> "$LOG"
+        echo "$(date '+%F %T') yield-ap: 无客户端且断开超 ${DELAY}s 宽限（if=$IFNAME），让出回连 WiFi" >> "$LOG"
         /usr/bin/python3 "$WIFI_SERVICE" --yield-ap >> "$LOG" 2>&1
       fi
     ) &
