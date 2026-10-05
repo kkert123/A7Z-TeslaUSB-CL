@@ -105,3 +105,28 @@ ss -lnup | grep 192.168.42                       # dnsmasq 53/67
 - NM 默认会**自动接管**新 vif 并置 managed → 不先 `managed no` 则 hostapd 起不来（`Could not read interface ap0 flags: No such device`）
 - 单射频并发：AP 与 STA 必须**同信道**；吞吐分时共享
 - `AP_STATIC_IP=192.168.42.1` 与现有 captive portal 方案一致，可复用
+
+## 已在 A7Z 落地（v0.3.1.62 代码，未发版）
+
+开关 `config.AP_STA_CONCURRENT_DEFAULT=False` + 运行时 `config/ap_config.json:ap_sta_concurrent`（UI 实时可切）。实现见 `wifi_service.py`：`_use_concurrent` / `_ap_vif_add·del` / `_ap_bring_up·down_concurrent` / `_sync_ap_channel`(CSA 跟随) / `_remote_lock_risk`(M94 自锁闸) / `_yield_ap` 并发分支；各 AP 函数分流,legacy 零改动。**UI 开关**在 `templates/wifi.html`「AP 配置」区。
+
+## 真机测试新坑（10-05 实证，务必先读）
+
+1. **timer 有「两个」自愈源，`systemctl stop` 会被拉回**：
+   - ① `wifi_service.ensure_smart_switch_timers()`（Web 启动 / M45 loop 调）
+   - ② **`sentry_watchdog.py` 也调它**
+   → 停 timer 后会被自愈重启,**隔离测试须临时 `mv services/*.timer *.timer.testoff`**（自愈 `src-missing` 才跳过），**测完务必移回**。
+2. **多客户端 AP 会污染「断开即关」测试**：只要 AP 上还有**任何其它**设备，回调/自愈的"仍有客户端"守卫会（正确地）不关 AP。测前务必确认 station dump 只有被测设备（10-05 现场混入陌生设备 `da:69:31:b5:b3:e7` → 误判"回调没生效"）。
+3. **事件回调的确定性验证法（推荐，不依赖现场环境）**：
+   ```bash
+   echo radxa | sudo -S sh -c '
+     rm -f /tmp/ap-client-event.log /var/run/ap-yield-pending
+     /opt/radxa_data/teslausb/ap_client_event.sh AP-STA-DISCONNECTED <mac>
+     sleep 18
+     cat /tmp/ap-client-event.log; iw dev | awk "/Interface /{print \$2}" | grep -v wlan0'
+   ```
+   期望：回调日志出现 `yield-ap: ...（if=<vif>）` + `AP 事件回调(并发): ... 关闭 ap0`，且 ap0 消失。
+4. **CSA 跟随验证**：`hostapd_cli -p /var/run/hostapd-ap0 -i <vif> chan_switch 5 2437` 手动漂到 ch6 → `_sync_ap_channel()` 应 CSA 拉回 STA 信道。
+5. **改并发开关配置须用 sudo**：`ap_config.json` 是 **root 属主**，radxa 直写静默失败（`PermissionError`）——写后**必须回读确认**（`_use_concurrent()`）再操作（M94 事故根因）。
+6. **远程自锁**：legacy 路径起 AP 会释放 wlan0；Tailscale 走 wlan0 时**会自断链路**。M94 闸门已拦（`start_ap(force=False)` 在"wlan0 为唯一默认路由"时拒绝）。
+
