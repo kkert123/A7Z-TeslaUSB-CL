@@ -175,6 +175,8 @@
           ⚡ 立即执行清理
         </button>
       </div>
+      <!-- 模式提示（Present 模式只读时给出切模式入口） -->
+      <div id="cleanup-mode-hint" style="display:none;margin-top:var(--s2);font-size:var(--text-xs);line-height:1.6"></div>
       <!-- 操作输出区 -->
       <div id="cleanup-output" style="display:none;margin-top:var(--s3)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -333,6 +335,69 @@ async function loadSummary(){
 // 清理管理相关函数
 // ═══════════════════════════════════════════
 
+// 后端返回的 errors 可能是数组（新格式）或字符串（兼容）
+function fmtErrs(e){
+  if(!e) return '';
+  if(Array.isArray(e)) return e.join('\n');
+  return String(e);
+}
+
+// 转义后再拼进 innerHTML：错误/动作文本里含文件路径，文件名可被构造
+function esc(s){
+  return String(s===undefined||s===null?'':s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+let _camMode='';
+
+// 根据当前 cam 模式控制「立即执行清理」按钮与提示
+function applyCleanupMode(mode){
+  if(!mode) return;
+  _camMode=mode;
+  const btn=document.getElementById('btn-execute');
+  const hint=document.getElementById('cleanup-mode-hint');
+  if(!btn||!hint) return;
+  if(mode==='present'){
+    btn.disabled=true;
+    btn.title='Present 模式下 TeslaCam 为只读，需先切换到 Edit 模式';
+    hint.style.display='block';
+    hint.style.color='var(--warning)';
+    hint.innerHTML='⚠ 当前为 <strong>Present 模式</strong>（Tesla 正在使用 U 盘），TeslaCam 为只读，无法清理。'
+      + ' 请先 <a href="#" onclick="switchToEditForCleanup();return false;" style="color:var(--primary);text-decoration:underline">切换到 Edit 模式</a>';
+  }else if(mode==='unmounted'){
+    btn.disabled=true;
+    btn.title='cam 分区未挂载';
+    hint.style.display='block';
+    hint.style.color='var(--danger)';
+    hint.textContent='⚠ cam 分区未挂载，无法清理。请确认 Tesla USB 已连接。';
+  }else{
+    btn.disabled=false;
+    btn.title='';
+    hint.style.display='none';
+    hint.textContent='';
+  }
+}
+
+// 一键切到 Edit 模式（清理需要写 TeslaCam）
+async function switchToEditForCleanup(){
+  if(!confirm('切换到 Edit 模式？\n\n切换期间 Tesla 车机上的 U 盘会短暂断开（约 10~20 秒）。\n确认现在没有行程/哨兵在录制？')){return;}
+  const hint=document.getElementById('cleanup-mode-hint');
+  if(hint){ hint.style.display='block'; hint.style.color='var(--text-muted)'; hint.textContent='⏳ 正在切换到 Edit 模式，请稍候...'; }
+  try{
+    const r=await fetch('/api/mode/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'edit'})});
+    const d=await r.json();
+    if(d.success){
+      if(hint) hint.textContent='✅ 已切换到 Edit 模式，正在刷新...';
+      setTimeout(()=>location.reload(),1500);
+    }else{
+      if(hint){ hint.style.color='var(--danger)'; hint.textContent='❌ 切换失败: '+(d.error||d.message||'未知错误'); }
+    }
+  }catch(e){
+    if(hint){ hint.style.color='var(--danger)'; hint.textContent='❌ 网络错误: '+e.message; }
+  }
+}
+
 async function loadCleanupPolicies(){
   try{
     const r=await fetch('/api/cleanup/policies');
@@ -340,6 +405,9 @@ async function loadCleanupPolicies(){
     const d=await r.json();
     if(!d.success) throw new Error(d.error||'API 返回失败');
     const p=d.policies||{};
+
+    // 按当前模式控制执行按钮（Present 只读 → 禁用 + 给切模式入口）
+    applyCleanupMode(d.mode);
 
     // ── 全局阈值 → 填入输入框 ──
     const thr=d.disk_thresholds||{};
@@ -511,20 +579,28 @@ async function loadCleanupHistory(){
       const modeColor=mode==='emergency'?'var(--danger)':mode==='critical'?'var(--warning)':mode==='warning'?'var(--warning)':'var(--success)';
       const modeLabel=mode==='emergency'?'🔴 紧急':mode==='critical'?'🟠 严重':mode==='warning'?'🟡 警告':'🟢 常规';
       const actions=c.actions||[];
+      // 错误信息（旧条目可能存了上千条，后端已裁剪为前 5 条 + error_count）
+      const errList=Array.isArray(c.errors)?c.errors:(c.errors?[c.errors]:[]);
+      const errs=errList.slice(0,5);
+      const errCount=c.error_count||errList.length;
       return `<div style="padding:var(--s2) 0;border-bottom:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <span style="font-size:var(--text-sm);color:var(--text-muted)">${ts}</span>
           <span style="font-size:var(--text-xs);color:${modeColor};font-weight:600">${modeLabel}</span>
         </div>
         <div style="display:flex;gap:16px;margin-top:3px;font-size:var(--text-sm)">
-          <span>🗑️ 删除 <strong>${deleted}</strong> 个文件</span>
-          <span>💾 释放 <strong style="color:var(--success)">${freed}</strong></span>
+          <span>🗑️ 删除 <strong>${Number(deleted)||0}</strong> 个文件</span>
+          <span>💾 释放 <strong style="color:var(--success)">${esc(freed)}</strong></span>
         </div>
         ${actions.length?`<div style="margin-top:4px">${actions.map(a=>`
           <div style="font-size:var(--text-xs);color:var(--text-muted);padding:1px 0;padding-left:8px;border-left:2px solid var(--border)">
-            ${a.type||''}: ${a.file||a.description||a}
+            ${a.type?esc(a.type)+': ':''}${esc(a.file||a.description||a)}
             ${a.size?` (${fmtBytes(a.size)})`:''}
           </div>`).join('')}</div>`:''}
+        ${errs.length?`<div style="margin-top:4px">
+          <div style="font-size:var(--text-xs);color:var(--danger);font-weight:600">⚠ 错误 ${Number(errCount)||0} 条${errCount>errs.length?`（显示前 ${errs.length} 条）`:''}</div>
+          ${errs.map(e=>`<div style="font-size:var(--text-xs);color:var(--danger);opacity:0.85;padding:1px 0;padding-left:8px;border-left:2px solid var(--danger);word-break:break-all">${esc(e)}</div>`).join('')}
+        </div>`:''}
       </div>`;
     }).join('');
   }catch(e){
@@ -552,9 +628,11 @@ async function runCleanupPreview(){
   try{
     const r=await fetch('/api/cleanup/preview',{method:'POST'});
     const d=await r.json();
+    applyCleanupMode(d.mode);
     if(d.success){
       let output=d.output||'（无输出）';
-      if(d.errors) output+= '\n\n[stderr]\n'+d.errors;
+      const es=fmtErrs(d.errors);
+      if(es) output+= '\n\n[stderr]\n'+es;
       outText.textContent=output;
     }else{
       outText.textContent='预览失败: '+(d.error||'未知错误');
@@ -584,20 +662,26 @@ async function runCleanupExecute(){
   try{
     const r=await fetch('/api/cleanup/execute',{method:'POST'});
     const d=await r.json();
+    let output=d.output||d.error||'（无输出）';
+    const es=fmtErrs(d.errors);
+    // 后端 output 里已经带了"错误信息（共 N 条…）"，避免重复贴一遍
+    if(es && !output.includes('[stderr]') && !output.includes('错误信息')) output+='\n\n[stderr]\n'+es;
+    outText.textContent=output;
     if(d.success){
-      let output=d.output||'（无输出）';
-      if(d.errors) output+='\n\n[stderr]\n'+d.errors;
-      outText.textContent=output;
       // 刷新分区状态和历史
       setTimeout(()=>{loadCleanupPolicies();},1000);
     }else{
-      outText.textContent='执行失败: '+(d.error||'未知错误')+'\n\n'+((d.output||'')+(d.errors||''));
+      outTitle.textContent='执行失败';
+      // 失败时同步模式状态（Present 只读 → 按钮禁用 + 切模式入口）
+      applyCleanupMode(d.mode);
+      loadCleanupHistory();
     }
   }catch(e){
     outText.textContent='请求失败: '+e.message;
   }finally{
-    btn.disabled=false;
     btn.textContent='⚡ 立即执行清理';
+    // 不能无条件恢复可点击：Present/未挂载时按钮必须保持禁用
+    btn.disabled=(_camMode==='present'||_camMode==='unmounted');
   }
 }
 

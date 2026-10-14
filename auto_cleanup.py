@@ -623,12 +623,15 @@ class AutoCleaner:
             logger.error(f"删除文件失败: {fpath}: {e}")
             return False, 0
 
-    def execute_cleanup(self, plan: Dict) -> Dict:
+    def execute_cleanup(self, plan: Dict, save_history: bool = True) -> Dict:
         """
         执行清理计划。
 
         Args:
             plan: calculate_cleanup_plan() 的返回值
+            save_history: 是否把本次 stats 写入 cleanup_history.json。
+                Web 路由自己会写一条更完整的历史（含非视频释放量与 force_all），
+                传入 False 以避免同一次清理存两条（v0.3.1.63）。
 
         Returns:
             清理统计信息
@@ -736,7 +739,8 @@ class AutoCleaner:
         self.stats["breakdown"] = folder_stats
 
         # 保存历史记录
-        self._save_cleanup_history()
+        if save_history:
+            self._save_cleanup_history()
 
         total = self.stats["deleted_files"]
         freed = self.stats["freed_bytes"]
@@ -1094,16 +1098,22 @@ class AutoCleaner:
         logger.info(f"[{level}] 清理计划: {plan['total_count']} 个文件, {plan['total_size_gb']} GB")
 
         if plan["total_count"] > 0:
-            result = self.execute_cleanup(plan)
-            if result["deleted_files"] > 0:
-                self.stats["deleted_files"] += result["deleted_files"]
-                self.stats["freed_bytes"] += result["freed_bytes"]
-                self.stats["errors"].extend(result.get("errors", []))
-                self.stats["breakdown"] = result.get("breakdown", {})
-                self.stats["actions"].extend([
-                    f"[{level}] {a}" for a in result.get("actions", [])
-                ])
-                logger.info(f"[{level}] 清理视频释放: {self._fmt_bytes(result['freed_bytes'])}")
+            # v0.3.1.63 修正两处：
+            #  1) execute_cleanup 返回的就是 self.stats（同一对象），原来在这里再
+            #     `+= result[...]` 等于自己加自己 → 删除计数/释放字节翻倍；
+            #  2) save_history=False：历史由本层统一写一次，避免一次清理存两条。
+            _pre_errors = list(self.stats.get("errors", []))
+            _pre_acts = list(self.stats.get("actions", []))
+            result = self.execute_cleanup(plan, save_history=False)
+            # execute_cleanup 首行会整体重置 self.stats —— 把非视频阶段的错误/动作
+            # 补回来；同时不能再对 result 做 extend（result is self.stats，
+            # 会把同一份动作再加一遍）。计数本身无需处理：已是同一个对象。
+            self.stats["errors"] = _pre_errors + list(self.stats.get("errors", []))
+            self.stats["actions"] = _pre_acts + [
+                f"[{level}] {a}" for a in result.get("actions", [])
+            ]
+            if result.get("deleted_files", 0) > 0:
+                logger.info(f"[{level}] 清理视频释放: {self._fmt_bytes(result.get('freed_bytes', 0))}")
 
         self._save_cleanup_history()
         total_freed = self.stats["freed_bytes"]

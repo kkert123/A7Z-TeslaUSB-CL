@@ -12,6 +12,78 @@ cleanup_bp = Blueprint('cleanup', __name__, url_prefix='')
 CLEANUP_LOG = '/opt/radxa_data/teslausb/data/cleanup_history.json'
 THUMBNAIL_DIR = '/opt/radxa_data/teslausb/static/thumbnails'
 
+CAM_PATH = '/mnt/teslacam'
+GADGET_UDC = '/sys/kernel/config/usb_gadget/tesla_usb/UDC'
+
+
+def _read_cam_mount():
+    """读取 cam 分区的挂载状态。
+
+    Returns:
+        (mounted, is_ro, source)
+    """
+    mounted = False
+    is_ro = False
+    source = ''
+    try:
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == CAM_PATH:
+                    mounted = True
+                    source = parts[0]
+                    is_ro = 'ro' in parts[3].split(',')
+                    break
+    except Exception:
+        pass
+    return mounted, is_ro, source
+
+
+def _gadget_bound():
+    """USB Gadget 是否已绑定 UDC（非空即视为已绑定）。
+
+    注意：必须判"内容非空"而不是"文件存在"——configfs 里 UDC 文件在
+    解绑（echo "" > UDC）后依然存在，只判存在会把 Edit 模式误判成 Present。
+    """
+    try:
+        with open(GADGET_UDC) as f:
+            return bool(f.read().strip())
+    except Exception:
+        return False
+
+
+def _is_loop_source(source):
+    """挂载源是否为 loop 设备（present_usb.sh 在直挂失败时会用 losetup -r
+    建只读回环，这种只读回环**永远**无法 remount 成可写）。"""
+    return str(source).startswith('/dev/loop')
+
+
+def _detect_cam_mode():
+    """探测 cam 分区当前模式。
+
+    ⚠ 判据必须只看「块设备是否被独占 / 能否放开写」，**不能只看 is_ro**：
+      - Present 模式：Tesla 通过 USB Gadget 独占 nvme0n1p2 → remount rw 必然失败。
+      - Edit 模式：`usb_gadget_init.sh stop` 也把 TeslaCam 按 **ro** 挂载
+        （usb_gadget_init.sh:216 注释"TeslaCam 始终只读"），此时 gadget 已解绑、
+        块设备空闲，`mount -o remount,rw` 是能成功的。
+      若拿 is_ro 当 Present 判据，会连 Edit 模式的清理一起拒掉。
+
+    Returns:
+        (mode, detail)  mode ∈ {'present', 'edit', 'unmounted'}
+    """
+    mounted, is_ro, source = _read_cam_mount()
+    bound = _gadget_bound()
+    if bound:
+        mode = 'present'                        # 块设备被 gadget 独占
+    elif mounted and is_ro and _is_loop_source(source):
+        mode = 'present'                        # 只读回环，无法放开写
+    elif mounted:
+        mode = 'edit'
+    else:
+        mode = 'unmounted'
+    return mode, {'mounted': mounted, 'is_ro': is_ro,
+                  'source': source, 'gadget_bound': bound}
+
 
 def _format_size(size_bytes):
     """格式化字节大小"""
@@ -73,8 +145,10 @@ def api_cleanup_status():
         cleaner = auto_cleanup.AutoCleaner(dry_run=True)
         policies_dict = {name: p.to_dict() for name, p in cleaner.policies.items()}
         gs = auto_cleanup.get_global_settings()
+        cam_mode, _cam_detail = _detect_cam_mode()
         return jsonify({
             'success': True,
+            'mode': cam_mode,
             'disk_thresholds': {
                 'warning': gs.get('disk_threshold_warning', auto_cleanup.DISK_THRESHOLD_WARNING),
                 'critical': gs.get('disk_threshold_critical', auto_cleanup.DISK_THRESHOLD_CRITICAL),
@@ -107,26 +181,18 @@ def api_cleanup_preview():
         cleaner = auto_cleanup.AutoCleaner(dry_run=True)
         cam_path = "/mnt/teslacam"
 
-        # 检测当前模式
-        is_ro = False
-        try:
-            with open("/proc/mounts") as f:
-                for line in f:
-                    if cam_path in line:
-                        parts = line.split()
-                        if len(parts) >= 4:
-                            opts = parts[3]
-                            is_ro = "ro" in opts.split(",")
-                        break
-        except Exception:
-            pass
-        is_present = os.path.ismount(cam_path) and is_ro
-        mode_label = "Present (只读)" if is_present else "Edit (读写)" if os.path.ismount(cam_path) else "未挂载"
+        # 检测当前模式（统一走 _detect_cam_mode，避免多处各写一套判据）
+        _mode, _mst = _detect_cam_mode()
+        cam_mounted = bool(_mst.get('mounted'))
+        is_present = (_mode == 'present')
+        mode_label = "Present (只读)" if is_present else "Edit (读写)" if cam_mounted else "未挂载"
 
         lines = ['=== 清理预览（v2 per-folder 策略）===', '']
         lines.append(f'📡 当前模式: {mode_label}')
         if is_present:
             lines.append('   ⚠ Present 模式下 cam 分区为只读，只预览不执行')
+        elif cam_mounted and _mst.get('is_ro'):
+            lines.append('   ℹ TeslaCam 当前为只读挂载，执行清理时会自动切换为读写')
         lines.append('')
 
         # 1. 过期预览/临时/日志文件
@@ -233,7 +299,7 @@ def api_cleanup_preview():
                               for k, v in plan['breakdown'].items()},
                 'protected_count': plan['protected_count'],
             },
-            'mode': 'present' if is_present else 'edit' if os.path.ismount(cam_path) else 'unmounted',
+            'mode': 'present' if is_present else 'edit' if cam_mounted else 'unmounted',
         })
     except Exception as e:
         import traceback
@@ -253,6 +319,32 @@ def api_cleanup_execute():
 
         lines = ['=== 清理执行（v2 per-folder 策略）===', '']
 
+        # ── Present 模式前置守卫（v0.3.1.63）──────────────────────────────
+        # Present 模式下 Tesla 通过 USB 独占 TeslaCam 块设备，A7Z 侧只能只读
+        # 挂载（直挂 ro，或 losetup -r 只读回环），remount rw 不可能成功。
+        # 旧实现在这里"尝试 remount → 失败被静默忽略 → 继续删除"，实测
+        # 每个文件都返回 [Errno 30] Read-only file system（单次 4437 条），
+        # 且接口仍返回 success:true。改成：Present 下不删任何文件，直接拒绝。
+        mode, mst = _detect_cam_mode()
+        if mode == 'present':
+            _reason = ('USB Gadget 已独占块设备' if mst.get('gadget_bound')
+                       else 'cam 分区挂在只读回环设备上')
+            lines.append('❌ 当前为 Present 模式（Tesla 正在使用 U 盘）')
+            lines.append('   原因: %s，remount 读写不可能成功' % _reason)
+            lines.append('   cam 分区: %s' % ('只读挂载' if mst.get('is_ro') else '可写'))
+            if mst.get('source'):
+                lines.append('   挂载源: %s' % mst['source'])
+            lines.append('   USB Gadget: %s' % ('已绑定 UDC' if mst.get('gadget_bound') else '未绑定'))
+            lines.append('')
+            lines.append('👉 Present 模式下 TeslaCam 为只读，无法清理（本次未删除任何文件）。')
+            lines.append('   请先在页面切换到 Edit 模式，再执行清理。')
+            return jsonify({
+                'success': False,
+                'mode': 'present',
+                'error': 'Present 模式下 TeslaCam 为只读，无法清理，请先切换到 Edit 模式',
+                'output': '\n'.join(lines),
+            }), 409
+
         # 检查 TeslaCam 是否可访问
         teslacam_dir = os.path.join(cam_path, "TeslaCam")
         if not os.path.isdir(teslacam_dir):
@@ -269,46 +361,47 @@ def api_cleanup_execute():
                 pass
             return jsonify({
                 'success': False,
+                'mode': mode,
                 'output': '\n'.join(lines),
                 'error': 'TeslaCam 目录不可访问',
-            })
+            }), 409
 
-        # 检查分区是否只读，如果是则尝试 remount 读写
-        try:
-            is_ro = False
-            with open("/proc/mounts") as f:
-                for line in f:
-                    if cam_path in line:
-                        parts = line.split()
-                        if len(parts) >= 4:
-                            is_ro = "ro" in parts[3].split(",")
-                        break
-            if is_ro:
-                lines.append('🔓 检测到只读挂载，正在 remount 读写...')
+        # 检查分区是否只读（Edit 模式下 stop_gadget 也按 ro 挂载，需临时放开）
+        # v0.3.1.63：原实现不看 returncode、二次校验结果被丢弃，却无条件打印
+        # "✅ 已切换为读写模式" —— 假成功日志。改为：逐条校验实际挂载属性，
+        # 确认仍为只读就中止（不再对着只读分区盲删）。
+        _mounted, _is_ro, _src = _read_cam_mount()
+        if _is_ro:
+            lines.append('🔓 检测到只读挂载，正在 remount 读写...')
+            _rw_ok = False
+            for _args in (['-o', 'remount,rw'], ['-o', 'rw,remount']):
                 try:
-                    subprocess.run(
-                        ["sudo", "-n", "mount", "-o", "remount,rw", cam_path],
+                    _r = subprocess.run(
+                        ["sudo", "-n", "mount"] + _args + [cam_path],
                         capture_output=True, text=True, timeout=10,
                     )
-                    # 验证
-                    is_ro_after = False
-                    with open("/proc/mounts") as f:
-                        for line in f:
-                            if cam_path in line:
-                                p = line.split()
-                                if len(p) >= 4:
-                                    is_ro_after = "ro" in p[3].split(",")
-                                break
-                    if is_ro_after:
-                        subprocess.run(
-                            ["sudo", "-n", "mount", "-o", "rw,remount", cam_path],
-                            capture_output=True, text=True, timeout=10,
-                        )
-                    lines.append('   ✅ 已切换为读写模式')
+                    if _r.returncode != 0:
+                        _msg = ((_r.stderr or '') + (_r.stdout or '')).strip()
+                        lines.append('   ⚠ remount 返回 %s: %s' % (_r.returncode, _msg[:120]))
                 except Exception as e:
-                    lines.append(f'   ⚠ remount 失败: {e}')
-        except Exception:
-            pass
+                    lines.append(f'   ⚠ remount 异常: {e}')
+                _m2, _ro2, _ = _read_cam_mount()
+                if _m2 and not _ro2:
+                    _rw_ok = True
+                    break
+            if _rw_ok:
+                lines.append('   ✅ 已切换为读写模式')
+            else:
+                lines.append('   ❌ remount 读写失败，cam 分区仍为只读')
+                lines.append('')
+                lines.append('👉 已中止清理，本次未删除任何文件。')
+                lines.append('   请确认已切换到 Edit 模式后再试。')
+                return jsonify({
+                    'success': False,
+                    'mode': mode,
+                    'error': 'cam 分区为只读且 remount 读写失败，已中止清理',
+                    'output': '\n'.join(lines),
+                }), 409
 
         # 1. 非视频文件清理
         freed_preview = cleaner.cleanup_previews()
@@ -322,13 +415,22 @@ def api_cleanup_execute():
             if f > 0:
                 lines.append(f'  ✅ 清理{label}: {_format_size(f)}')
         if deleted_versions > 0:
-            lines.append(f'  ✅ 清理旧版本目录: {deleted_versions} 个（保留当前 + 4 历史）')
+            # v0.3.1.63：文案与 cleanup_old_versions(keep=2) 对齐（原写"保留当前 + 4"）
+            lines.append(f'  ✅ 清理旧版本目录: {deleted_versions} 个（保留当前 + 1 历史）')
 
         # 2. 视频文件清理（per-folder 策略）
         plan = cleaner.calculate_cleanup_plan(cam_path, respect_enabled=not force_all)
 
+        # 快照非视频阶段的错误/动作：execute_cleanup 会整体重置 self.stats，
+        # 不先取走的话，计划非空时预览图/日志阶段的错误会被静默丢弃。
+        _pre_errors = list(cleaner.stats.get('errors', []))
+        _pre_actions = list(cleaner.stats.get('actions', []))
+        _executed = False
+
         if plan['total_count'] > 0:
-            result = cleaner.execute_cleanup(plan)
+            # save_history=False：历史统一由本路由写一次，避免同一次清理存两条
+            result = cleaner.execute_cleanup(plan, save_history=False)
+            _executed = True
             for action in result.get('actions', []):
                 lines.append(f'  ✅ {action}')
             # 报告跳过和缺失
@@ -347,33 +449,75 @@ def api_cleanup_execute():
         if total_deleted == 0 and non_video_freed == 0:
             lines.append('  ℹ 没有需要清理的文件')
 
-        # 报告错误
-        errors = cleaner.stats.get('errors', [])
+        # 合并两个阶段的错误/动作
+        if _executed:
+            errors = _pre_errors + list(cleaner.stats.get('errors', []))
+            actions = _pre_actions + list(cleaner.stats.get('actions', []))
+        else:
+            errors = list(cleaner.stats.get('errors', []))
+            actions = list(cleaner.stats.get('actions', []))
         if errors:
             lines.append('')
-            lines.append('⚠ 错误信息:')
+            lines.append(f'⚠ 错误信息（共 {len(errors)} 条，显示前 5 条）:')
             for e in errors[:5]:
                 lines.append(f'   • {str(e)[:200]}')
+
+        # v0.3.1.63 失败/部分失败判定
+        #   ⚠ total_deleted 含孤儿辅助文件（event.json/thumb.png），与"计划内视频"
+        #     口径不一致（会出现 deleted > total_count，把 partial 判错），
+        #     所以分子改用 breakdown 里各文件夹真正删掉的视频数之和。
+        #   - 计划内文件全都已不存在（missing）→ 目标其实已达成，不算失败
+        #   - 有计划但一个视频都没删掉        → 执行失败（旧实现仍返回 success:true）
+        #   - 只删了一部分                    → 成功但标记 partial，前端提示
+        try:
+            video_deleted = sum(int(v.get('deleted', 0) or 0)
+                                for v in (cleaner.stats.get('breakdown') or {}).values())
+        except (TypeError, ValueError, AttributeError):
+            video_deleted = 0
+        _missing = cleaner.stats.get('missing_files', 0)
+        _all_missing = plan['total_count'] > 0 and video_deleted == 0 and _missing >= plan['total_count']
+        video_failed = plan['total_count'] > 0 and video_deleted == 0 and not _all_missing
+        partial = plan['total_count'] > 0 and 0 < video_deleted < plan['total_count']
+        if _all_missing:
+            lines.append('  ℹ 计划内文件均已不存在（可能已被上一步清理删除）')
+        if video_failed:
+            lines.append('')
+            lines.append(f'❌ 清理未生效: 计划删除 {plan["total_count"]} 个文件，实际删除 0 个')
+            lines.append('   常见原因: TeslaCam 分区只读/未正确挂载')
+        if partial:
+            lines.append('')
+            lines.append(f'⚠ 部分清理: 计划 {plan["total_count"]} 个，实际删除 {video_deleted} 个')
+            lines.append('   未删除项多为被保护或占用，详见上方错误信息')
 
         lines.append('')
         lines.append(f'📊 总计: 删除 {total_deleted} 个文件, 释放 {_format_size(total_freed)}')
 
-        # 保存历史
+        # 保存历史（一次一条，带 errors/actions，失败也能在历史里看出来）
         _save_cleanup_history({
             'timestamp': datetime.now().isoformat(),
             'deleted_count': total_deleted,
+            'deleted_files': total_deleted,
             'freed_bytes': total_freed,
             'force_all': force_all,
+            'skipped_files': cleaner.stats.get('skipped_files', 0),
+            'actions': [str(a)[:200] for a in actions[:50]],
+            'errors': [str(e)[:200] for e in errors[:50]],
+            'error_count': len(errors),
+            'partial': partial,
             'breakdown': cleaner.stats.get('breakdown', {}),
         })
 
         return jsonify({
-            'success': True,
+            'success': not video_failed,
+            'mode': mode,
+            'partial': partial,
             'output': '\n'.join(lines),
             'deleted_count': total_deleted,
             'freed_bytes': total_freed,
             'freed_gb': round(total_freed / (1024**3), 2),
-        })
+            'errors': [str(e)[:200] for e in errors[:5]],
+            'error_count': len(errors),
+        }), (200 if not video_failed else 500)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -454,6 +598,29 @@ def api_cleanup_history():
                 history = json.load(f)
         # 只返回最近 20 条，避免响应过大
         history = history[:20] if isinstance(history, list) else []
+        # v0.3.1.63：历史条目里的 errors 可能是上千条（旧格式全量落盘，实测单条
+        # 4437 条 → 响应体 2MB），会把页面卡死。统一裁剪为前 5 条 + 总数。
+        slim = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                slim.append(entry)   # 结构异常条目原样保留，不静默丢弃
+                continue
+            entry = dict(entry)
+            errs = entry.get('errors')
+            if errs is None:
+                errs = []
+            elif isinstance(errs, str):
+                errs = [errs]
+            elif not isinstance(errs, (list, tuple)):
+                errs = [str(errs)]
+            try:
+                _cnt = int(entry.get('error_count') or 0)
+            except (TypeError, ValueError):
+                _cnt = 0
+            entry['error_count'] = _cnt or len(errs)
+            entry['errors'] = [str(x)[:200] for x in list(errs)[:5]]
+            slim.append(entry)
+        history = slim
         return jsonify({'success': True, 'history': history})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
