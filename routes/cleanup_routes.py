@@ -12,77 +12,15 @@ cleanup_bp = Blueprint('cleanup', __name__, url_prefix='')
 CLEANUP_LOG = '/opt/radxa_data/teslausb/data/cleanup_history.json'
 THUMBNAIL_DIR = '/opt/radxa_data/teslausb/static/thumbnails'
 
-CAM_PATH = '/mnt/teslacam'
-GADGET_UDC = '/sys/kernel/config/usb_gadget/tesla_usb/UDC'
-
-
-def _read_cam_mount():
-    """读取 cam 分区的挂载状态。
-
-    Returns:
-        (mounted, is_ro, source)
-    """
-    mounted = False
-    is_ro = False
-    source = ''
-    try:
-        with open('/proc/mounts') as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 4 and parts[1] == CAM_PATH:
-                    mounted = True
-                    source = parts[0]
-                    is_ro = 'ro' in parts[3].split(',')
-                    break
-    except Exception:
-        pass
-    return mounted, is_ro, source
-
-
-def _gadget_bound():
-    """USB Gadget 是否已绑定 UDC（非空即视为已绑定）。
-
-    注意：必须判"内容非空"而不是"文件存在"——configfs 里 UDC 文件在
-    解绑（echo "" > UDC）后依然存在，只判存在会把 Edit 模式误判成 Present。
-    """
-    try:
-        with open(GADGET_UDC) as f:
-            return bool(f.read().strip())
-    except Exception:
-        return False
-
-
-def _is_loop_source(source):
-    """挂载源是否为 loop 设备（present_usb.sh 在直挂失败时会用 losetup -r
-    建只读回环，这种只读回环**永远**无法 remount 成可写）。"""
-    return str(source).startswith('/dev/loop')
-
-
-def _detect_cam_mode():
-    """探测 cam 分区当前模式。
-
-    ⚠ 判据必须只看「块设备是否被独占 / 能否放开写」，**不能只看 is_ro**：
-      - Present 模式：Tesla 通过 USB Gadget 独占 nvme0n1p2 → remount rw 必然失败。
-      - Edit 模式：`usb_gadget_init.sh stop` 也把 TeslaCam 按 **ro** 挂载
-        （usb_gadget_init.sh:216 注释"TeslaCam 始终只读"），此时 gadget 已解绑、
-        块设备空闲，`mount -o remount,rw` 是能成功的。
-      若拿 is_ro 当 Present 判据，会连 Edit 模式的清理一起拒掉。
-
-    Returns:
-        (mode, detail)  mode ∈ {'present', 'edit', 'unmounted'}
-    """
-    mounted, is_ro, source = _read_cam_mount()
-    bound = _gadget_bound()
-    if bound:
-        mode = 'present'                        # 块设备被 gadget 独占
-    elif mounted and is_ro and _is_loop_source(source):
-        mode = 'present'                        # 只读回环，无法放开写
-    elif mounted:
-        mode = 'edit'
-    else:
-        mode = 'unmounted'
-    return mode, {'mounted': mounted, 'is_ro': is_ro,
-                  'source': source, 'gadget_bound': bound}
+# TeslaCam 模式探测统一走 utils.system_info（唯一权威实现，见教训 M100）；
+# 此处保留同名私有别名，避免各调用点散落两份判据。
+from utils.system_info import (
+    read_cam_mount as _read_cam_mount,
+    gadget_bound as _gadget_bound,
+    is_loop_source as _is_loop_source,
+    detect_cam_mode as _detect_cam_mode,
+    CAM_PATH,
+)
 
 
 def _format_size(size_bytes):

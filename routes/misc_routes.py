@@ -168,21 +168,16 @@ def get_mode_status():
                 if mode in ['present', 'edit']:
                     return jsonify({'success': True, 'mode': mode})
 
-        # flag 文件丢失 → 检测实际状态
-        # Present 模式特征: TeslaCam 分区以 ro 挂载 且 gadget 功能块存在
-        cam_ro = False
-        try:
-            with open('/proc/mounts', 'r') as f:
-                for line in f:
-                    if '/mnt/teslacam' in line and 'ro,' in line:
-                        cam_ro = True
-                        break
-        except Exception:
-            pass
-
-        gadget_active = os.path.exists('/sys/kernel/config/usb_gadget/g1/UDC')
-
-        mode = 'present' if (cam_ro or gadget_active) else 'edit'
+        # flag 文件丢失 → 用统一探测兜底（v0.3.1.63，唯一权威实现见 utils/system_info）
+        # 旧实现两处错（教训 M100，与本版清理守卫同源）：
+        #   ① gadget 目录名硬编码 `g1`，实际是 `tesla_usb` → 该判据恒为 False；
+        #   ② 拿「cam 以 ro 挂载」当 Present 判据 —— Edit 模式下
+        #      usb_gadget_init.sh 的 stop_gadget() 也按 ro 挂载 TeslaCam，
+        #      会把 Edit 误报成 Present（只在 flag 丢失时才走本分支，故平时不显）。
+        from utils.system_info import detect_cam_mode
+        cam_mode, _detail = detect_cam_mode()
+        # 本端点对外只暴露 present/edit 两种（未挂载按 edit 处理，保持原语义）
+        mode = 'present' if cam_mode == 'present' else 'edit'
         return jsonify({'success': True, 'mode': mode})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

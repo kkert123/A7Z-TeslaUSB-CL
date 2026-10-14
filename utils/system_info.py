@@ -225,3 +225,84 @@ def get_ip_info():
             pass
     
     return ip_info
+
+
+# ═══════════════════════════════════════════════════════════════
+# TeslaCam 分区模式探测 —— 唯一权威实现（v0.3.1.63）
+#
+# 背景（教训 M100）：以前这套判据在多个模块里各写一套，且都用「cam 分区是否
+# 只读挂载」来判 Present —— 但 Edit 模式下 `usb_gadget_init.sh stop_gadget()`
+# 也是把 TeslaCam 按 **ro** 挂载（其注释明写「TeslaCam 始终只读」），于是编辑
+# 模式会被误判成 Present。判据必须落在「块设备是否被独占 / 能不能放开写」上。
+#
+# Present 判据：
+#   ① USB Gadget 已绑定 UDC（块设备被 gadget 独占，remount rw 必然失败）
+#   ② cam 以 ro 挂在只读回环 /dev/loop* 上（present_usb.sh 直挂失败时的兜底
+#      路径用 `losetup -r`，只读回环永远无法 remount 成可写）
+# 其余 ro 直挂 = edit（此时 gadget 已解绑、块设备空闲，remount rw 可成功）。
+# ═══════════════════════════════════════════════════════════════
+
+CAM_PATH = '/mnt/teslacam'
+GADGET_UDC = '/sys/kernel/config/usb_gadget/tesla_usb/UDC'
+
+
+def read_cam_mount():
+    """读取 cam 分区挂载状态。
+
+    Returns:
+        (mounted, is_ro, source)
+    """
+    mounted = False
+    is_ro = False
+    source = ''
+    try:
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == CAM_PATH:
+                    mounted = True
+                    source = parts[0]
+                    is_ro = 'ro' in parts[3].split(',')
+                    break
+    except Exception:
+        pass
+    return mounted, is_ro, source
+
+
+def gadget_bound():
+    """USB Gadget 是否已绑定 UDC。
+
+    ⚠ 必须判「内容非空」而不是「文件存在」：configfs 里 UDC 文件在解绑
+    （`echo "" > UDC`）后依然存在，只判存在会把 Edit 模式误判成 Present。
+    """
+    try:
+        with open(GADGET_UDC) as f:
+            return bool(f.read().strip())
+    except Exception:
+        return False
+
+
+def is_loop_source(source):
+    """挂载源是否为 loop 设备（只读回环无法 remount 成可写）。"""
+    return str(source).startswith('/dev/loop')
+
+
+def detect_cam_mode():
+    """探测 cam 分区当前模式。
+
+    Returns:
+        (mode, detail)  mode ∈ {'present', 'edit', 'unmounted'}，
+        detail = {'mounted', 'is_ro', 'source', 'gadget_bound'}
+    """
+    mounted, is_ro, source = read_cam_mount()
+    bound = gadget_bound()
+    if bound:
+        mode = 'present'                       # 块设备被 gadget 独占
+    elif mounted and is_ro and is_loop_source(source):
+        mode = 'present'                       # 只读回环，无法放开写
+    elif mounted:
+        mode = 'edit'
+    else:
+        mode = 'unmounted'
+    return mode, {'mounted': mounted, 'is_ro': is_ro,
+                  'source': source, 'gadget_bound': bound}
