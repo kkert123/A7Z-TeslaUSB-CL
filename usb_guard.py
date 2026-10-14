@@ -100,6 +100,11 @@ DATA_DIR = "/opt/radxa_data/teslausb/data"
 STATUS_FILE = DATA_DIR + "/usb_guard_status.json"
 REBOOT_REQUEST_FILE = DATA_DIR + "/usb_guard_reboot_request.json"
 
+# 当前模式标志文件（由 routes/misc_routes.switch_mode、usb_gadget_init.sh、
+# present_usb.sh 共同维护）：present / edit。用于区分「gadget 故意解绑」与
+# 「链路卡死」——见 tick() 的 Edit 模式闸（教训 M103）。
+MODE_FILE = "/tmp/teslausb_mode"
+
 # 重启请求有效期（秒）：看门狗只认这个窗口内的请求，避免陈旧文件在重启后被消费。
 REBOOT_REQUEST_TTL = 600
 
@@ -191,6 +196,17 @@ def _pick_udc() -> str:
 
 # online 不可读告警节流（模块级；5 分钟内只提醒一次，避免每 3s 刷屏）
 _ONLINE_WARN_AT = [0.0]
+
+
+def intended_mode() -> str:
+    """当前**意图模式**：'present' / 'edit'，读不到或值非法返回 ''。
+
+    Edit 模式下 gadget 是故意解绑的（车机线往往还插着），因此
+    「线在位 + UDC 未 configured」是预期状态而非链路故障。读不到标志时
+    返回 ''（调用方据此维持原有自愈行为，fail-open，不削弱 M80 的保护）。
+    """
+    m = _read_text(MODE_FILE)
+    return m if m in ("present", "edit") else ""
 
 
 def probe() -> dict:
@@ -492,10 +508,13 @@ class UsbGuard(object):
         return True
 
     # ── 故障期管理 ──
-    def _reset_fault(self, snap: dict) -> None:
+    def _reset_fault(self, snap: dict, reason: str = "") -> None:
         if self.fault_since is not None:
             dur = time.time() - self.fault_since
-            if snap["healthy"]:
+            if reason:
+                logger.info("%s（故障期清零，持续 %.0fs，已执行阶梯: %s）",
+                            reason, dur, ",".join(sorted(self.stages_done)) or "无")
+            elif snap["healthy"]:
                 logger.info("链路恢复正常（故障持续 %.0fs，已执行阶梯: %s）",
                             dur, ",".join(sorted(self.stages_done)) or "无")
             else:
@@ -521,6 +540,20 @@ class UsbGuard(object):
             self.last_state = snap["state"]
 
         if not self.cfg["enabled"]:
+            return
+
+        # ── Edit 模式闸（v0.3.1.64，教训 M103）────────────────────────────
+        # Edit 模式下 gadget 是**故意**解绑的（车机线往往还插着），
+        # 「线在位 + UDC 未 configured」属于预期状态，不是链路故障。不拦的话：
+        #   切到 Edit ~30s 后触发 L2 `usb_gadget_init.sh restart`
+        #   → 其 remount_all_ro 把 cam 分区强制打回只读 + 重新绑 gadget
+        #   → 用户刚切到的 Edit 被"修"回 Present，且正在跑的手动清理
+        #     每个文件都是 [Errno 30] Read-only file system（实测单次 4080 条）。
+        # 判据取 /tmp/teslausb_mode（switch_mode 与 usb_gadget_init.sh 都会写）；
+        # 读不到时维持原行为，不削弱对真实卡死的自愈（M80）。
+        if intended_mode() == "edit":
+            self._reset_fault(snap, reason="Edit 模式：gadget 为故意解绑，非链路故障")
+            self._write_status(snap, "edit_mode", 0.0)
             return
 
         # 拔线闸 / 健康 → 一律不动作
@@ -603,8 +636,8 @@ class UsbGuard(object):
 
     def run_forever(self) -> None:
         interval = self.cfg["poll_interval_seconds"]
-        logger.info("USB Guard 启动（interval=%ds, DRY_RUN=%s, 判据: online + state==configured）",
-                    interval, DRY_RUN)
+        logger.info("USB Guard 启动（interval=%ds, DRY_RUN=%s, 判据: online + state==configured；"
+                    "Edit 模式闸: %s）", interval, DRY_RUN, MODE_FILE)
         logger.info("配置: %s", json.dumps(self.cfg, ensure_ascii=False))
         while True:
             try:

@@ -175,6 +175,12 @@ start_gadget() {
     # === 关键修复：重新只读挂载所有分区 ===
     remount_all_ro
 
+    # 写模式标志（v0.3.1.64，教训 M103）：让 /tmp/teslausb_mode 始终反映**真实意图**。
+    # usb_guard 靠它区分「gadget 故意解绑(Edit)」与「链路卡死」，从而不再在 Edit
+    # 模式下误判故障、跑 restart 把 cam 打回只读；auto_present_service 也是走本脚本
+    # 切回 Present，若不写标志会留下 stale 'edit' 反而挡住真实自愈。
+    echo "present" > /tmp/teslausb_mode 2>/dev/null || true
+
     green ""
     green "  USB Gadget 已激活! UDC=$UDC (nofua)"
     green "  连接特斯拉车机或 PC 即可识别"
@@ -189,6 +195,10 @@ start_gadget() {
 
 stop_gadget() {
     echo "停止 USB Gadget..."
+
+    # 先写模式标志（v0.3.1.64，教训 M103）：切到 Edit（gadget 故意解绑）后立刻
+    # 声明意图，usb_guard 才不会把「线在位 + UDC 未配置」误判成链路卡死。
+    echo "edit" > /tmp/teslausb_mode 2>/dev/null || true
 
     # 先卸载本地只读挂载
     for mp in "${MOUNT_POINTS[@]}"; do

@@ -23,6 +23,63 @@ from utils.system_info import (
 )
 
 
+def _ensure_cam_writable(cam_path, lines):
+    """确认 cam 分区**真的**可写，必要时先 remount rw，再用真实写探针验收。
+
+    v0.3.1.64（教训 M103）：只看 /proc/mounts 的 ro 位不够——
+      · 它只反映「此刻」；Edit 模式下 usb_guard 的 L2 restart（→ usb_gadget_init.sh
+        的 remount_all_ro）可能在几十秒内把分区强制打回只读，把早先做好的 remount
+        推翻，于是删除循环从头到尾都是 [Errno 30]（实测单次 4080 条）；
+      · remount 返回 0 也不等于写得进去。
+    因此把本动作放在**紧邻删除之前**，并以「建一个探针文件再删掉」作为最终判据。
+
+    Returns:
+        (ok, reason)
+    """
+    mounted, is_ro, _src = _read_cam_mount()
+    if not mounted:
+        return False, 'cam 分区未挂载'
+
+    if is_ro:
+        lines.append('🔓 检测到只读挂载，正在 remount 读写...')
+        for _args in (['-o', 'remount,rw'], ['-o', 'rw,remount']):
+            try:
+                _r = subprocess.run(
+                    ["sudo", "-n", "mount"] + _args + [cam_path],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _r.returncode != 0:
+                    _msg = ((_r.stderr or '') + (_r.stdout or '')).strip()
+                    lines.append('   ⚠ remount 返回 %s: %s' % (_r.returncode, _msg[:120]))
+            except Exception as e:
+                lines.append(f'   ⚠ remount 异常: {e}')
+            _m2, _ro2, _ = _read_cam_mount()
+            if _m2 and not _ro2:
+                break
+
+    # 真实写探针：remount 成功 ≠ 可写
+    _probe = os.path.join(cam_path, '.wb_write_probe')
+    _ok = False
+    try:
+        with open(_probe, 'w') as f:
+            f.write('probe')
+        _ok = True
+    except Exception as e:
+        lines.append(f'   ❌ 写探针失败: {e}')
+    finally:
+        try:
+            if os.path.exists(_probe):
+                os.remove(_probe)
+        except Exception:
+            pass
+
+    if not _ok:
+        _m3, _ro3, _ = _read_cam_mount()
+        return False, ('cam 分区不可写（挂载%s）' % ('仍为只读' if _ro3 else '属性为读写但写入被拒'))
+    lines.append('   ✅ cam 分区可写（写探针通过）')
+    return True, ''
+
+
 def _format_size(size_bytes):
     """格式化字节大小"""
     if not size_bytes:
@@ -304,43 +361,6 @@ def api_cleanup_execute():
                 'error': 'TeslaCam 目录不可访问',
             }), 409
 
-        # 检查分区是否只读（Edit 模式下 stop_gadget 也按 ro 挂载，需临时放开）
-        # v0.3.1.63：原实现不看 returncode、二次校验结果被丢弃，却无条件打印
-        # "✅ 已切换为读写模式" —— 假成功日志。改为：逐条校验实际挂载属性，
-        # 确认仍为只读就中止（不再对着只读分区盲删）。
-        _mounted, _is_ro, _src = _read_cam_mount()
-        if _is_ro:
-            lines.append('🔓 检测到只读挂载，正在 remount 读写...')
-            _rw_ok = False
-            for _args in (['-o', 'remount,rw'], ['-o', 'rw,remount']):
-                try:
-                    _r = subprocess.run(
-                        ["sudo", "-n", "mount"] + _args + [cam_path],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if _r.returncode != 0:
-                        _msg = ((_r.stderr or '') + (_r.stdout or '')).strip()
-                        lines.append('   ⚠ remount 返回 %s: %s' % (_r.returncode, _msg[:120]))
-                except Exception as e:
-                    lines.append(f'   ⚠ remount 异常: {e}')
-                _m2, _ro2, _ = _read_cam_mount()
-                if _m2 and not _ro2:
-                    _rw_ok = True
-                    break
-            if _rw_ok:
-                lines.append('   ✅ 已切换为读写模式')
-            else:
-                lines.append('   ❌ remount 读写失败，cam 分区仍为只读')
-                lines.append('')
-                lines.append('👉 已中止清理，本次未删除任何文件。')
-                lines.append('   请确认已切换到 Edit 模式后再试。')
-                return jsonify({
-                    'success': False,
-                    'mode': mode,
-                    'error': 'cam 分区为只读且 remount 读写失败，已中止清理',
-                    'output': '\n'.join(lines),
-                }), 409
-
         # 1. 非视频文件清理
         freed_preview = cleaner.cleanup_previews()
         freed_temp = cleaner.cleanup_temp_files()
@@ -357,6 +377,20 @@ def api_cleanup_execute():
             lines.append(f'  ✅ 清理旧版本目录: {deleted_versions} 个（保留当前 + 1 历史）')
 
         # 2. 视频文件清理（per-folder 策略）
+        # v0.3.1.64（教训 M103）：把「确认 cam 可写」挪到**紧邻删除之前**，
+        # 并用真实写探针验收——期间可能已被 usb_guard 的 L2 restart 打回只读。
+        _w_ok, _w_why = _ensure_cam_writable(cam_path, lines)
+        if not _w_ok:
+            lines.append('')
+            lines.append('👉 已中止清理（未删除视频文件，非视频清理已完成）: %s' % _w_why)
+            lines.append('   请确认已切换到 Edit 模式且模式未被自动切回，再重试。')
+            return jsonify({
+                'success': False,
+                'mode': mode,
+                'error': _w_why,
+                'output': '\n'.join(lines),
+            }), 409
+
         plan = cleaner.calculate_cleanup_plan(cam_path, respect_enabled=not force_all)
 
         # 快照非视频阶段的错误/动作：execute_cleanup 会整体重置 self.stats，
