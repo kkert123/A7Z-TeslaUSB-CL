@@ -764,9 +764,10 @@ def _log_broadcaster():
         except:
             pass
 
-# 启动广播线程
-_log_thread = threading.Thread(target=_log_broadcaster, daemon=True)
-_log_thread.start()
+# 后台广播线程（v0.3.1.66 / M106：**不再在导入时自动 start()**）
+# 见文件末尾 start_broadcasters() 的说明——模块导入不得产生「起线程」副作用。
+_log_thread = threading.Thread(target=_log_broadcaster, daemon=True,
+                               name='teslausb-log-broadcaster')
 
 import license_plate_service
 
@@ -957,8 +958,31 @@ def _staging_delete(partition, filename):
 def _is_present_mode():
     return staging_service.is_present()
 
-_stats_thread = threading.Thread(target=_stats_broadcaster, daemon=True)
-_stats_thread.start()
+_stats_thread = threading.Thread(target=_stats_broadcaster, daemon=True,
+                                 name='teslausb-stats-broadcaster')
+
+_broadcasters_started = False
+
+
+def start_broadcasters():
+    """显式启动后台广播线程（**只能由入口 app.py 调用**，幂等）。
+
+    v0.3.1.66 / M106：原实现把 `_stats_thread.start()` / `_log_thread.start()`
+    写在**模块顶层**，于是任何「传递导入 app_helpers」的进程都会悄无声息地多出
+    一个统计广播线程 —— 它会每 5s 调 `traffic_monitor.update()` 写
+    `/opt/radxa_data/data/traffic_stats.json`。
+    10-15 实测到的后果：`bg_preview_generator`（还跑在**已删除的旧版本目录**里）
+    经 `cache_coherency` 懒加载导入了本模块 → 旧代码进程成为**第二个写入者**，
+    它和新版主进程各持一份内存快照轮流覆盖同一个文件（指纹：`hotspot` 数值倒退）。
+    改成显式调用后，「谁写这个文件」只取决于入口，一眼可查。
+    """
+    global _broadcasters_started
+    if _broadcasters_started:
+        return False
+    _broadcasters_started = True
+    _log_thread.start()
+    _stats_thread.start()
+    return True
 
 def _scan_missing_thumbnails():
     """扫描所有事件文件夹，为缺少缩略图的事件生成缩略图。

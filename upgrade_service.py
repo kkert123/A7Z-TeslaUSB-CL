@@ -935,6 +935,21 @@ KLOG_SVC_DST = "/etc/systemd/system/" + KLOG_SVC
 RTC_SVC = "teslausb-rtc-sync.service"
 RTC_TIMER = "teslausb-rtc-sync.timer"
 
+# v0.3.1.66（M106）：升级/开机后必须让**全部**本项目服务跑上新代码。
+# 这几个原先既不在升级后置钩子里、也不在启动期自愈里，于是会一直运行
+# 「已被删除的旧版本目录」中的代码（判据：`readlink /proc/<pid>/cwd`）——
+# 旧行为以"看不见的写者/执行者"身份继续生效。10-15 实证：两个进程各持一份
+# 内存快照轮流覆盖同一个 traffic_stats.json，`hotspot` 数值出现**倒退**。
+REFRESH_SERVICES = (
+    "teslausb-sentry.service",
+    "teslausb-bgpreview.service",
+    "teslausb-fan.service",
+    # M107：该服务已加 SIGTERM→magic-close 且启动即喂狗，重启窗口 < 2s（< 硬件超时 16s）
+    "teslausb-watchdog.service",
+)
+# 幂等标记：同一版本只刷一次（跨升级存活——data/ 由 _restore_user_data 保留）
+REFRESH_MARKER = os.path.join(SYMLINK, "data", "services_refreshed.json")
+
 
 def _ensure_usb_guard_service():
     """启动期幂等自愈（v0.3.1.57 / M80）——确保 USB 链路守护单元已安装并运行。
@@ -1158,6 +1173,58 @@ def _ensure_rtc_sync_service():
         return False, f"确保 {RTC_TIMER} 异常: {e}"
 
 
+def _refresh_project_services():
+    """启动期幂等自愈（v0.3.1.66 / M106）——把本项目其余常驻服务重启到当前版本。
+
+    为什么必须有：升级流程只重启 web 与 usb-guard/kernel-log，而 sentry /
+    bgpreview / fan / watchdog 会**一直跑旧代码直到整机重启**。再叠加
+    「模块导入即 `thread.start()`」的副作用（旧进程也起了一个统计广播线程），
+    旧进程就成了共享状态文件的**第二个写入者** —— 于是"新代码明明装了、
+    判据单跑也对，页面数字却还是旧口径"（10-15 实证，`hotspot` 数值倒退）。
+
+    幂等：`data/services_refreshed.json` 里 version 与当前一致则跳过（同版本只刷一次）。
+    best-effort；返回 (ok, msg)，语义同 startup_self_heal 的钩子约定。
+    """
+    version = getattr(config, "APP_VERSION", "") or ""
+    if not version:
+        return None, ""
+    try:
+        with open(REFRESH_MARKER, "r", encoding="utf-8") as f:
+            if (json.load(f) or {}).get("version") == version:
+                return None, ""
+    except Exception:
+        pass
+
+    touched, failed = [], []
+    for svc in REFRESH_SERVICES:
+        if not os.path.exists("/etc/systemd/system/" + svc):
+            continue
+        try:
+            rc, out, _ = _run(["systemctl", "is-active", svc], timeout=15)
+            if rc != 0 or out.strip() != "active":
+                continue            # 没在跑的就不主动拉起（尊重用户手动停用）
+            rc, out, err = _run(["systemctl", "restart", svc], timeout=60)
+            if rc == 0:
+                touched.append(svc.replace("teslausb-", "").replace(".service", ""))
+            else:
+                failed.append("%s:%s" % (svc, (err or out)[:60]))
+        except Exception as e:
+            failed.append("%s:%s" % (svc, e))
+
+    if failed:
+        return False, "刷新服务失败 " + "；".join(failed)
+    try:
+        os.makedirs(os.path.dirname(REFRESH_MARKER), exist_ok=True)
+        with open(REFRESH_MARKER, "w", encoding="utf-8") as f:
+            json.dump({"version": version, "at": datetime.now().isoformat(),
+                       "refreshed": touched}, f, ensure_ascii=False)
+    except Exception:
+        pass
+    if touched:
+        return True, "已重启服务刷新代码: " + "/".join(touched)
+    return None, ""
+
+
 def startup_self_heal():
     """启动期幂等自愈（v0.3.1.56 / M75）——供 app.py 开机调用，补齐钩子自举缺口。
 
@@ -1179,7 +1246,8 @@ def startup_self_heal():
     """
     done, failed = [], []
     for fn in (_disable_legacy_gadget_service, _ensure_usb_guard_service,
-               _ensure_kernel_log_service, _ensure_rtc_sync_service):
+               _ensure_kernel_log_service, _ensure_rtc_sync_service,
+               _refresh_project_services):
         try:
             ok, msg = fn()
         except Exception as e:

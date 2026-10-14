@@ -11,8 +11,14 @@ from app_state import state
 # ── 导入所有帮助函数 ──
 from utils.app_helpers import *
 # 显式导入下划线前缀的函数（from * 不导出 _xxx）
-from utils.app_helpers import _stats_broadcaster, _log_broadcaster, _generate_thumbnail
+from utils.app_helpers import (_stats_broadcaster, _log_broadcaster,
+                               _generate_thumbnail, start_broadcasters)
 import video_service, sync_service, staging_service, cloud_archive_service, cloud_rclone_service
+
+# v0.3.1.66 / M106：后台广播线程由**入口显式启动**（不再靠模块导入副作用）。
+# 这样只有本进程会写 traffic_stats.json / 日志广播，其它"传递导入 app_helpers"
+# 的进程（如 bg_preview_generator）不会再变成隐蔽的第二写入者。
+start_broadcasters()
 
 app = Flask(__name__)
 

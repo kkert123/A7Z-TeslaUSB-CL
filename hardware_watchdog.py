@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import time
 from datetime import datetime
@@ -38,6 +39,12 @@ CPU_LOAD_THRESHOLD = 80      # CPU 负载百分比阈值
 MEMORY_THRESHOLD = 85        # 内存使用百分比阈值
 DISK_THRESHOLD = 95          # 磁盘使用百分比阈值
 RESPONSE_TIMEOUT = 8        # 服务响应超时（秒），放宽避免单线程排队误报
+
+# v0.3.1.66 / M107：启动宽限期（秒）——只推迟「动作」，**不推迟「喂狗」**。
+# 硬件超时固定 16s（见 start_watchdog 日志）；宽限期必须 > 0 才不会在系统
+# 启动阶段误判故障而复位，但**期间必须持续喂狗**，否则宽限期本身就成了
+# 「重启该服务 = 整机复位」的窗口。
+STARTUP_GRACE_SECONDS = 30
 
 # 关键服务列表（需监控）
 # 注意：只列入常驻服务，teslausb-gadget 仅在 USB 连接 Tesla 时运行，不列入
@@ -62,6 +69,8 @@ class HardwareWatchdog:
     def __init__(self):
         self.watchdog_dev = "/dev/watchdog"
         self.watchdog_fd = None   # 保持打开的看门狗文件描述符
+        # v0.3.1.66 / M107：已决定重启 → 信号处理器不得 magic close（要保持武装）
+        self._want_reboot = False
         self.status = {
             "healthy": True,
             "last_check": None,
@@ -119,6 +128,32 @@ class HardwareWatchdog:
         except Exception as e:
             logger.error("喂狗失败: %s", e)
             return False
+
+    def install_signal_handlers(self) -> None:
+        """v0.3.1.66 / M107：把「被停止」变成安全路径。
+
+        原实现只在 `finally`（正常退出/KeyboardInterrupt）里 magic close，
+        而 systemd 停止服务发的是 **SIGTERM** —— Python 默认动作直接终止进程，
+        `finally` 根本不执行 → 硬件看门狗**保持武装**（nowayout），
+        加上启动后 30s 不喂狗的空窗，`systemctl restart` 变成「必然整机复位」。
+        实测内核证据：`watchdog: watchdog0: watchdog did not stop!`。
+        """
+        def _handler(signum, _frame):
+            if self._want_reboot:
+                logger.info("收到信号 %s：已决定重启，保持看门狗武装", signum)
+            else:
+                logger.info("收到信号 %s：安全关闭看门狗后退出", signum)
+                self.stop_watchdog()
+            os._exit(0)
+
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(signal, name, None)   # SIGHUP 在部分平台不存在
+            if sig is None:
+                continue
+            try:
+                signal.signal(sig, _handler)
+            except (ValueError, OSError):
+                pass
 
     def get_cpu_load(self) -> float:
         """获取 CPU 负载（1分钟平均）"""
@@ -405,9 +440,10 @@ class HardwareWatchdog:
             logger.warning("健康检查间隔(%ds) 超过看门狗超时(16s)，强制改为5s", interval)
             interval = 5
 
-        # 启动前等待系统完全启动（避免系统启动阶段超时）
-        logger.info("等待系统完成启动（30秒）...")
-        time.sleep(30)
+        # v0.3.1.66 / M107：必须先挂信号处理器（让 systemd 的 SIGTERM 走 magic close），
+        # 并且**立刻**打开看门狗 —— 原来的顺序是「先 sleep(30) 再 open」，
+        # 于是 30s 空窗 > 16s 硬件超时 ⇒ 重启该服务必然整机复位。
+        self.install_signal_handlers()
 
         logger.info("看门狗守护进程启动，检查间隔: %ds", interval)
 
@@ -415,6 +451,18 @@ class HardwareWatchdog:
         watchdog_active = self.start_watchdog()
         if not watchdog_active:
             logger.warning("硬件看门狗不可用，仅进行健康监控")
+
+        # 启动宽限期：只推迟「动作」（不在系统未就绪时判故障），期间**照常喂狗**
+        if STARTUP_GRACE_SECONDS > 0:
+            logger.info("等待系统完成启动（%d秒，期间持续喂狗）...", STARTUP_GRACE_SECONDS)
+            grace_end = time.time() + STARTUP_GRACE_SECONDS
+            while True:
+                remaining = grace_end - time.time()
+                if remaining <= 0:
+                    break
+                if watchdog_active:
+                    self.pet_watchdog()
+                time.sleep(min(interval, remaining))
 
         consecutive_failures = 0
         max_failures = 3
@@ -438,7 +486,7 @@ class HardwareWatchdog:
                     # v0.3.1.57 / M80：外部重启请求（usb_guard 层级恢复失败）优先处理。
                     # 命中后不再喂狗 → 交由硬件看门狗超时复位。
                     if self.consume_reboot_request():
-                        want_reboot = True
+                        self._want_reboot = True
                         continue
 
                     status = self.run_health_check()
@@ -471,7 +519,7 @@ class HardwareWatchdog:
                                 max_failures,
                             )
                             # 不喂狗、不关闭看门狗，让硬件看门狗超时触发重启
-                            want_reboot = True
+                            self._want_reboot = True
 
                     time.sleep(interval)
 
@@ -489,7 +537,7 @@ class HardwareWatchdog:
                             "连续 %d 次异常，准备触发硬件重启...",
                             max_failures,
                         )
-                        want_reboot = True
+                        self._want_reboot = True
 
                     # 如果还没触发重启，等待下次检查
                     if not want_reboot:
