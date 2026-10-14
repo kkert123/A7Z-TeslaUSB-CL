@@ -140,6 +140,7 @@
       <br>实时 ↓ <span id="net-rx">—</span> ↑ <span id="net-tx">—</span>
       <br><span style="font-size:0.7rem;color:var(--text-muted)">本月家庭WiFi ↓ <span id="monthly-home-rx">—</span> ↑ <span id="monthly-home-tx">—</span></span>
       <br><span style="font-size:0.7rem;color:var(--text-muted)">本月车辆热点 ↓ <span id="monthly-hot-rx">—</span> ↑ <span id="monthly-hot-tx">—</span></span>
+      <br><span id="monthly-other-row" style="display:none;font-size:0.7rem;color:var(--text-muted)">本月其他网络 ↓ <span id="monthly-other-rx">—</span> ↑ <span id="monthly-other-tx">—</span></span>
     </div>
   </div>
 
@@ -504,6 +505,13 @@ function updateDashboard(d) {
     setB('monthly-home-tx', mt.home_wifi && mt.home_wifi.tx);
     setB('monthly-hot-rx', mt.hotspot && mt.hotspot.rx);
     setB('monthly-hot-tx', mt.hotspot && mt.hotspot.tx);
+    // 其他网络（连了未被配置列出的网络时的流量，如手机热点）——仅非零时显示，
+    // 避免这部分流量"看不见"（M105 修复前的 other 桶就是不可见黑洞）
+    const mo = mt.other || {};
+    setB('monthly-other-rx', mo.rx);
+    setB('monthly-other-tx', mo.tx);
+    const oRow = document.getElementById('monthly-other-row');
+    if (oRow) oRow.style.display = ((mo.rx || 0) + (mo.tx || 0) > 0) ? '' : 'none';
   }
 
   // ── CPU 进度条 ──

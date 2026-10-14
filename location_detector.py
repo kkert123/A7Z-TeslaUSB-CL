@@ -26,7 +26,22 @@ from typing import Callable, Optional
 import requests
 from bs4 import BeautifulSoup
 
+from utils.ssid_match import matches
+
 logger = logging.getLogger(__name__)
+
+
+def _dedup_ordered(values):
+    """去重并**保留原顺序**。
+
+    历史实现用 `set(...)`：既让 `list(...)[0]`（当"要切换到的 SSID"用）随
+    PYTHONHASHSEED 漂移、可能取到连接名而非 SSID，也丢掉了配置里的优先级顺序。
+    """
+    out = []
+    for v in (values or []):
+        if isinstance(v, str) and v.strip() and v.strip() not in out:
+            out.append(v.strip())
+    return out
 
 
 class LocationState(Enum):
@@ -489,8 +504,8 @@ class LocationDetector:
     ):
         self.teslamate_url = teslamate_url.rstrip("/")
         self.home_location = home_location
-        self.home_wifi_ssids = set(home_wifi_ssids or [])
-        self.hotspot_ssids = set(hotspot_ssids or [])
+        self.home_wifi_ssids = _dedup_ordered(home_wifi_ssids)
+        self.hotspot_ssids = _dedup_ordered(hotspot_ssids)
         self.wifi_interface = wifi_interface
         self.poll_interval = poll_interval
         self.auth_password = auth_password
@@ -852,7 +867,7 @@ class LocationDetector:
             logger.info(f"TeslaMate 仅提供坐标，位置判定交由 WiFi 仲裁: '{raw_location}'")
         
         # WiFi 辅助验证
-        if current_wifi in self.home_wifi_ssids:
+        if matches([current_wifi], self.home_wifi_ssids):
             if is_home:
                 confidence = 1.0  # TeslaMate + WiFi 都确认在家
                 location_source = "teslamate+wifi"
@@ -865,7 +880,7 @@ class LocationDetector:
             else:
                 # TeslaMate 显示外出但连了家里 WiFi（可能是 TeslaMate 延迟）
                 logger.info("WiFi 确认在家，但 TeslaMate 位置不匹配（可能延迟）")
-        elif current_wifi in self.hotspot_ssids:
+        elif matches([current_wifi], self.hotspot_ssids):
             if not is_home:
                 confidence = 0.8  # 使用热点，大概率外出
                 if not teslamate_available:
@@ -884,11 +899,11 @@ class LocationDetector:
         
         # 判断是否需要切换 WiFi
         needs_switch = False
-        if state == LocationState.HOME and current_wifi not in self.home_wifi_ssids:
+        if state == LocationState.HOME and not matches([current_wifi], self.home_wifi_ssids):
             if self.home_wifi_ssids:  # 有配置家庭 WiFi
                 needs_switch = True
                 logger.info(f"在家但连接了非家庭 WiFi '{current_wifi}'，建议切换")
-        elif state == LocationState.AWAY and current_wifi in self.home_wifi_ssids:
+        elif state == LocationState.AWAY and matches([current_wifi], self.home_wifi_ssids):
             if self.hotspot_ssids:  # 有配置热点
                 needs_switch = True
                 logger.info(f"外出但连接了家庭 WiFi '{current_wifi}'，建议切换到热点")
@@ -914,8 +929,8 @@ class LocationDetector:
         # 触发 WiFi 切换回调
         if needs_switch and self._on_wifi_switch_needed:
             target_ssid = (
-                list(self.home_wifi_ssids)[0] if state == LocationState.HOME
-                else list(self.hotspot_ssids)[0] if self.hotspot_ssids
+                self.home_wifi_ssids[0] if state == LocationState.HOME and self.home_wifi_ssids
+                else self.hotspot_ssids[0] if self.hotspot_ssids
                 else ""
             )
             if target_ssid:
@@ -956,9 +971,9 @@ class LocationDetector:
             return None
         
         if self._last_location.state == LocationState.HOME:
-            return list(self.home_wifi_ssids)[0] if self.home_wifi_ssids else None
+            return self.home_wifi_ssids[0] if self.home_wifi_ssids else None
         elif self._last_location.state == LocationState.AWAY:
-            return list(self.hotspot_ssids)[0] if self.hotspot_ssids else None
+            return self.hotspot_ssids[0] if self.hotspot_ssids else None
         
         return None
 

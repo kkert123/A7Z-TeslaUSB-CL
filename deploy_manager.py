@@ -92,6 +92,7 @@ class Config:
         "utils/video_trim.py",
         "utils/hardware_stats.py",
         "utils/system_info.py",
+        "utils/ssid_match.py",
         # routes/
         "routes/__init__.py",
         "routes/lockchime_routes.py",
