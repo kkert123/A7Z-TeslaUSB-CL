@@ -109,7 +109,37 @@ dwc3 ep1out 端点禁用
 
 ---
 
+## 模式与链路自愈的互斥（Edit 模式闸）
+
+**gadget 的"故意解绑"和"链路卡死"在健康判据上长得**一模一样**：线在位 + UDC 未 configured。**
+`usb_guard` 的健康判据是「线在位（`online=1`）**且** UDC `state=='configured'`」，
+而 **Edit 模式下 gadget 就是被人为解绑的**（线还插着、车机还在）。
+
+若不加以区分，守护进程会把用户刚切的 Edit 模式当成故障，30s（`confirm_l2_seconds`）后触发
+L2 = `usb_gadget_init.sh restart` → 其 `remount_all_ro()` **把 cam 分区强制打回只读并重新绑 gadget**
+→ 正在跑的手动清理全量 `[Errno 30] Read-only file system`（2026-10-14 实证 4080 条，[M103](../reference/教训索引.md)）。
+
+**修法**：`usb_guard` 增加 **Edit 模式闸**——读 `/tmp/teslausb_mode`：
+
+- 标志为 `edit` 时，「线在位但 UDC 未配置」按**预期状态**处理 → 不进故障期、不动作、并清零已累计故障期（phase 记 `edit_mode`）
+- 标志**读不到** → 维持原行为（**fail-open**），不削弱对**真实**卡死的自愈
+- 标志由 `usb_gadget_init.sh` 的 `start`/`stop` 写入，保证始终反映**真实意图**
+  （`auto_present_service` 走 `start` 切回 Present 时不写会留下 stale `edit`，反而会挡住真实自愈）
+
+> **通用规则**：任何"自愈/看门狗"都必须先问一句「当前这个『异常』是不是有人在按计划做的正常事」——
+> 把判据建立在**期望状态**（模式标志）上，而不是某个局部的健康指标上。
+
+### 顺带一条相关缺陷（remount_all_ro）
+
+`start_gadget` 的 `remount_all_ro()` 对**已被清成 rw** 的 cam 分区收不回 ro：
+它用 `mount -o ro <dev> <mp>`（对已挂载分区必然报"已挂载"）而非 `mount -o remount,ro`，
+且此时块设备已被 gadget 占用 → 切回 Present 后 cam 仍是 `rw`，违反"Present 只读"不变式。
+→ **已记 [M104](../reference/教训索引.md)，待修**（一行改动）。
+
+---
+
 ## 排障
+
 
 ```bash
 # gadget 激活状态
@@ -127,8 +157,9 @@ udevadm test /sys/class/udc/* 2>&1 | grep -i gadget
 
 | 现象 | 处理 |
 |------|------|
-| UDC 为空，车机认不出 | `sudo systemctl restart teslausb-gadget` |
+| UDC 为空，车机认不出 | `sudo /opt/radxa_data/teslausb/usb_gadget_init.sh restart`（⚠️ **没有** `teslausb-gadget.service` 这个单元，见[服务清单](../reference/服务清单.md)）；或从网页切一次模式 |
 | 反复断开重连 | 检查 udev 规则是不是旧版（无 UDC 守卫） |
+| 切到 Edit 后清理仍全量只读报错 | 见 [M103](../reference/教训索引.md)：`usb_guard` 把 Edit 当成链路卡死 → L2 把分区打回只读 |
 | 车机报 I/O 错误 | 见 [排障手册](../how-to/排障手册.md) |
 
 ---

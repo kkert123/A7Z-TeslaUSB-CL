@@ -176,6 +176,32 @@ cat /etc/dnsmasq.d/ap.conf 2>/dev/null
 
 ---
 
+## 流量归属分类（`utils/traffic_monitor.py`）
+
+网络卡片里的「本月家庭WiFi / 本月车辆热点」按**当前连的是哪个网络**归集
+（配置见 `config/sentry.json` 的 `home_wifi_ssids` / `hotspot_ssids`）：
+
+| 当前状态 | 归入 |
+|---|---|
+| STA 命中的网络 ∈ `home_wifi_ssids` | `home_wifi` |
+| STA 命中的网络 ∈ `hotspot_ssids` | `hotspot` |
+| 确知连着一个两列表都没列出的网络 | `other`（页面单列，仅非零时显示） |
+| 没有 STA 关联（自己在当 AP） | `hotspot` |
+| 两个列表都没配置 | 回退旧行为（AP 激活=hotspot，否则 home_wifi） |
+| 探测不出当前网络 | 沿用上次分类（**不落进不可见的 other 桶**） |
+
+> **历史坑（[M105](../reference/教训索引.md)）**：旧实现只看「A7Z 自己的 AP 是否激活」，
+> 于是「STA 连着车载热点」（= 车里，主流量场景）被算成家庭 WiFi，两栏实际是反的。
+>
+> **匹配用的是 `utils/ssid_match.py`（唯一权威实现）**：同时比对 **SSID 与 NM 连接名**，
+> 并容忍 `WiFi-` 前缀差异——因为配置里可能存的是 NetworkManager **连接名**
+> （`WiFi-YL-MIFI-000500`），而 `nmcli` 报的是**裸 SSID**（`YL-MIFI-000500`），
+> 只做字符串相等会**静默永不命中**。新写涉及 SSID/连接名比较的代码**一律走它**。
+>
+> 本月历史数据**不回填**：口径修正只对此后的采样生效。
+
+---
+
 ## 相关
 
 - [排障手册 · AP 不切回 WiFi](../how-to/排障手册.md)

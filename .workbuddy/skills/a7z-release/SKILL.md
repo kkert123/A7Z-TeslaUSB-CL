@@ -24,7 +24,7 @@ agent_created: true
 |------|-----|
 | GitHub PAT | `D:\teslausb\a7z\.github-pat`（已 `.gitignore`） |
 | A7Z Web | `http://100.116.18.42:5000` |
-| A7Z SSH | `100.116.18.42:22` `radxa:radxa` |
+| A7Z SSH | ⚠ 2026-10-14 起 22 端口是 **Tailscale SSH**：`radxa:radxa` **密码认证已失效**（paramiko/`ssh` 均 `Authentication timeout`）。改用 `tailscale ssh radxa@100.116.18.42 "<cmd>"`（需 tailnet 已授权），root 操作 `echo radxa \| sudo -S bash -c '…'` |
 | GitHub 仓库 | `kkert123/A7Z-TeslaUSB-CL`（公开） |
 | 升级私钥 | `D:\teslausb\a7z\upgrade_key` |
 | A7Z 部署路径 | `/opt/radxa_data/teslausb` |
@@ -169,7 +169,12 @@ curl -s -H "Authorization: token $(cat .github-pat)" \
 > **触发条件**：仅当用户明确要求"热更新"、"部署到 A7Z"、"发布并热更新"时执行。
 > 默认发布流程到此结束（代码已推 GitHub、Release 已发布、设备可通过系统页升级）。
 
+> ⚠️ **2026-10-14 起本节的 paramiko 密码登录已失效**（22 端口是 Tailscale SSH）。
+> 替代：① **首选经 Web 一键升级**（`POST /api/version/upgrade`，见下方 M92 段，**不需要 SSH**）；
+> ② 需要登设备时用 `tailscale ssh radxa@100.116.18.42 "<cmd>"`（root 命令加 `echo radxa | sudo -S`）。
+
 ```python
+# 已作废（保留供参考）：paramiko 密码登录 —— 当前会 Authentication timeout
 import paramiko, time, urllib.request, json
 
 ssh = paramiko.SSHClient()
@@ -196,6 +201,29 @@ ssh.close()
 
 > **一键升级（`POST /api/version/upgrade`）比 SFTP 热部署更干净**：设备端会备份 → 下载 → SHA256/Ed25519 验签 → 解压到 `-v<ver>` → 切 symlink → 重启，并保留用户数据（一并清除版本漂移）。**两个坑（M92）**：① **耗时可达数分钟**（`.sig` 优先走 `ghproxy.net` 镜像，镜像 stall 时单次 `urlopen` 阻塞 300s 再重试）——客户端 `curl` 超时/空响应 **≠ 失败**，判据只看 `GET /api/version/upgrade/progress`（`running`）+ `readlink /opt/radxa_data/teslausb` + `config.py:APP_VERSION`；② **禁并发升级**——同时发起多次会共用同一 `/tmp/upgrade-v<ver>.tar.gz` 互踩，报出假性「SHA-256 校验失败：文件不存在」。发起前先查 `progress.running`。
 
+> ⭐ **本网络下优先用「本地上传」而不是 URL 下载**（2026-10-14/15 实测）：
+> ```bash
+> curl -s -m 600 -F "file=@.workbuddy/artifacts/teslausb-v<ver>.tar.gz" \
+>      -F "sha256=<64hex>" \
+>      http://100.116.18.42:5000/api/version/upgrade-upload
+> ```
+> 走 Tailscale，**秒级完成**；URL 下载路径连续 stall（ghproxy 300s 超时 + 直连极慢），
+> 失败还会留下 **stale `/var/run/upgrade_progress.json`**（页面永远显示"升级中"，需手工删）。
+
+> ⛔ **升级后「验证」必须看进程，不只看版本号**（M106）：
+> ```bash
+> for p in $(pgrep -f python3); do echo "$p -> $(readlink /proc/$p/cwd)"; done
+> ```
+> `readlink /opt/radxa_data/teslausb` 与 `APP_VERSION` 都可能是新的，而某个常驻进程仍在跑
+> **已删除的旧版本目录**里的代码。v0.3.1.66 起 `startup_self_heal()` 会按版本幂等刷新
+> `sentry`/`bgpreview`/`fan`/`watchdog`（标记 `data/services_refreshed.json`），但判据仍是 cwd。
+
+> ⛔ **绝不要 `systemctl restart teslausb-watchdog`**（M107）：该进程喂的是硬件看门狗（超时 16s），
+> 其"停止→启动"窗口超过硬件超时就会**整机复位**（2026-10-15 实测约 32s 后复位，内核日志
+> `watchdog: watchdog0: watchdog did not stop!`）。它的代码只能靠**整机重启**生效。
+> v0.3.1.66 已修（SIGTERM→magic close + 先喂狗再进宽限期），但仍应把它当作"高危重启项"对待。
+
+
 ---
 
 ## 关键约束（每次必读）
@@ -208,6 +236,10 @@ ssh.close()
 6. **Release body 必须含 `SHA256: <64hex>`，冒号后紧跟 hex、禁止任何包裹符号**（反引号/引号都不行）——设备端 `version_service.py` 正则 `(?:SHA-?256|sha256)[:\s]+([a-fA-F0-9]{64})` 提取，包裹字符会导致解析失败、升级被前端拦下（**M76**）
 7. **tag 用 `target_commitish=master`**，且 `GET /git/ref/tags/{TAG}` 的 sha == push 的 HEAD（M61）
 8. **资产上传走 `uploads.github.com`**（M56）；发布后核对 asset `digest` == 本地 sha256sum == body 声明（M26/M72）
+9. **升级到设备优先 `upgrade-upload`（本地上传）**，不用 URL 下载路径；失败先查有没有 stale `/var/run/upgrade_progress.json`
+10. **升级后判据用 `/proc/<pid>/cwd`**，不看版本号/symlink（M106）——旧代码进程是"看不见的第二写入者"
+11. ⛔ **禁 `systemctl restart teslausb-watchdog`**（M107，必然整机复位）；⛔ 禁 `systemctl restart NetworkManager`（M53，毁本机 DNS）
+12. **改码就改文档**：新坑必须追加 `docs/reference/教训索引.md`（编号递增 + 关联版本号），并更新 `docs/reference/版本历史.md`
 9. **构建包要包含 deploy 白名单全部文件**：见 `deploy_manager.py:Config.MANAGED_FILES`（用 `build_release.py` 生成）
 10. **包-仓库一致性核对**（M84）：包从**工作树**打包，与 git 解耦。构建后逐文件比 `git show HEAD:<name>`（行尾归一化后比 sha256），差异非 0 即说明仓库落后/缺文件 → 先提交再发版，否则 `git clone tag` 无法复现发布包。
     ```python
