@@ -121,6 +121,100 @@ class TeslaMateCustomAPI:
         key_data = f"{self.base_url}:{self.password}"
         return hashlib.sha256(key_data.encode()).hexdigest()[:16]
     
+    # ── v0.3.1.67 / M114：token 缓存的并发安全 ─────────────────────
+    # 现实约束：app.py / sentry_service / bg_preview_generator / notify-retry
+    # （每次运行一个一次性进程）都会各自 init_location_detector()，
+    # **多进程共享同一个缓存文件**，而旧实现是 open('w') + json.dump 直接写：
+    # 'w' 先截断再从 offset 0 写，两个进程同时写时，后写的短内容盖不掉先写的尾巴，
+    # 文件里就残留一个 '}' → 之后每次 json.load 都抛
+    # "Extra data: line 8 column 1 (char 254)" → 认定"无缓存" → 每 30 秒重新登录
+    # TeslaMate → TeslaMate 侧登录提醒刷屏（2026-11-03 真实事故）。
+    # 修法：写用同目录 tmp + os.replace（原子替换，读者永远看不到半截文件）；
+    #       读遇到坏文件则隔离留证后自愈，不再让它永久拖累每次登录。
+
+    def _quarantine_cache(self, reason: Exception) -> None:
+        """把损坏的缓存文件重命名留证，避免它继续拖累后续每次登录。
+
+        隔离前二次校验：本进程读到坏内容之后，别的进程可能已经用原子替换
+        写好了新文件——这时把好的文件也隔离走，会白白丢掉一个有效 token。
+        """
+        try:
+            with open(self._token_cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                logger.info("token 缓存已被其他进程修复，跳过隔离")
+                return
+        except Exception:
+            pass
+        try:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            bad = self._token_cache_path.with_name(
+                f"{self._token_cache_path.name}.corrupt-{stamp}")
+            os.replace(self._token_cache_path, bad)
+            logger.warning(f"token 缓存文件已损坏（{reason}），已隔离为 {bad.name}")
+        except Exception as e:
+            logger.warning(f"token 缓存文件已损坏（{reason}），隔离失败: {e}")
+            try:
+                os.unlink(self._token_cache_path)
+            except OSError:
+                pass
+
+    def _read_cache_dict(self) -> dict:
+        """读取缓存字典；文件不存在或损坏一律返回 {}，损坏时隔离留证。"""
+        if not self._token_cache_path.exists():
+            return {}
+        try:
+            with open(self._token_cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError(f"缓存根节点应为 dict，实际为 {type(data).__name__}")
+            return data
+        except (json.JSONDecodeError, ValueError) as e:
+            self._quarantine_cache(e)
+            return {}
+        except OSError as e:
+            logger.warning(f"读取 token 缓存失败: {e}")
+            return {}
+
+    def _write_cache_dict(self, cache: dict) -> None:
+        """原子写缓存：同目录 mkstemp + os.replace，权限固定 0600。
+
+        tmp 名必须全局唯一：**不能用 pid 拼接**——同进程内多个线程共享同一个
+        pid，会互相截断同一个临时文件，等于把并发问题从进程间搬到线程间。
+        """
+        import tempfile
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self._token_cache_path.parent),
+            prefix=self._token_cache_path.name + ".tmp.")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            # Linux 上 os.replace 原子且不受"目标被打开"影响；
+            # Windows 上目标被并发读时会抛 PermissionError，故做几次短重试
+            # （生产环境是 Debian，不会走到重试分支）。
+            last_err = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self._token_cache_path)
+                    last_err = None
+                    break
+                except OSError as e:
+                    last_err = e
+                    time.sleep(0.01 * (attempt + 1))
+            if last_err is not None:
+                raise last_err
+            os.chmod(self._token_cache_path, 0o600)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
     def _load_token_from_cache(self) -> bool:
         """
         从本地缓存加载 token
@@ -132,8 +226,7 @@ class TeslaMateCustomAPI:
             if not self._token_cache_path.exists():
                 return False
             
-            with open(self._token_cache_path, "r") as f:
-                cache = json.load(f)
+            cache = self._read_cache_dict()
             
             cache_key = self._get_cache_key()
             if cache_key not in cache:
@@ -167,30 +260,14 @@ class TeslaMateCustomAPI:
             # 确保目录存在
             self._token_cache_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # 保存原 umask，设置新 umask（只允许 owner 读写）
-            original_umask = os.umask(0o077)
-            
-            cache = {}
-            if self._token_cache_path.exists():
-                with open(self._token_cache_path, "r") as f:
-                    cache = json.load(f)
-            
+            cache = self._read_cache_dict()
             cache_key = self._get_cache_key()
             cache[cache_key] = {
                 "token": self._token,
                 "expiry": self._token_expiry,
                 "created": time.time(),
             }
-            
-            try:
-                with open(self._token_cache_path, "w") as f:
-                    json.dump(cache, f, indent=2)
-                
-                # 设置文件权限为 600（只有 owner 可读写）
-                os.chmod(self._token_cache_path, 0o600)
-            finally:
-                # 恢复原始 umask
-                os.umask(original_umask)
+            self._write_cache_dict(cache)
             logger.debug("TeslaMate token 已缓存")
             return True
             
@@ -201,20 +278,14 @@ class TeslaMateCustomAPI:
     def _clear_token_cache(self) -> None:
         """清除当前 token 缓存"""
         try:
-            if not self._token_cache_path.exists():
-                return
-            
-            with open(self._token_cache_path, "r") as f:
-                cache = json.load(f)
-            
+            cache = self._read_cache_dict()
             cache_key = self._get_cache_key()
             if cache_key in cache:
                 del cache[cache_key]
-                with open(self._token_cache_path, "w") as f:
-                    json.dump(cache, f, indent=2)
+                self._write_cache_dict(cache)
                 logger.debug("已清除 token 缓存")
         except Exception as e:
-            logger.debug(f"清除 token 缓存失败: {e}")
+            logger.warning(f"清除 token 缓存失败: {e}")
     
     def login(self, force: bool = False) -> bool:
         """
