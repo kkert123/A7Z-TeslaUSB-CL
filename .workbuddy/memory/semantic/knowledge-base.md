@@ -111,3 +111,11 @@ WantedBy=multi-user.target
 ---
 
 _本文件由 Memory System Optimizer 自动维护_
+
+### Web 访问认证（2026-11-03 评审，未实施）
+
+- **现状**：`0.0.0.0:5000` 由 `app.py` 直接监听，**无 nginx/无认证**；`/login` 与 `/api/login` 均 404；项目从未设置 `app.secret_key`（`/data/.secret_key` 是历史遗留、无人读取）；只有一个 `@app.after_request`（禁缓存 HTML），无 `before_request`。
+- **匿名可调的高危端点**：`POST /api/system/reboot`、`/shutdown`、`/format-teslacam`、`/api/version/upgrade*`、`/rollback`、`GET /api/logs/*`、`GET|POST /api/system/push-config|wecom-config|usb-guard-config`。
+- **三方案**（详见 `docs/explanation/Web访问认证方案评审.md`）：A 网络层收敛（before_request IP 白名单，0.5 天、零前端改动、非真认证）；B 单口令 + 签名 Cookie + CSRF（用 `hashlib.pbkdf2_hmac` + Flask 自带 itsdangerous，零新依赖，需先收敛前端 fetch，1.5–2 天）；C nginx 反代 Basic Auth/mTLS（零 Python 改动，但新增 ~8MB 常驻与故障面）。
+- **推荐**：先 A 再 B，A+B 叠加；C 仅在需要 HTTPS/多设备证书时再上。
+- **实施注意**：`secret_key` 必须落盘（否则重启/升级后会话全失效）；401/302 按 `Accept` 区分（脚本曾把 302 当成功）；静态资源放行；本机 `127.0.0.1` 豁免要记审计；登录提醒必须做 (IP,UA) 冷却，否则重演 M114；提供 `web_auth.enabled` 配置开关以便秒级回滚；发版脚本要同步带 `Bearer` token。

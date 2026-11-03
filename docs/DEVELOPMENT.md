@@ -47,6 +47,9 @@ python deploy_manager.py rollback v{N}
 4. **异步 JS**: `finally` 在 `setTimeout` 回调完成前就会执行
 5. **Format 后 fstab**: 必须更新 UUID，否则启动进入 emergency mode
 6. **新增 Python 文件**: 要加入 `deploy_manager.py` 白名单
+7. **排查顺序**: 用户点名某台设备/某个系统时，**先在它上面取证**；要断言「不是这台」，必须「代码全盘零命中 + 相关端点 404 + 日志零命中 + 进程/端口清单无对应服务」四证齐全（[M115](reference/教训索引.md)）
+8. **多进程共享的状态文件**: 写必须原子（`tempfile.mkstemp` + `os.replace`，tmp 名**不能用 pid**——同进程多线程会撞名）；读必须假设可能读到坏内容，并能隔离留证后自愈（[M114](reference/教训索引.md)）
+
 
 ## A7Z 连接信息
 
