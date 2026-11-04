@@ -29,7 +29,8 @@ import tempfile
 import types
 from pathlib import Path
 
-ROOT = Path(r"D:/teslausb/a7z")
+# 可用 TESLAUSB_ROOT 指向影子副本（真机验证：/tmp/v1NN-shadow）
+ROOT = Path(os.environ.get("TESLAUSB_ROOT") or r"D:/teslausb/a7z")
 TMP = Path(tempfile.mkdtemp(prefix="reg_guard_"))
 
 sys.path.insert(0, str(ROOT))
