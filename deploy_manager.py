@@ -84,6 +84,9 @@ class Config:
         "utils/sei_parser.py",
         "utils/nvme_monitor.py",
         "utils/thumbnail_utils.py",
+        "utils/auth_service.py",   # v0.3.1.68 登录鉴权：challenge/验证码/会话
+        "utils/auth_guard.py",     # v0.3.1.68 登录鉴权守卫（before_request）
+        "utils/mailer.py",       # v0.3.1.68 腾讯企业邮 SMTP 发送
         "utils/thumbnail_decision.py",
         "utils/log_rotator.py",
         "utils/mvhd_timestamp.py",
@@ -104,6 +107,7 @@ class Config:
         "routes/video_routes.py",
         "routes/media_routes.py",
         "routes/misc_routes.py",
+        "routes/auth_routes.py",   # v0.3.1.68 登录鉴权路由
         "auto_cleanup.py",
         "config.json",
         "config/sentry.json",

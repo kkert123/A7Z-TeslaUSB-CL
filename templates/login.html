@@ -32,49 +32,24 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
-.login-brand {
-  text-align: center;
-  margin-bottom: var(--s8);
-}
+.login-brand { text-align: center; margin-bottom: var(--s6); }
 
 .login-logo {
-  width: 56px;
-  height: 56px;
+  width: 56px; height: 56px;
   margin: 0 auto var(--s4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent-soft);
-  color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
   border-radius: var(--r-lg);
 }
 
-.login-brand h1 {
-  font-size: var(--text-xl);
-  font-weight: 700;
-  color: var(--text);
-}
+.login-brand h1 { font-size: var(--text-xl); font-weight: 700; color: var(--text); }
+.login-brand p { font-size: var(--text-sm); color: var(--text-muted); margin-top: var(--s1); }
 
-.login-brand p {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  margin-top: var(--s1);
-}
-
-.login-form .form-group {
-  margin-bottom: var(--s5);
-}
-
-.login-form .btn {
-  width: 100%;
-  padding: var(--s3) var(--s6);
-  font-size: var(--text-base);
-  margin-top: var(--s2);
-}
+.login-form .form-group { margin-bottom: var(--s5); }
+.login-form .btn { width: 100%; padding: var(--s3) var(--s6); font-size: var(--text-base); margin-top: var(--s2); }
 
 .login-error {
-  background: var(--danger-soft);
-  color: var(--danger);
+  background: var(--danger-soft); color: var(--danger);
   border: 1px solid rgba(239,68,68,0.2);
   border-radius: var(--r-md);
   padding: var(--s3) var(--s4);
@@ -82,11 +57,18 @@
   margin-bottom: var(--s4);
   display: none;
 }
+.login-error.show { display: block; animation: shake 0.3s ease; }
 
-.login-error.show {
-  display: block;
-  animation: shake 0.3s ease;
+.login-info {
+  background: var(--accent-soft); color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s3) var(--s4);
+  font-size: var(--text-sm);
+  margin-bottom: var(--s4);
+  display: none;
 }
+.login-info.show { display: block; }
 
 @keyframes shake {
   0%, 100% { transform: translateX(0); }
@@ -95,32 +77,41 @@
 }
 
 .login-footer {
-  text-align: center;
-  margin-top: var(--s6);
-  font-size: var(--text-xs);
-  color: var(--text-muted);
+  text-align: center; margin-top: var(--s6);
+  font-size: var(--text-xs); color: var(--text-muted);
 }
 
 .login-spinner {
-  display: none;
-  width: 18px;
-  height: 18px;
-  border: 2px solid rgba(255,255,255,0.3);
-  border-top-color: #fff;
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-  margin-right: var(--s2);
+  display: none; width: 18px; height: 18px;
+  border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+  border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: var(--s2);
+}
+.btn.loading .login-spinner { display: inline-block; }
+.btn.loading .btn-text { opacity: 0.7; }
+
+.code-row { display: flex; gap: var(--s2); }
+.code-row .form-input { flex: 1; letter-spacing: 4px; font-variant-numeric: tabular-nums; }
+.code-row .btn { width: auto; white-space: nowrap; margin-top: 0; padding: var(--s3) var(--s4); font-size: var(--text-sm); }
+
+.hint { font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--s2); line-height: 1.5; }
+
+.alt-panel { margin-top: var(--s5); border-top: 1px solid var(--border); padding-top: var(--s4); }
+.alt-toggle {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-size: var(--text-sm); color: var(--text-muted); text-decoration: underline;
+}
+.alt-body { display: none; margin-top: var(--s3); }
+.alt-body.show { display: block; }
+.alt-actions { display: flex; gap: var(--s2); margin-top: var(--s3); }
+.alt-actions .btn { margin-top: 0; }
+
+.readonly-note {
+  font-size: var(--text-xs); color: var(--text-muted);
+  margin-top: var(--s2); line-height: 1.5;
 }
 
-.login-form .btn.loading .login-spinner { display: inline-block; }
-.login-form .btn.loading .btn-text { opacity: 0.7; }
-
-/* Mobile */
 @media (max-width: 480px) {
-  .login-card {
-    padding: var(--s6) var(--s5);
-    border-radius: var(--r-lg);
-  }
+  .login-card { padding: var(--s6) var(--s5); border-radius: var(--r-lg); }
   .login-brand { margin-bottom: var(--s6); }
   .login-logo { width: 48px; height: 48px; }
 }
@@ -129,7 +120,6 @@
 <body class="login-page">
 
 <div class="login-card">
-  <!-- Brand -->
   <div class="login-brand">
     <div class="login-logo">
       <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -140,43 +130,79 @@
     <p>Radxa A7Z · 哨兵云端备份系统</p>
   </div>
 
-  <!-- Error message -->
   <div class="login-error" id="loginError"></div>
+  <div class="login-info" id="loginInfo"></div>
 
-  <!-- Login form -->
-  <form class="login-form" id="loginForm" onsubmit="handleLogin(event)">
+  {% if not enabled %}
+  <!-- 未启用登录保护：守卫放行，直接进入即可 -->
+  <div class="login-info show" style="display:block">
+    登录保护尚未启用。请进入系统后到「设置 → 安全」完成配置。
+  </div>
+  <button class="btn btn-primary" type="button" onclick="location.href='/'">
+    <span class="btn-text">进入系统</span>
+  </button>
+
+  {% else %}
+  <!-- 第一步：获取验证码 -->
+  <div id="stepSend">
     <div class="form-group">
-      <label class="form-label" for="username">用户名</label>
-      <input
-        class="form-input"
-        type="text"
-        id="username"
-        name="username"
-        placeholder="请输入用户名"
-        autocomplete="username"
-        required
-        autofocus
-      >
+      <label class="form-label">安全邮箱</label>
+      <div class="form-input" style="display:flex;align-items:center;opacity:.85">{{ security_email or '未配置' }}</div>
+      <div class="hint">验证码将发送到该邮箱，10 分钟内有效。</div>
     </div>
-
-    <div class="form-group">
-      <label class="form-label" for="password">密码</label>
-      <input
-        class="form-input"
-        type="password"
-        id="password"
-        name="password"
-        placeholder="请输入密码"
-        autocomplete="current-password"
-        required
-      >
-    </div>
-
-    <button class="btn btn-primary" type="submit" id="loginBtn">
+    <button class="btn btn-primary" type="button" id="btnSend" onclick="requestCode()">
       <span class="login-spinner"></span>
-      <span class="btn-text">登 录</span>
+      <span class="btn-text">获取验证码</span>
+    </button>
+  </div>
+
+  <!-- 第二步：输入验证码 -->
+  <form id="stepVerify" class="login-form" style="display:none" onsubmit="verifyCode(event)">
+    <div class="form-group">
+      <label class="form-label" for="code">邮箱验证码</label>
+      <div class="code-row">
+        <input class="form-input" type="text" id="code" name="code"
+               inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+               placeholder="6 位数字" autocomplete="one-time-code" required>
+        <button class="btn btn-secondary" type="button" id="btnResend" onclick="requestCode(true)">重新发送</button>
+      </div>
+      <div class="hint" id="sentHint"></div>
+    </div>
+    <button class="btn btn-primary" type="submit" id="btnVerify">
+      <span class="login-spinner"></span>
+      <span class="btn-text">验证并登录</span>
     </button>
   </form>
+
+  <!-- 离线 / 本地入口 -->
+  <div class="alt-panel">
+    <button class="alt-toggle" type="button" onclick="toggleAlt()">无法接收验证码？</button>
+    <div class="alt-body" id="altBody">
+      {% if local_mode %}
+        <div class="hint">当前为本地网络。设备无法发信时，可用本地密钥登录{% if not has_local_key %}（尚未设置本地密钥）{% endif %}。</div>
+        {% if has_local_key %}
+        <div class="form-group" style="margin-top:var(--s3)">
+          <label class="form-label" for="localKey">本地密钥</label>
+          <input class="form-input" type="password" id="localKey" placeholder="请输入本地密钥"
+                 autocomplete="off" spellcheck="false">
+        </div>
+        <div class="alt-actions">
+          <button class="btn btn-primary" type="button" onclick="localLogin(false)">完整登录</button>
+          <button class="btn btn-secondary" type="button" onclick="localLogin(true)">只读浏览</button>
+        </div>
+        <div class="readonly-note">只读模式可查看录像与状态；重启、格式化、删除、改配置等操作不可用。</div>
+        {% else %}
+        <div class="alt-actions">
+          <button class="btn btn-secondary" type="button" onclick="localLogin(true)">仅只读浏览</button>
+        </div>
+        <div class="readonly-note">本地密钥尚未设置，无法本地登录。请在联网时到「设置 → 安全」设置。</div>
+        {% endif %}
+      {% else %}
+        <div class="hint">当前不是本地网络，离线登录不可用。请到设备所在局域网内操作，或等待设备恢复联网。</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 
   <div class="login-footer">
     TeslaUSB CL &copy; 2026 · Radxa Cubie A7Z
@@ -184,67 +210,155 @@
 </div>
 
 <script>
-// ── Theme init ──
-(function() {
+const CHALLENGE = {{ challenge|tojson }};
+const CSRF = {{ csrf|tojson }};
+const LOCAL_MODE = {{ (local_mode and enabled)|tojson }};
+let cooldownTimer = null;
+
+(function initTheme() {
   const saved = localStorage.getItem('theme');
   if (saved) document.documentElement.dataset.theme = saved;
 })();
 
-// ── Login handler ──
-async function handleLogin(e) {
-  e.preventDefault();
-
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
-  const btn = document.getElementById('loginBtn');
-  const errEl = document.getElementById('loginError');
-
-  // Hide previous error
-  errEl.classList.remove('show');
-
-  if (!username || !password) {
-    showError('请输入用户名和密码');
-    return;
-  }
-
-  // Loading state
-  btn.classList.add('loading');
-  btn.disabled = true;
-
-  try {
-    const resp = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    });
-
-    const data = await resp.json();
-
-    if (data.success) {
-      // Redirect to dashboard
-      const next = new URLSearchParams(window.location.search).get('next') || '/';
-      window.location.href = next;
-    } else {
-      showError(data.error || '登录失败，请检查用户名和密码');
-    }
-  } catch (err) {
-    showError('网络错误：无法连接到服务器');
-  } finally {
-    btn.classList.remove('loading');
-    btn.disabled = false;
-  }
-}
+{% if reason == 'kicked' %}
+document.addEventListener('DOMContentLoaded', function () {
+  showError('已在其它设备登录，当前会话已失效，请重新登录');
+});
+{% endif %}
 
 function showError(msg) {
   const el = document.getElementById('loginError');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function clearError() {
+  const el = document.getElementById('loginError');
+  if (el) el.classList.remove('show');
+}
+function showInfo(msg) {
+  const el = document.getElementById('loginInfo');
+  if (!el) return;
   el.textContent = msg;
   el.classList.add('show');
 }
 
-// Enter key shortcut
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') {
-    document.getElementById('loginForm').dispatchEvent(new Event('submit'));
+async function api(path, body) {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+    body: JSON.stringify(body || {})
+  });
+  let data = {};
+  try { data = await resp.json(); } catch (e) { data = { success: false, message: '响应解析失败' }; }
+  return data;
+}
+
+function startCooldown(seconds) {
+  const btn = document.getElementById('btnResend');
+  const sendBtn = document.getElementById('btnSend');
+  let left = seconds;
+  const tick = () => {
+    if (btn) { btn.disabled = true; btn.innerText = left + 's'; }
+    if (sendBtn) sendBtn.disabled = true;
+    left -= 1;
+    if (left < 0) {
+      clearInterval(cooldownTimer);
+      if (btn) { btn.disabled = false; btn.innerText = '重新发送'; }
+      if (sendBtn) sendBtn.disabled = false;
+    }
+  };
+  clearInterval(cooldownTimer);
+  tick();
+  cooldownTimer = setInterval(tick, 1000);
+}
+
+async function requestCode(isResend) {
+  clearError();
+  const btn = isResend ? document.getElementById('btnResend') : document.getElementById('btnSend');
+  if (btn) { btn.classList.add('loading'); btn.disabled = true; }
+
+  const data = await api('/api/auth/code/request', { challenge: CHALLENGE });
+
+  if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
+
+  if (!data.success) {
+    showError(data.message || '发送失败');
+    // 发信失败且本地网络 → 提示走本地入口
+    if (data.data && data.data.error_type && LOCAL_MODE) {
+      showError((data.message || '发送失败') + '（可展开下方「无法接收验证码？」用本地密钥登录）');
+      const alt = document.getElementById('altBody');
+      if (alt) alt.classList.add('show');
+    }
+    return;
+  }
+
+  const stepSend = document.getElementById('stepSend');
+  const stepVerify = document.getElementById('stepVerify');
+  if (stepSend) stepSend.style.display = 'none';
+  if (stepVerify) {
+    stepVerify.style.display = 'block';
+    const input = document.getElementById('code');
+    if (input) input.focus();
+  }
+  const hint = document.getElementById('sentHint');
+  if (hint) {
+    const sentTo = (data.data && data.data.sent_to) || '';
+    hint.textContent = sentTo
+      ? ('已发送至 ' + sentTo + '，10 分钟内有效')
+      : '验证码已发送，10 分钟内有效';
+  }
+  startCooldown((data.data && data.data.cooldown) || 60);
+  if (data.data && data.data.reused) showInfo('刚才已发送过，请查收邮箱后输入验证码');
+}
+
+async function verifyCode(e) {
+  e.preventDefault();
+  clearError();
+  const code = (document.getElementById('code').value || '').trim();
+  if (!/^\d{6}$/.test(code)) { showError('请输入 6 位数字验证码'); return; }
+
+  const btn = document.getElementById('btnVerify');
+  btn.classList.add('loading');
+  btn.disabled = true;
+
+  const data = await api('/api/auth/code/verify', { challenge: CHALLENGE, code: code });
+
+  btn.classList.remove('loading');
+  btn.disabled = false;
+
+  if (!data.success) {
+    showError(data.message || '验证失败');
+    document.getElementById('code').value = '';
+    document.getElementById('code').focus();
+    return;
+  }
+  // 跳转目标由服务端会话给出，URL 里没有可篡改参数
+  location.href = (data.data && data.data.redirect) || '/';
+}
+
+async function localLogin(readonly) {
+  clearError();
+  const keyEl = document.getElementById('localKey');
+  const key = keyEl ? (keyEl.value || '').trim() : '';
+  if (!readonly && !key) { showError('请输入本地密钥'); return; }
+
+  const data = await api('/api/auth/local', { local_key: key, readonly: !!readonly });
+  if (!data.success) { showError(data.message || '登录失败'); return; }
+  location.href = (data.data && data.data.redirect) || '/';
+}
+
+function toggleAlt() {
+  const el = document.getElementById('altBody');
+  if (el) el.classList.toggle('show');
+}
+
+// 自动聚焦验证码输入
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter') return;
+  const verify = document.getElementById('stepVerify');
+  if (verify && verify.style.display !== 'none') {
+    verify.dispatchEvent(new Event('submit'));
   }
 });
 </script>

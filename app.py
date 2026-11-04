@@ -23,6 +23,19 @@ start_broadcasters()
 app = Flask(__name__)
 
 # ─────────────────────────────────────────────
+# 会话密钥（v0.3.1.68 登录鉴权）
+# 必须落盘：每次启动随机生成会让所有会话在重启/升级后失效（用户会以为"又坏了"）
+# ─────────────────────────────────────────────
+from utils import auth_service as auth
+app.secret_key = auth.get_secret_key()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,   # 无 HTTPS，置 True 浏览器会丢弃 Cookie
+    PERMANENT_SESSION_LIFETIME=7 * 24 * 3600,
+)
+
+# ─────────────────────────────────────────────
 # 缓存策略：HTML 页面禁止缓存，避免浏览器沿用部署前的旧播放页
 # （曾导致播放页"裁剪"按钮点击无反应——旧页里函数未定义）
 # ─────────────────────────────────────────────
@@ -37,6 +50,9 @@ def _no_cache_html(resp):
 # ─────────────────────────────────────────────
 # Blueprint 注册
 # ─────────────────────────────────────────────
+from routes.auth_routes import auth_bp
+app.register_blueprint(auth_bp)
+
 from routes.lockchime_routes import lockchime_bp
 app.register_blueprint(lockchime_bp)
 
@@ -67,6 +83,16 @@ app.register_blueprint(misc_bp)
 
 from routes.camera_routes import camera_bp
 app.register_blueprint(camera_bp)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 登录鉴权守卫（v0.3.1.68）
+#   实现见 utils/auth_guard.py（单独成文件，便于集成测试与审阅）
+#   未完成首次启用时一律放行，避免升级后自锁
+# ══════════════════════════════════════════════════════════════════════
+from utils.auth_guard import register as register_auth_guard
+register_auth_guard(app)
+
 
 # ─────────────────────────────────────────────
 # 启动入口
