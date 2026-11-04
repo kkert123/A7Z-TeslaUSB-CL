@@ -48,6 +48,25 @@ def _no_cache_html(resp):
     return resp
 
 # ─────────────────────────────────────────────
+# CSRF token 全站注入（M116 / F2）
+# 守卫在「已启用登录保护」后要求所有写请求带 X-CSRF-Token，
+# 因此每个页面都必须能拿到 token。用 context_processor 统一注入：
+#   - 任何渲染的模板都有 {{ csrf }} 可用（含不继承 base.html 的独立页）
+#   - 首次访问时生成并写入 session（否则永远拿不到第一个 token）
+# HTML 响应已由 _no_cache_html 统一 no-store，cookie 变化不影响缓存。
+# ─────────────────────────────────────────────
+@app.context_processor
+def _inject_csrf():
+    import secrets
+    from flask import session as _s
+    tok = _s.get("csrf")
+    if not tok:
+        tok = secrets.token_hex(16)
+        _s["csrf"] = tok
+    return {"csrf": tok}
+
+
+# ─────────────────────────────────────────────
 # Blueprint 注册
 # ─────────────────────────────────────────────
 from routes.auth_routes import auth_bp

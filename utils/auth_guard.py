@@ -7,8 +7,12 @@
   2) 守卫是安全边界，单独成文件便于审查（一眼看清放行规则）。
 
 放行规则（顺序即优先级）：
-  1 所有写方法校验 CSRF（含匿名登录接口）
-  2 公开路径直接放行（登录页、登录接口、静态资源、favicon）
+  1 写方法 CSRF —— 但「未启用登录保护」时只对匿名登录接口要求，其余放行。
+     理由（M116）：守卫是全局横切关注点，开关关闭必须与上一版行为等价。
+     旧实现把 CSRF 无条件放在最前，而 csrf 只在 GET /login、登录成功、
+     GET /api/security/config 三处产生 → 升级后即使不启用，前端 65 处写
+     操作也会全部 403。
+  2 公开路径直接放行（登录页、匿名登录接口、静态资源、favicon）
   3 尚未启用登录保护 → 一律放行（避免升级后把用户锁在门外）
   4 会话无效 / epoch 不匹配 → 页面跳登录（原路径存服务端会话）、API 返回 401
   5 只读模式（L4）只允许读方法 + 主动登出
@@ -20,8 +24,20 @@ from flask import jsonify, redirect, request, session
 
 from utils import auth_service as auth
 
-PUBLIC_EXACT = ("/login", "/favicon.ico")
-PUBLIC_PREFIX = ("/static/", "/api/auth/")
+# 匿名可访问的固定路径
+PUBLIC_EXACT = (
+    "/login",
+    "/favicon.ico",
+    # 仅这四个是真正的匿名入口（status 供登录页探测、发码、验码、本地登录）
+    "/api/auth/status",
+    "/api/auth/code/request",
+    "/api/auth/code/verify",
+    "/api/auth/local",
+)
+PUBLIC_PREFIX = ("/static/",)
+
+# 未启用登录保护时仍强制校验 CSRF 的路径前缀（匿名入口防轰炸 / 防 OTP 钓鱼）
+CSRF_ALWAYS_PREFIX = ("/api/auth/",)
 
 CSRF_HEADER = "X-CSRF-Token"
 MUTATING = ("POST", "PUT", "PATCH", "DELETE")
@@ -47,23 +63,31 @@ def wants_html() -> bool:
     return "text/html" in (request.headers.get("Accept") or "")
 
 
+def _csrf_reject(path: str):
+    if path.startswith("/api/"):
+        return jsonify({"success": False, "error_code": 4010,
+                        "message": "CSRF 校验失败，请刷新页面重试"}), 403
+    return "CSRF 校验失败，请刷新页面重试", 403
+
+
 def guard() -> Any:
     path = request.path
+    enabled = auth.is_enabled()
 
-    # 1) CSRF：所有写方法（含匿名登录接口）都必须带会话内 token。
-    #    注意顺序——先查 CSRF 再判放行，否则 /api/auth/* 就成了 CSRF 缺口。
-    if request.method in MUTATING and not csrf_ok():
-        if path.startswith("/api/"):
-            return jsonify({"success": False, "error_code": 4010,
-                            "message": "CSRF 校验失败，请刷新页面重试"}), 403
-        return "CSRF 校验失败，请刷新页面重试", 403
+    is_write = request.method in MUTATING
+
+    # 1) 匿名登录接口：任何状态下都要求 CSRF。
+    #    它们不依赖会话，若只靠"已登录才校验"，未启用期间任何人都能刷
+    #    发码接口（邮箱轰炸 / OTP 钓鱼）——所以必须先于会话判断。
+    if is_write and path.startswith(CSRF_ALWAYS_PREFIX) and not csrf_ok():
+        return _csrf_reject(path)
 
     # 2) 公开路径
     if is_public(path):
         return None
 
-    # 3) 尚未启用：不拦截（首次配置阶段）
-    if not auth.is_enabled():
+    # 3) 尚未启用：不拦截（首次配置阶段，行为与上一版等价）
+    if not enabled:
         return None
 
     # 4) 会话
@@ -80,7 +104,13 @@ def guard() -> Any:
         target = "/login?reason=kicked" if reason == "kicked" else "/login"
         return redirect(target, code=302)
 
-    # 5) 只读模式
+    # 5) CSRF：仅对已登录的写请求有意义。
+    #    CSRF 攻击的本质是"借用受害者的已登录会话"，未登录时没有权限可借，
+    #    先判会话能让过期的页面得到 401（引导重登）而不是含糊的 4010。
+    if is_write and not csrf_ok():
+        return _csrf_reject(path)
+
+    # 6) 只读模式
     if session.get("readonly"):
         if request.method not in READONLY_ALLOW and path not in READONLY_ALLOW_POST:
             if path.startswith("/api/"):
