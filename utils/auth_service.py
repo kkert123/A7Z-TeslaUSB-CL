@@ -21,6 +21,7 @@
 import hashlib
 import hmac
 import ipaddress
+import logging
 import json
 import os
 import secrets
@@ -30,6 +31,8 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import DATA_DIR
+
+logger = logging.getLogger(__name__)
 
 # ── 文件路径 ────────────────────────────────────────────────────────────
 AUTH_FILE = os.path.join(DATA_DIR, "web_auth.json")
@@ -125,25 +128,57 @@ def _locked():
                 pass
 
 
-def get_secret_key() -> bytes:
-    """会话/签名密钥：读取 /data/.secret_key，缺失则生成并落盘。
+_cache_secret = None  # type: Optional[bytes]
 
-    必须落盘——否则每次重启/升级都会让所有会话失效（用户会以为"又坏了"）。
+
+def _secret_candidates() -> List[str]:
+    """密钥候选路径。
+
+    第一项是历史路径 /data/.secret_key（root 600，只有 web 进程读得到）；
+    第二项落在应用数据目录，作为无法读取/写入历史路径时的落点。
+    **必须多候选**：单路径读不到时旧实现会"每次返回新随机密钥"，
+    结果是 challenge 签名与校验的密钥不一致 → 所有票据立刻失效，
+    且因为异常被 pass 吞掉，现场看不到任何报错（2026-11-05 真机验证暴露）。
     """
-    try:
-        if os.path.exists(SECRET_FILE):
-            with open(SECRET_FILE, "rb") as f:
-                raw = f.read().strip()
-            if len(raw) >= 32:
-                return raw[:64]
-    except OSError:
-        pass
+    out = [SECRET_FILE]
+    alt = os.path.join(DATA_DIR, ".secret_key")
+    if alt not in out:
+        out.append(alt)
+    return [p for p in out if p]
+
+
+def get_secret_key() -> bytes:
+    """会话/签名密钥：多候选读取，进程内缓存，落盘保证重启后会话不失效。"""
+    global _cache_secret
+    if _cache_secret:
+        return _cache_secret
+
+    for p in _secret_candidates():
+        try:
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    raw = f.read().strip()
+                if len(raw) >= 32:
+                    _cache_secret = raw[:64]
+                    return _cache_secret
+                logger.warning("会话密钥过短（%d 字节），忽略: %s", len(raw), p)
+        except OSError as e:
+            logger.warning("读取会话密钥失败 %s: %s", p, e)
+
     raw = secrets.token_hex(32).encode()
-    try:
-        _atomic_write_text(SECRET_FILE, raw.decode(), mode=0o600)
-    except OSError:
-        pass
-    return raw
+    saved = None
+    for p in _secret_candidates():
+        try:
+            _atomic_write_text(p, raw.decode(), mode=0o600)
+            saved = p
+            logger.info("已生成会话密钥: %s", p)
+            break
+        except OSError as e:
+            logger.warning("写入会话密钥失败 %s: %s", p, e)
+    if saved is None:
+        logger.warning("会话密钥无法持久化 —— 重启后所有登录会话将失效")
+    _cache_secret = raw
+    return _cache_secret
 
 
 def _boot_id() -> str:
