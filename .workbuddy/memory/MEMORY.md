@@ -1,6 +1,6 @@
 # MEMORY.md — A7Z TeslaUSB 项目长期记忆
 
-> Updated: 2026-11-03。**当前版本 v0.3.1.67（已发布，tag→`2efc9a5`，Release ID 432602660）——M114：`.teslamate_token.json` 被 4 个进程非原子并发写坏（尾部残留 `}`）→ 每 31 秒重登 TeslaMate → 企微「Web登录成功」刷屏；已改 mkstemp+`os.replace` 原子写 + 损坏文件隔离自愈，真机 6 分钟 0 次重登。**
+> Updated: 2026-11-05。**当前版本 v0.3.1.69（已发布，tag→`2d1cbf1`，Release ID 434583508）——登录保护（仅验证码 + 腾讯企业邮 + 本地密钥/只读）首次上线，**默认未启用**，升级后行为与 v0.3.1.67 完全一致；同时修掉 v68 的 P0 回归（守卫把 CSRF 放在「是否启用」之前，会让 65 处写操作全 403）。设备尚未升级。**
 > 上一版 v0.3.1.66（tag→`d888d82`）修 M106/M107：升级后刷新全部本项目服务、看门狗重启不再复位整机。
 > **本文件只留「高频 + 指针」。全量细节在 `docs/`，不在此重复。**
 
@@ -43,6 +43,8 @@
 
 ## 🚧 进行中 / 待办
 - **✅ v0.3.1.67 已完成**（11-03）：企微「Web登录成功」刷屏（M114）。`.teslamate_token.json` 被 4 进程非原子写坏 → 每 31 秒重登 TeslaMate；修原子写 + 隔离自愈；真机 19:27 后重登 0 次、4 服务 cwd 全 v67、未复位。教训：**A7Z Web 完全无认证**（`/login` 404，`/api/logs/*` 与 `/api/system/reboot`、`/api/version/upgrade*` 匿名可调）——三方案评审见 `docs/explanation/Web访问认证方案评审.md`（A 网络收敛 / B 口令+签名 Cookie / C nginx 反代；建议先 A 再 B），待用户选型。
+- **⚠️ 待决策 S1（v69 审查发现）**：未启用登录保护的「首次配置窗口」内，局域网任何终端都能调 `/api/security/*` → 用自己邮箱完成闭环再 `enable` → 把主人锁在门外。**这是「未启用=无保护」设计的直接后果，非编码缺陷**。选项：a 安装令牌（推荐）/ b 缩短配置窗口 / c 接受。详见设计文档 §14.9。
+- **⚠️ 实施前提 S2（加 nginx 反代前必读）**：`_client_ip()` 现在用 `request.remote_addr` 且不信任 XFF（**当前正确**）；一旦 Flask 退回 `127.0.0.1:5001` 走 nginx，`remote_addr` 恒为 127.0.0.1 → `is_local_network()` 恒真 → 离线登录/改安全邮箱两道「仅本地」限制全部失效。必须同时改为「只信任来自反代 IP 的 XFF 最后一跳」+ 补 XFF 伪造测试。
 - **🚧 停车自检模块（进行中：设计 + B 端骨架，未上机）**：目标=规避停车后系统异常导致哨兵录像失效。A 端本地自检四项（网络/USB/缩略图/微信）+ **B 端僚机 `guardian-b/`**（云端收心跳→判死→告警，补"设备自己发不出告警"的盲区，含 per-channel `last_seen` 双通道判别 + going_offline 预期离线握手 + 外部 dead-man）。**证书定「裸 IP + 自签 + A 侧 pinning」**（零续期、免疫 CA/B SC-081v3 的 200→100→47 天政策漂移；服务端证书 SAN=IP，A 用 IP 直连 + `verify=<ca.crt>`）。设计 `docs/explanation/自检守护-B端VPS设计.md`；代码 `guardian-b/`（**不随 A7Z 升级包分发**）；单测 `tests/test_judge.py` 18/18。**待办：B 端上机部署（VPS `/opt/guard-b/`）+ A 端心跳 sender（尚未动码）**。
 - **✅ v0.3.1.63/64 已完成**（10-14）：v63 = Present 守卫 + 失败语义 + 历史去重/裁剪 + 判据收敛（`utils/system_info.detect_cam_mode` 为唯一权威实现），真机验：Present → 409 + 零删除 + 未写历史；Edit 判据 → `edit`。**v64 = 真凶修复**：`usb_guard` 无模式感知 → 把 Edit（gadget 故意解绑、线仍插着）当链路卡死 → 30s 后 L2 `restart` → `remount_all_ro` 打回只读 + 重绑 UDC → 手动清理 4080 条 `[Errno 30]`；修法：`usb_guard` 加 **Edit 模式闸**（读 `/tmp/teslausb_mode`，读不到 fail-open）+ `usb_gadget_init.sh` start/stop 写该标志 + 清理侧把「确认可写」挪到**紧邻删除之前**并用**真实写探针**验收。真机验：切 Edit 后 t+75s 仍 `mode=edit`、UDC 仍"(无)"、`phase=edit_mode/stages=[]`；Edit 下 execute 全链路通（零数据删除验证法：临时关 enabled → 跑 → 还原）。教训 **M100/M101/M102/M103/M104**。
 - **✅ v0.3.1.65 已完成**（10-15）：网络卡片两栏流量归属反了 → `utils/traffic_monitor._current_category()` 只看「A7Z 自己的 AP 是否激活」，于是「STA 连着车载热点」（主场景）被算成家庭 WiFi。**改为按当前连接的网络分类**；新增 `utils/ssid_match.py` 作 SSID/连接名匹配唯一权威实现（容忍 `WiFi-` 前缀），`traffic_monitor` 与 `location_detector` 共用（顺带修活后者一直静默失效的「连热点=外出」判定）；`other` 桶页面单列。审查加固：分类移出 `_lock`、探测/配置失败保留上份有效值、`_current_category()` 保证不抛。真机：判据 `hotspot`／旧口径 `home_wifi` 一比一复现；最终 `home_wifi` 冻结、`hotspot` 正常增长。测试 `_test_traffic_category.py` 30/30。教训 **M105/M106/M107**。
