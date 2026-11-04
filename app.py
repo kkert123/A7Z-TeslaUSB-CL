@@ -4,8 +4,8 @@ TeslaUSB Web Management System — 模块化版本 v88
 app.py 仅负责：启动 Flask、注册 Blueprint、后台线程、启动入口
 所有帮助函数已移至 utils/app_helpers.py
 """
-import os, logging, threading
-from flask import Flask
+import os, logging, secrets, threading
+from flask import Flask, session
 from app_state import state
 
 # ── 导入所有帮助函数 ──
@@ -57,12 +57,10 @@ def _no_cache_html(resp):
 # ─────────────────────────────────────────────
 @app.context_processor
 def _inject_csrf():
-    import secrets
-    from flask import session as _s
-    tok = _s.get("csrf")
+    tok = session.get("csrf")
     if not tok:
         tok = secrets.token_hex(16)
-        _s["csrf"] = tok
+        session["csrf"] = tok
     return {"csrf": tok}
 
 

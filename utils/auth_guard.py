@@ -59,10 +59,6 @@ def csrf_ok() -> bool:
     return hmac.compare_digest(str(expect), str(got))
 
 
-def wants_html() -> bool:
-    return "text/html" in (request.headers.get("Accept") or "")
-
-
 def _csrf_reject(path: str):
     if path.startswith("/api/"):
         return jsonify({"success": False, "error_code": 4010,

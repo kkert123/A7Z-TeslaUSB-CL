@@ -22,6 +22,7 @@
 """
 import ast
 import os
+import secrets
 import json
 import re
 import sys
@@ -249,7 +250,9 @@ if node is not None:
     seg = "@app.context_processor\n" + ast.get_source_segment(src, node)
     app2 = Flask(__name__)
     app2.secret_key = "g9"
-    ns = {"app": app2}
+    # 前提：_inject_csrf 现在依赖模块级的 session / secrets，
+    # exec 到独立命名空间时必须显式提供，否则 NameError（首版没注意，红了）
+    ns = {"app": app2, "session": session, "secrets": secrets}
     try:
         exec(seg, ns)
         ok_exec = True
