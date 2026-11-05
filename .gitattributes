@@ -23,3 +23,7 @@
 *.jpg binary
 *.png binary
 *.gif binary
+
+# 运维脚本必须是 LF：CRLF 会让 shebang 变成 /bin/bash\r（bad interpreter），
+# conf 里的 \r 还会让字符串比较失败
+ops/a7z-local-route/* text eol=lf

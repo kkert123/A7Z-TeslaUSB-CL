@@ -1,4 +1,6 @@
-# a7z-local-route
+# a7z-local-route 1.0.1
+
+> 发布：2026-11-05 · 首次部署 · 见 REVIEW.md 与 docs/releases/
 
 修「**同网段却互访不通**」：Tailscale 的 subnet route 抢走了本地直连网段的优先路由。
 

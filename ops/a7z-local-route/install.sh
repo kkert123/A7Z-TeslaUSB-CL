@@ -36,13 +36,24 @@ else
     run install -m 0644 "$HERE/a7z-local-route.conf.example" /etc/a7z-local-route.conf
 fi
 
+# 4b) 行尾规范化（必须）
+#   Windows 工作区（core.autocrlf）检出的脚本是 CRLF，装到 Linux 后 shebang 会变成
+#   /bin/bash\r → "bad interpreter"；conf 里的 \r 还会让网段字符串比较永远失败。
+#   这里统一去掉，保证无论源码来自哪个平台都能用。
+for f in /usr/local/sbin/a7z-local-route.sh          /etc/NetworkManager/dispatcher.d/91-a7z-local-route          /etc/systemd/system/a7z-local-route.service          /etc/a7z-local-route.conf; do
+    step "行尾规范化 $f"
+    run sed -i 's/\r$//' "$f"
+done
+
 # 5) 生效
 step "systemctl daemon-reload"
 run systemctl daemon-reload
 step "systemctl enable a7z-local-route.service"
 run systemctl enable a7z-local-route.service
-step "立即执行一次同步"
-run /usr/local/sbin/a7z-local-route.sh
+# 通过 systemd 启动而不是直接跑脚本：oneshot + RemainAfterExit 才会体现为
+# active (exited)，否则 is-active 一直是 inactive，运维检查会误判为"没装好"
+step "启动服务并执行一次同步"
+run systemctl restart a7z-local-route.service
 
 # 6) 自检输出
 if [ "$DRY" = 0 ]; then

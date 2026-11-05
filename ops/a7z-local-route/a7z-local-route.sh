@@ -1,4 +1,6 @@
 #!/bin/bash
+# a7z-local-route 1.0.1  (2026-11-05)
+# 变更记录与回滚见同目录 README.md / REVIEW.md
 # a7z-local-route.sh —— 让「本机所在网段」优先走本地直连，避免被 Tailscale subnet route 抢走
 #
 # 【背景】
@@ -42,6 +44,7 @@ TABLE=100
 PRIO=5260
 IFACE=wlan0
 LOG_TAG=a7z-local-route
+VERSION=1.0.1
 
 log() {
     local msg="$*"
