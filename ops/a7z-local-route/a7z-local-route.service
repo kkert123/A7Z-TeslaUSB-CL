@@ -1,0 +1,19 @@
+[Unit]
+Description=A7Z local direct route (bypass Tailscale subnet route for local segments)
+Documentation=file:///usr/local/sbin/a7z-local-route.sh
+# 只要求 NM 已启动，不等 network-online：
+# 开机时 wlan0 通常还没连上，脚本会安全退出并把表 100 清空；
+# 真正连上后由 NM dispatcher 91-a7z-local-route 再同步一次。
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 单次执行 < 100ms，加超时兜底，避免极端情况下卡住 shutdown 流程
+TimeoutStartSec=30
+ExecStart=/usr/local/sbin/a7z-local-route.sh
+ExecReload=/usr/local/sbin/a7z-local-route.sh
+
+[Install]
+WantedBy=multi-user.target

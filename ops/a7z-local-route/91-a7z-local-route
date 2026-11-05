@@ -1,0 +1,22 @@
+#!/bin/bash
+# NetworkManager dispatcher —— wlan0 状态/地址变化时同步「本地直连路由」
+#
+# 安装位置：/etc/NetworkManager/dispatcher.d/91-a7z-local-route
+# 权限要求（NM 强制，不满足会被静默忽略）：
+#   root:root 拥有、不可被 group/other 写、可执行 → chmod 0755
+#
+# 为什么要这个：开机时 wlan0 还没连上，oneshot 服务跑一次只会「清空表 100」；
+# 真正连上 WiFi、拿到新地址（DHCP 换租）时，需要再同步一次。
+IFACE="$1"
+ACTION="$2"
+
+[ "$IFACE" = "wlan0" ] || exit 0
+
+case "$ACTION" in
+    up|dhcp4-change|down|pre-down)
+        # 绝对路径：dispatcher 环境的 PATH 很窄
+        /usr/local/sbin/a7z-local-route.sh
+        ;;
+esac
+
+exit 0

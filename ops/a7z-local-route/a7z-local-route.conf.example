@@ -1,0 +1,19 @@
+# a7z-local-route 配置
+#
+# NETS：需要「本地直连优先」的网段，多个用空格分隔。
+#
+# 怎么判断该填什么？
+#   如果 tailnet 里某台机器宣告了某个 subnet route，而这个网段恰好就是
+#   本机 WiFi 所在的网段，Tailscale 会把发往该网段的包全塞进隧道，
+#   导致同网段设备之间无法互访。把该网段填在这里即可修正。
+#
+#   查看当前被 Tailscale 接管的路由表：
+#     ip route show table 52
+#
+#   查看本机 WiFi 实际所在网段：
+#     ip -4 route show dev wlan0 scope link
+#
+# 注意：填进来的网段只在「wlan0 确实属于该网段」时才走本地直连；
+#       当 wlan0 在别的网段时（例如连车载热点），该网段仍走 Tailscale，
+#       所以「在车里访问家里内网」不受影响。
+NETS="12.127.12.0/24"
