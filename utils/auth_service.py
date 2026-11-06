@@ -25,6 +25,7 @@ import logging
 import json
 import os
 import secrets
+import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
@@ -231,17 +232,80 @@ def is_loopback(ip: str) -> bool:
     obj = _ip_obj(ip)
     return bool(obj and obj.is_loopback)
 
+# ── 直连网段探测（M118）───────────────────────────────────────────────
+# 排除项：隧道 / 容器网桥 / 虚拟网卡都不代表用户所在的物理局域网
+_IFACE_EXCLUDE_EXACT = ("lo",)
+_IFACE_EXCLUDE_PREFIX = ("tailscale", "docker", "br-", "veth", "virbr", "tun", "tap", "wg", "zt")
+_DIRECT_TTL = 15.0
+_direct_cache = {"at": 0.0, "value": []}
 
-def is_local_network(ip: str, lan_cidrs: Optional[List[str]] = None) -> bool:
-    """本地网络判定：loopback ∪ 手填局域网 ∪ AP 段。tailnet 不算本地。"""
+
+def direct_iface_cidrs(refresh: bool = False) -> List[str]:
+    """设备自身直连网段的 CIDR 列表（IPv4），带 15 秒缓存。
+
+    为什么需要（M118）：`lan_cidrs` 本身就是要被配置的内容。它为空时若只认
+    loopback + AP 段，用户在家里局域网（与设备 wlan0 同段）会被判"非本地"
+    → `/api/security/*` 全部 403 → 永远填不了网段：**首次配置引导死锁**。
+
+    排除 tailscale：tailnet 不算本地（D6），否则"禁止从 tailnet 改安全邮箱"
+    这道限制会失效。容器网桥/虚拟网卡同理不代表用户所在的物理局域网。
+    """
+    now = time.monotonic()
+    if not refresh and _direct_cache["at"] > 0 and (now - _direct_cache["at"]) < _DIRECT_TTL:
+        return list(_direct_cache["value"])
+    cidrs: List[str] = []
+    text = ""
+    try:
+        proc = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=3)
+        if proc.returncode == 0:
+            text = proc.stdout.decode("utf-8", "replace")
+    except Exception as exc:  # ip 不存在（Windows 开发机）/ 超时 / 权限不足
+        logger.debug("探测直连网段失败: %s", exc)
+    for line in text.splitlines():
+        # 形如：3: wlan0    inet 12.127.12.115/24 brd 12.127.12.255 scope global ...
+        parts = line.split()
+        if len(parts) < 4 or "inet" not in parts:
+            continue
+        iface = parts[1].split("@")[0]
+        if iface in _IFACE_EXCLUDE_EXACT or iface.startswith(_IFACE_EXCLUDE_PREFIX):
+            continue
+        try:
+            net = ipaddress.ip_interface(parts[parts.index("inet") + 1]).network
+        except (ValueError, IndexError):
+            continue
+        if net.version != 4:
+            continue
+        cidr = str(net)
+        if cidr not in cidrs:
+            cidrs.append(cidr)
+    _direct_cache["at"] = now
+    _direct_cache["value"] = cidrs
+    return list(cidrs)
+
+
+def is_local_network(ip: str, lan_cidrs: Optional[List[str]] = None,
+                     include_direct: Optional[bool] = None) -> bool:
+    """本地网络判定：loopback ∪ 手填局域网 ∪ AP 段 [∪ 设备直连网段]。
+
+    include_direct 三态（M118）：
+      None  → 自动。**未启用登录保护时**并入「设备自身直连网段」，已启用则
+              严格只认手填网段（保留"用户可收窄"的能力）。
+      True  → 强制并入
+      False → 强制不并入（用于预判"启用后是否还有权限"）
+    """
     if is_loopback(ip):
         return True
     obj = _ip_obj(ip)
     if obj is None:
         return False
     nets = [AP_CIDR]
-    for c in (lan_cidrs or []):
-        nets.append(c)
+    nets.extend(lan_cidrs or [])
+    if include_direct is None:
+        include_direct = not is_enabled()
+    if include_direct:
+        nets.extend(direct_iface_cidrs())
     for c in nets:
         try:
             if obj in ipaddress.ip_network(c, strict=False):

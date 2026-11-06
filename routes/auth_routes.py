@@ -239,6 +239,8 @@ def security_config():
     cfg = auth.load_config()
     data = auth.public_config()
     data["is_local_network"] = auth.is_local_network(ip, cfg.get("lan_cidrs"))
+    # 首次配置：把设备自身所在网段回给前端预填，避免用户漏填导致启用后自锁
+    data["suggested_cidrs"] = auth.direct_iface_cidrs()
     data["reauth_ok"] = (time.time() - float(session.get("auth_at") or 0)) <= REAUTH_WINDOW
     data["smtp_preset"] = {"host": "smtp.exmail.qq.com", "port": 465, "tls_mode": "ssl"}
     # 前端需要 CSRF token；未启用（首次配置）阶段 session 里还没有，这里补发一个
@@ -365,16 +367,26 @@ def lan_save():
         return _err(4012, err, 400)
 
     ip = _client_ip()
-    still_local = auth.is_local_network(ip, cidrs)
-    if not still_local and not body.get("confirm"):
-        return _err(4014, "当前访问地址不在新网段内，保存后将立即失去设置权限",
-                    400, {"requires_confirm": True, "current_ip": ip, "new_cidrs": cidrs})
+    enabled = auth.is_enabled()
+    # 口径 C 的判据必须用「启用后」的严格口径（M118）：
+    # 未启用阶段直连网段临时算本地（解引导死锁），但启用后只认 lan_cidrs，
+    # 所以"保存后会不会失去权限"要排除直连网段，否则二次确认会被静默跳过。
+    after_enable = auth.is_local_network(ip, cidrs, include_direct=False)
+    if not after_enable and not body.get("confirm"):
+        msg = ("当前访问地址不在新网段内，保存后将立即失去设置权限"
+               if enabled else
+               "当前访问地址不在新网段内，启用登录保护后将失去设置权限")
+        return _err(4014, msg, 400,
+                    {"requires_confirm": True, "current_ip": ip, "new_cidrs": cidrs})
 
     cfg = auth.load_config()
     cfg["lan_cidrs"] = cidrs
     auth.save_config(cfg)
-    auth.audit("lan_saved", ip=ip, ua=_ua(), cidrs=cidrs, still_local=still_local)
-    return _ok({"lan_cidrs": cidrs, "has_local_access": still_local, "current_ip": ip},
+    now_local = auth.is_local_network(ip, cidrs)
+    auth.audit("lan_saved", ip=ip, ua=_ua(), cidrs=cidrs,
+               still_local=now_local, local_after_enable=after_enable)
+    return _ok({"lan_cidrs": cidrs, "has_local_access": now_local,
+                "local_after_enable": after_enable, "current_ip": ip},
                "网段已保存")
 
 
@@ -400,6 +412,11 @@ def security_enable():
     if not ok:
         return resp
     cfg = auth.load_config()
+    # 网段留空 → 启用后只剩 loopback + AP 段算本地，家里局域网会被判非本地，
+    # 用户再也进不来改配置（M118）。所以启用前必须先把日常访问网段填好。
+    if not (cfg.get("lan_cidrs") or []):
+        return _err(4012, "请先填写你日常访问 A7Z 的局域网段（例如 192.168.1.0/24）；"
+                          "留空会导致启用后无法再修改安全配置", 400)
     if not cfg.get("security_email_verified"):
         return _err(4009, "请先完成安全邮箱的「发送测试码 → 回填」闭环", 400)
     if not (cfg.get("smtp") or {}).get("password"):

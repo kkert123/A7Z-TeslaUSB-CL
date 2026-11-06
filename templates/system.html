@@ -379,7 +379,7 @@
 
     <!-- 网段 -->
     <div style="font-size:0.78rem;color:var(--text-muted);margin:16px 0 6px">
-      局域网网段（逗号分隔，最多 4 个；127.0.0.1 与 AP 段 192.168.42.0/24 始终视为本地）
+      局域网网段（逗号分隔，最多 4 个；127.0.0.1 与 AP 段 192.168.42.0/24 始终视为本地；启用前设备当前所在网段也临时视为本地）
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
       <input id="sec-lan" placeholder="192.168.1.0/24"
@@ -1545,7 +1545,16 @@ async function loadSecurityConfig() {
       if (u && d.smtp.user && d.smtp.user.indexOf('***') === -1) u.value = d.smtp.user;
     }
     var lan = document.getElementById('sec-lan');
-    if (lan) lan.value = (d.lan_cidrs || []).join(', ');
+    if (lan) {
+      var savedCidrs = (d.lan_cidrs || []).join(', ');
+      if (!savedCidrs && !d.enabled && (d.suggested_cidrs || []).length) {
+        // 首次配置：自动填入设备自身所在网段，避免「网段为空 → 判非本地 → 填不进去」的死锁（M118）
+        lan.value = d.suggested_cidrs.join(', ');
+        secSet('sec-lan-status', '已自动填入当前所在网段，确认后点「保存网段」');
+      } else {
+        lan.value = savedCidrs;
+      }
+    }
 
     var hint = document.getElementById('sec-local-hint');
     if (hint) {
@@ -1658,6 +1667,10 @@ async function secSaveLan(confirmed) {
   }
 
   secSet('sec-lan-status', '已保存：' + ((data.data && data.data.lan_cidrs) || []).join(', '));
+  // 启用后口径预判：该网段不含当前地址 → 启用登录保护就会失去设置权限
+  if (data.data && data.data.local_after_enable === false) {
+    secBanner('⚠ 当前网段不包含你正在使用的地址：启用登录保护后你将无法再修改安全配置（只能通过 SSH 以 127.0.0.1 访问）。', true);
+  }
 
   // 安全网 2：保存后立即用新网段重算权限，失去权限则红色横幅 + 10 秒跳转
   if (data.data && data.data.has_local_access === false) {
