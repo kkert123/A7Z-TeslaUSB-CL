@@ -62,6 +62,12 @@ LOCK_GLOBAL_FAILS = 10
 LOCK_GLOBAL_SECONDS = 1800
 LOCAL_KEY_MIN = 10
 LOCAL_KEY_MAX = 64
+
+# 登录有效期：空闲多久自动注销（分钟）。每次有请求就重置计时（滚动窗口）
+DEFAULT_IDLE_MIN = 5
+IDLE_MIN_MIN = 1
+IDLE_MIN_MAX = 240
+SESSION_ACT_REFRESH = 30   # 活动时间的写回节流（秒），避免每个请求都重签 cookie
 SESSION_EPOCH_KEY = "epoch"
 
 AP_CIDR = "192.168.42.0/24"  # 设备自带 AP 段，内置不可删
@@ -334,6 +340,7 @@ def _default_config() -> Dict[str, Any]:
             "password": "",
         },
         "email_code_ttl": DEFAULT_CODE_TTL,
+        "session_idle_minutes": DEFAULT_IDLE_MIN,
         "lan_cidrs": [],
         "local_key_hash": "",
         "local_key_salt": "",
@@ -692,16 +699,35 @@ def current_epoch() -> int:
     return int(load_config().get("session_epoch") or 0)
 
 
+def session_idle_minutes() -> int:
+    """登录有效期（分钟）。配置坏了也不影响登录，退回默认值。"""
+    try:
+        v = int(load_config().get("session_idle_minutes") or DEFAULT_IDLE_MIN)
+    except (TypeError, ValueError):
+        return DEFAULT_IDLE_MIN
+    return max(IDLE_MIN_MIN, min(IDLE_MIN_MAX, v))
+
+
+def session_idle_seconds() -> int:
+    return session_idle_minutes() * 60
+
+
 def build_session_payload(readonly: bool = False) -> Dict[str, Any]:
     return {
         "logged_in": True,
         "epoch": current_epoch(),
         "readonly": bool(readonly),
         "csrf": secrets.token_hex(16),
+        "last_act": time.time(),
     }
 
 
 def check_session(sess: Dict[str, Any]) -> Tuple[bool, str]:
+    """校验会话；同时负责**空闲自动注销**（滚动窗口）。
+
+    每次请求都会把 last_act 往后推（节流 30 秒写一次），
+    超过 session_idle_minutes 没有请求就失效并清空会话。
+    """
     if not sess.get("logged_in"):
         return False, "not_logged_in"
     # 注意：不能用 `x or -1` —— epoch 合法值包含 0，会被 or 吞成 -1 导致永远"被踢"
@@ -710,6 +736,19 @@ def check_session(sess: Dict[str, Any]) -> Tuple[bool, str]:
         return False, "kicked"
     if int(raw_epoch) != current_epoch():
         return False, "kicked"
+
+    now = time.time()
+    try:
+        last = float(sess.get("last_act") or sess.get("auth_at") or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    ttl = session_idle_seconds()
+    if ttl > 0 and last > 0 and (now - last) > ttl:
+        sess.clear()          # 顺手清掉，别留下一个"看起来还有效"的会话
+        return False, "idle"
+
+    if last <= 0 or (now - last) >= SESSION_ACT_REFRESH:
+        sess["last_act"] = now
     return True, ""
 
 
@@ -849,6 +888,7 @@ def public_config() -> Dict[str, Any]:
             "has_password": bool(smtp.get("password")),
         },
         "email_code_ttl": int(cfg.get("email_code_ttl") or DEFAULT_CODE_TTL),
+        "session_idle_minutes": session_idle_minutes(),
         "lan_cidrs": cfg.get("lan_cidrs") or [],
         "has_local_key": has_local_key(),
         "local_key_is_custom": bool(cfg.get("local_key_is_custom")),

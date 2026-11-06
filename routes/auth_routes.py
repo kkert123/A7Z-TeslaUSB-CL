@@ -276,6 +276,11 @@ def smtp_test():
     auth.audit("smtp_test", ip=_client_ip(), ua=_ua(), ok=bool(result.get("ok")),
                error_type=result.get("error_type", ""))
     if result.get("ok"):
+        # 测试发信就是一次真实发信成功：D1 的"在线判据"要据此刷新，
+        # 否则设置页永远显示"发信通道：尚无成功记录"
+        fresh = auth.load_config()
+        fresh["last_mail_ok_at"] = time.time()
+        auth.save_config(fresh)
         return _ok({"error_type": "", "detail": result.get("detail", "")}, result.get("message", "测试成功"))
     # 三类错误用不同错误码，前端据此给出不同引导
     etype = result.get("error_type")
@@ -409,6 +414,31 @@ def lan_save():
                "网段已保存")
 
 
+@auth_bp.route("/api/security/session/save", methods=["POST"])
+def session_save():
+    """登录有效期（空闲自动注销）。设置页「安全与登录」可调。"""
+    ok, resp = _require_admin()
+    if not ok:
+        return resp
+    body = _json()
+    try:
+        minutes = int(body.get("idle_minutes"))
+    except (TypeError, ValueError):
+        return _err(4012, "空闲时间必须是整数（分钟）", 400)
+    if not (auth.IDLE_MIN_MIN <= minutes <= auth.IDLE_MIN_MAX):
+        return _err(4012, "空闲时间需在 %d~%d 分钟之间"
+                    % (auth.IDLE_MIN_MIN, auth.IDLE_MIN_MAX), 400)
+
+    cfg = auth.load_config()
+    cfg["session_idle_minutes"] = minutes
+    auth.save_config(cfg)
+    # 当前会话重新计时：否则刚把阈值改小，会立刻把自己踢掉
+    session["last_act"] = time.time()
+    auth.audit("session_idle_saved", ip=_client_ip(), ua=_ua(), minutes=minutes)
+    return _ok({"session_idle_minutes": minutes, "config": auth.public_config()},
+               "登录有效期已保存：空闲 %d 分钟自动注销" % minutes)
+
+
 @auth_bp.route("/api/security/local-key/set", methods=["POST"])
 def local_key_set():
     """生成或自定义本地密钥。明文只返回这一次。"""
@@ -453,7 +483,9 @@ def security_enable():
     auth.save_config(cfg)
     auth.audit("security_enabled", ip=_client_ip(), ua=_ua(),
                generated_local_key=bool(generated))
-    data = {"enabled": True}
+    # 启用后 /api/security/config 会被守卫拦成 401，前端无法再拉一次；
+    # 因此这里把最新配置随响应带回，让页面立即把状态与进度刷成"已启用"。
+    data = {"enabled": True, "config": auth.public_config()}
     if generated:
         data["local_key"] = generated
         data["notice"] = "已自动生成本地密钥，只显示这一次，请立即保存"
@@ -470,4 +502,5 @@ def security_disable():
     cfg["enabled"] = False
     auth.save_config(cfg)
     auth.audit("security_disabled", ip=_client_ip(), ua=_ua())
-    return _ok({"enabled": False}, "已关闭登录保护（建议尽快重新启用）")
+    return _ok({"enabled": False, "config": auth.public_config()},
+               "已关闭登录保护（建议尽快重新启用）")

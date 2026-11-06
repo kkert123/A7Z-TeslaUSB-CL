@@ -97,7 +97,7 @@ def guard() -> Any:
         if request.method == "GET":
             # 主路径：原始路径存服务端会话，URL 里不出现跳转目标（防钓鱼）
             session["intended_path"] = auth.safe_relative_path(request.full_path.rstrip("?"))
-        target = "/login?reason=kicked" if reason == "kicked" else "/login"
+        target = ("/login?reason=%s" % reason) if reason in ("kicked", "idle") else "/login"
         return redirect(target, code=302)
 
     # 5) CSRF：仅对已登录的写请求有意义。

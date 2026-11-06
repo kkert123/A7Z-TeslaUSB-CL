@@ -422,6 +422,19 @@
       <span id="sec-action-status" style="font-size:0.72rem;color:var(--text-muted)"></span>
     </div>
 
+    <!-- 登录有效期（空闲自动注销） -->
+    <div style="font-size:0.78rem;color:var(--text-muted);margin:18px 0 6px">
+      登录有效期（空闲多久自动注销）—— 默认 5 分钟：连续这么久没有任何操作即失效，
+      下次操作会跳回登录页。范围 1~240 分钟。启用登录保护后才生效
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+      <input id="sec-idle" type="number" min="1" max="240" step="1" placeholder="5"
+             style="width:110px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+      <span style="font-size:0.78rem;color:var(--text-muted)">分钟</span>
+      <button class="btn btn-primary btn-sm" onclick="secSaveIdle()">保存有效期</button>
+      <span id="sec-idle-status" style="font-size:0.72rem;color:var(--text-muted)"></span>
+    </div>
+
     <!-- 审计 -->
     <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px">最近登录审计</div>
     <div id="sec-audit" style="font-size:0.72rem;line-height:1.7;color:var(--text-muted);max-height:180px;overflow:auto">加载中...</div>
@@ -1547,13 +1560,10 @@ function secSmtpReady(f) {
   return !!(f.user && f.user.indexOf('@') > 0 && (f.password || SEC.smtpHasPassword));
 }
 
-async function loadSecurityConfig() {
-  try {
-    var resp = await fetch('/api/security/config', { headers: { 'Accept': 'application/json' } });
-    var data = await resp.json();
-    if (!data.success) return;
-    var d = data.data || {};
-    SEC.csrf = d.csrf || '';
+// 只负责"把一份 config 渲染到页面"（不再自己发请求），
+// 这样 enable/disable 也能用响应里回带的 config 立即刷新，而不必再请求一次
+function secRender(d) {
+    SEC.csrf = d.csrf || SEC.csrf;
     SEC.loaded = true;
 
     secSet('sec-enabled', d.enabled ? '已启用' : '未启用');
@@ -1569,6 +1579,9 @@ async function loadSecurityConfig() {
       + ((d.lan_cidrs || []).length ? '③✅ 网段' : '③⬜ 网段') + ' · '
       + (d.has_local_key ? '④✅ 密钥' : '④⬜ 密钥') + ' · '
       + (d.enabled ? '⑤✅ 已启用' : '⑤⬜ 未启用'));
+
+    var idle = document.getElementById('sec-idle');
+    if (idle) idle.value = d.session_idle_minutes || 5;
 
     var ok = d.last_mail_ok_at ? new Date(d.last_mail_ok_at * 1000) : null;
     secSet('sec-mail-ok', ok ? ('最近成功 ' + ok.toLocaleString()) : '尚无成功记录');
@@ -1612,6 +1625,24 @@ async function loadSecurityConfig() {
       audit.textContent = rows.length ? rows.join('\n') : '暂无记录';
       audit.style.whiteSpace = 'pre-wrap';
     }
+}
+
+async function loadSecurityConfig() {
+  try {
+    var resp = await fetch('/api/security/config', { headers: { 'Accept': 'application/json' } });
+    var data = {};
+    try { data = await resp.json(); } catch (e) { data = {}; }
+    if (!data.success) {
+      // 401 = 会话失效或刚刚启用了登录保护。必须说出来，不能静默保留旧状态。
+      if (resp.status === 401) {
+        secBanner('当前需要登录：登录保护已启用或会话已失效，请到登录页登录后再修改安全配置。', true);
+        secSet('sec-summary', '未登录');
+      } else {
+        secSet('sec-summary', '加载失败');
+      }
+      return;
+    }
+    secRender(data.data || {});
   } catch (e) {
     secSet('sec-summary', '加载失败');
   }
@@ -1737,6 +1768,7 @@ async function secSaveLan(confirmed) {
   } else {
     secBanner('网段已保存，当前 IP 仍在新网段内。', false);
   }
+  loadSecurityConfig();      // ③ 与"本地网络"提示要立即刷新
 }
 
 async function secSetLocalKey() {
@@ -1755,21 +1787,53 @@ async function secSetLocalKey() {
   loadSecurityConfig();
 }
 
+async function secSaveIdle() {
+  var raw = ((document.getElementById('sec-idle') || {}).value || '').trim();
+  var v = parseInt(raw, 10);
+  if (!raw || isNaN(v) || v < 1 || v > 240) {
+    secSet('sec-idle-status', '❌ 请输入 1~240 之间的整数（分钟）');
+    return;
+  }
+  var data = await secApi('/api/security/session/save', { idle_minutes: v });
+  secSet('sec-idle-status', (data.success ? '✅ ' : '❌ ') + (data.message || ''));
+  if (data.success && data.data && data.data.config) secRender(data.data.config);
+}
+
 async function secEnable() {
   var data = await secApi('/api/security/enable', {});
   secSet('sec-action-status', data.message || '');
-  if (data.success) {
-    if (data.data && data.data.local_key) {
-      var box = document.getElementById('sec-key-reveal');
-      if (box) {
-        box.style.display = 'block';
-        box.innerHTML = '已自动生成本地密钥（只显示这一次，请立即保存）：<br><b style="font-size:1.05rem;letter-spacing:1px">' +
-                        data.data.local_key + '</b>';
-      }
+  if (!data.success) return;
+
+  var d = data.data || {};
+  var generated = d.local_key || '';
+  if (generated) {
+    var box = document.getElementById('sec-key-reveal');
+    if (box) {
+      box.style.display = 'block';
+      box.innerHTML = '已自动生成本地密钥（只显示这一次，请立即保存）：<br><b style="font-size:1.05rem;letter-spacing:1px">' +
+                      generated + '</b>';
     }
-    secBanner('登录保护已启用。下次访问需要邮箱验证码。', false);
-    loadSecurityConfig();
   }
+  // 启用后 /api/security/config 会被守卫拦成 401，所以用响应里回带的 config 立即刷新
+  if (d.config) secRender(d.config);
+
+  if (generated) {
+    // 有一次性密钥要抄，绝不能自动跳走
+    secBanner('登录保护已启用。请先保存上面的本地密钥，再前往登录页验证一次登录。', false);
+    secSet('sec-action-status', '已启用（请先保存本地密钥）');
+    return;
+  }
+  var left = 10;
+  secBanner('登录保护已启用：状态已更新。本页的修改操作需要重新登录后才能进行，' +
+            left + ' 秒后跳转登录页…', false);
+  var timer = setInterval(function () {
+    left -= 1;
+    secBanner('登录保护已启用，' + left + ' 秒后跳转登录页（可用邮箱验证码或本地密钥登录）', false);
+    if (left <= 0) {
+      clearInterval(timer);
+      location.href = '/login?next=' + encodeURIComponent('/system');
+    }
+  }, 1000);
 }
 
 async function secDisable() {
