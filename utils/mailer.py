@@ -8,6 +8,7 @@
     auth     认证失败（账号或客户端专用密码）
     rejected 被拒信（发件人/收件人被拒、额度或频率限制）
 """
+import re
 import smtplib
 import socket
 import ssl
@@ -19,6 +20,26 @@ from typing import Any, Dict, Optional, Tuple
 DEFAULT_HOST = "smtp.exmail.qq.com"
 # 465 + SSL（首选）→ 587 + STARTTLS（备用）；25 端口常被运营商封禁，不尝试
 FALLBACK_PROFILES = [(465, "ssl"), (587, "starttls")]
+
+# 完整邮箱：local@domain.tld（domain 至少两段）
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+$")
+
+
+def is_valid_email(addr: str) -> bool:
+    """邮箱完整性的**唯一权威实现**（F3）。
+
+    只查有没有 '@' 会放过 `cnlvan@cnlvan` / `a@b` 这类地址：格式校验过了，
+    投递时才在 DNS 阶段失败，用户拿到的是"连接失败"，而真正的原因是邮箱打错了。
+    """
+    addr = (addr or "").strip()
+    if not addr or len(addr) > 254 or "@" not in addr:
+        return False
+    local, _, domain = addr.rpartition("@")
+    if not local or not domain:
+        return False
+    if local.startswith(".") or local.endswith(".") or ".." in local or ".." in domain:
+        return False
+    return bool(_EMAIL_RE.match(addr))
 
 CONNECT_ERRORS = (
     socket.timeout,
@@ -76,17 +97,25 @@ def _classify(exc: BaseException) -> Tuple[str, str]:
     return "connect", "发送失败：%s" % msg[:200]
 
 
-def _build_message(from_addr: str, to_addr: str, code: str, ttl: int) -> MIMEText:
+def _build_message(from_addr: str, to_addr: str, code: str, ttl: int,
+                   purpose: str = "login") -> MIMEText:
+    """purpose: login（登录验证码）/ email_change（安全邮箱绑定测试码）"""
     minutes = max(1, int(ttl // 60))
+    if purpose == "email_change":
+        title = "安全邮箱验证码"
+        tail = "如果这不是你本人的操作，请忽略本邮件；你的设备安全邮箱不会被修改。\n\n"
+    else:
+        title = "登录验证码"
+        tail = "如果这不是你本人的操作，请忽略本邮件；你的设备不会被登录。\n\n"
     body = (
-        "你的登录验证码是：\n\n"
+        "你的%s是：\n\n"
         "    %s\n\n"
         "该验证码 %d 分钟内有效，且只能使用一次。\n"
-        "如果这不是你本人的操作，请忽略本邮件；你的设备不会被登录。\n\n"
+        "%s"
         "—— TeslaUSB CL 自动发送，请勿直接回复\n"
-    ) % (code, minutes)
+    ) % (title, code, minutes, tail)
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = Header("登录验证码 %s" % code, "utf-8")
+    msg["Subject"] = Header("%s %s" % (title, code), "utf-8")
     msg["From"] = formataddr((str(Header("TeslaUSB CL", "utf-8")), from_addr))
     msg["To"] = to_addr
     msg["Date"] = formatdate(localtime=True)
@@ -131,19 +160,24 @@ def _send_once(cfg: Dict[str, Any], to_addr: str, msg: MIMEText) -> Tuple[bool, 
     return False, etype, detail
 
 
-def send_email_code(cfg: Dict[str, Any], code: str, ttl: int) -> Dict[str, Any]:
-    """发送登录验证码。返回 {ok, error_type, message, detail}。"""
+def send_email_code(cfg: Dict[str, Any], code: str, ttl: int,
+                    purpose: str = "login") -> Dict[str, Any]:
+    """发送验证码（登录 / 安全邮箱绑定）。返回 {ok, error_type, message, detail}。"""
     to_addr = (cfg.get("security_email") or "").strip()
     smtp = cfg.get("smtp") or {}
     if not to_addr:
         return {"ok": False, "error_type": "config",
                 "message": "未配置安全邮箱，无法发送验证码", "detail": ""}
+    if not is_valid_email(to_addr):
+        return {"ok": False, "error_type": "config",
+                "message": "安全邮箱格式不正确（需要 local@domain.tld）", "detail": ""}
     if not (smtp.get("user") or "").strip() or not smtp.get("password"):
         return {"ok": False, "error_type": "config",
                 "message": "未配置发送邮箱或密码，无法发送验证码", "detail": ""}
 
     try:
-        msg = _build_message((smtp.get("from_addr") or smtp.get("user") or "").strip(), to_addr, code, ttl)
+        msg = _build_message((smtp.get("from_addr") or smtp.get("user") or "").strip(),
+                             to_addr, code, ttl, purpose)
     except Exception as e:  # 构造失败属于配置问题
         return {"ok": False, "error_type": "config", "message": "邮件构造失败", "detail": str(e)[:200]}
 
@@ -157,7 +191,12 @@ def test_smtp(cfg: Dict[str, Any], to_addr: Optional[str] = None) -> Dict[str, A
     """设置页「测试发信」：真的发一封，验证整条链路（含认证与投递接受）。"""
     to_addr = (to_addr or cfg.get("security_email") or "").strip()
     if not to_addr:
-        return {"ok": False, "error_type": "config", "message": "请先填写安全邮箱", "detail": ""}
+        return {"ok": False, "error_type": "config",
+                "message": "还没有可用的收件地址：请在 ② 填写安全邮箱（首次配置请用「发送测试码到新邮箱」，它会一并验证发信通道）",
+                "detail": ""}
+    if not is_valid_email(to_addr):
+        return {"ok": False, "error_type": "config",
+                "message": "收件邮箱格式不正确，请填完整地址（例如 someone@example.com）", "detail": ""}
     return _send_test(cfg, to_addr)
 
 

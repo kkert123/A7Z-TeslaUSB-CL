@@ -328,32 +328,28 @@
     <div id="sec-banner" style="display:none;padding:8px 12px;border-radius:8px;margin-bottom:12px;font-size:0.8rem;line-height:1.5"></div>
     <div id="sec-local-hint" style="display:none;font-size:0.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5"></div>
 
+    <!-- 配置顺序：依赖关系是 ① → ②，跳步会报"请先…" -->
+    <div style="margin-bottom:14px;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--border);font-size:0.76rem;line-height:1.9">
+      <div style="color:var(--text-muted);margin-bottom:2px"><b>配置顺序</b>（前一步没成功，下一步就会报错，别跳步）</div>
+      <div>① 保存<b>发送邮箱</b>（SMTP） → ② 向<b>安全邮箱</b>发测试码并回填 → ③ 保存<b>局域网网段</b> → ④ 设置<b>本地密钥</b> → ⑤ <b>启用登录保护</b></div>
+      <div id="sec-progress" style="margin-top:4px;color:var(--text-muted)">进度：—</div>
+    </div>
+
     <!-- 当前状态 -->
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:14px;font-size:0.8rem">
       <span>登录保护：<b id="sec-enabled">—</b></span>
       <span>安全邮箱：<b id="sec-email">—</b></span>
-      <span>发送邮箱：<b id="sec-smtp-user">—</b></span>
+      <span>发送邮箱：<b id="sec-smtp-user-label">—</b></span>
       <span>本地密钥：<b id="sec-key">—</b></span>
       <span>发信通道：<b id="sec-mail-ok">—</b></span>
     </div>
 
-    <!-- 安全邮箱 -->
-    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px">安全邮箱（接收验证码，必须与发送邮箱不同）</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
-      <input id="sec-new-email" type="email" placeholder="new@example.com"
-             style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
-      <button class="btn btn-secondary btn-sm" onclick="secSendEmailCode()">发送测试码到新邮箱</button>
-      <input id="sec-email-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位测试码"
-             style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
-      <button class="btn btn-primary btn-sm" onclick="secConfirmEmail()">确认并保存</button>
-    </div>
-    <div id="sec-email-status" style="font-size:0.72rem;color:var(--text-muted);margin-bottom:16px"></div>
-
-    <!-- SMTP -->
-    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px">
-      发送邮箱（腾讯企业邮 · smtp.exmail.qq.com。需先在
+    <!-- ① 发送邮箱（SMTP）—— 依赖顺序在先：② 发码要用它 -->
+    <div style="font-size:0.78rem;color:var(--text-muted);margin:16px 0 6px">
+      ① 发送邮箱（SMTP）—— 必须最先配好，第 ② 步发测试码要用它。腾讯企业邮 · smtp.exmail.qq.com。
+      需先在
       <b>企业微信管理端【协作→邮件→安全管理→客户端访问权限】</b>开启 POP/IMAP+SMTP，
-      再到网页版【设置→收发信设置】开启；开启安全登录时密码填 16 位客户端专用密码）
+      再到网页版【设置→收发信设置】开启；开启安全登录时密码填 16 位客户端专用密码
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:8px">
       <input id="sec-smtp-host" placeholder="smtp.exmail.qq.com" value="smtp.exmail.qq.com"
@@ -372,14 +368,29 @@
              style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
-      <button class="btn btn-secondary btn-sm" onclick="secTestSmtp()">测试发信</button>
       <button class="btn btn-primary btn-sm" onclick="secSaveSmtp()">保存 SMTP</button>
+      <button class="btn btn-secondary btn-sm" onclick="secTestSmtp()">测试发信</button>
       <span id="sec-smtp-status" style="font-size:0.72rem;color:var(--text-muted)"></span>
     </div>
 
+    <!-- ② 安全邮箱 -->
+    <div style="font-size:0.78rem;color:var(--text-muted);margin:18px 0 6px">
+      ② 安全邮箱（接收验证码，必须与发送邮箱不同）—— 依赖第 ① 步：填好后点「发送测试码到新邮箱」，
+      邮件里会带 6 位码，回填后点「确认并保存」
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+      <input id="sec-new-email" type="email" placeholder="new@example.com"
+             style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+      <button class="btn btn-secondary btn-sm" onclick="secSendEmailCode()">发送测试码到新邮箱</button>
+      <input id="sec-email-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位测试码"
+             style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+      <button class="btn btn-primary btn-sm" onclick="secConfirmEmail()">确认并保存</button>
+    </div>
+    <div id="sec-email-status" style="font-size:0.72rem;color:var(--text-muted);margin-bottom:16px"></div>
+
     <!-- 网段 -->
     <div style="font-size:0.78rem;color:var(--text-muted);margin:16px 0 6px">
-      局域网网段（逗号分隔，最多 4 个；127.0.0.1 与 AP 段 192.168.42.0/24 始终视为本地；启用前设备当前所在网段也临时视为本地）
+      ③ 局域网网段（逗号分隔，最多 4 个；127.0.0.1 与 AP 段 192.168.42.0/24 始终视为本地；启用前设备当前所在网段也临时视为本地）
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
       <input id="sec-lan" placeholder="192.168.1.0/24"
@@ -390,7 +401,7 @@
 
     <!-- 本地密钥 -->
     <div style="font-size:0.78rem;color:var(--text-muted);margin:16px 0 6px">
-      本地密钥（离线兜底 L2：本地网络下用它完整登录；不填则只能只读浏览。不是密码，无需定期更换）
+      ④ 本地密钥（离线兜底 L2：本地网络下用它完整登录；不填则只能只读浏览。不是密码，无需定期更换）
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
       <input id="sec-local-key" placeholder="自定义密钥（10-64 位，留空则自动生成）"
@@ -401,7 +412,10 @@
     <div id="sec-key-reveal" style="display:none;margin-bottom:6px;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px dashed var(--border);font-size:0.8rem;line-height:1.6"></div>
     <div id="sec-key-status" style="font-size:0.72rem;color:var(--text-muted);margin-bottom:16px"></div>
 
-    <!-- 启用 / 关闭 -->
+    <!-- ⑤ 启用 / 关闭 -->
+    <div style="font-size:0.78rem;color:var(--text-muted);margin:18px 0 6px">
+      ⑤ 启用登录保护 —— 前三步都完成后再点；启用后远程（tailnet）需登录才能访问
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
       <button class="btn btn-primary btn-sm" onclick="secEnable()">启用登录保护</button>
       <button class="btn btn-secondary btn-sm" onclick="secDisable()">关闭登录保护</button>
@@ -1498,7 +1512,7 @@ setInterval(function() { loadSummary(); }, 15000);
 // ═══════════════════════════════════════════════════════════════
 // 安全与登录（v0.3.1.68 · 仅验证码登录 v2）
 // ═══════════════════════════════════════════════════════════════
-var SEC = { csrf: '', loaded: false };
+var SEC = { csrf: '', loaded: false, smtpHasPassword: false, hasSecurityEmail: false };
 
 function secSet(id, text) {
   var el = document.getElementById(id);
@@ -1516,6 +1530,23 @@ async function secApi(path, body) {
   return data;
 }
 
+// ① 区当前输入的快照（F1：测试/发码都用它，不再只认已保存配置）
+function secSmtpForm() {
+  var v = function (id) { return ((document.getElementById(id) || {}).value || '').trim(); };
+  return {
+    host: v('sec-smtp-host'),
+    port: v('sec-smtp-port'),
+    tls_mode: v('sec-smtp-tls') || 'ssl',
+    user: v('sec-smtp-user'),
+    from_addr: v('sec-smtp-user'),
+    password: (document.getElementById('sec-smtp-pass') || {}).value || ''
+  };
+}
+
+function secSmtpReady(f) {
+  return !!(f.user && f.user.indexOf('@') > 0 && (f.password || SEC.smtpHasPassword));
+}
+
 async function loadSecurityConfig() {
   try {
     var resp = await fetch('/api/security/config', { headers: { 'Accept': 'application/json' } });
@@ -1527,9 +1558,17 @@ async function loadSecurityConfig() {
 
     secSet('sec-enabled', d.enabled ? '已启用' : '未启用');
     secSet('sec-email', d.security_email || '未配置');
-    secSet('sec-smtp-user', (d.smtp && d.smtp.user) || '未配置');
+    secSet('sec-smtp-user-label', (d.smtp && d.smtp.user) || '未配置');
     secSet('sec-key', d.has_local_key ? (d.local_key_is_custom ? '已设置（自定义）' : '已设置（自动生成）') : '未设置');
     secSet('sec-summary', d.enabled ? '已启用' : '未启用');
+    SEC.smtpHasPassword = !!(d.smtp && d.smtp.has_password);
+    SEC.hasSecurityEmail = !!d.security_email;
+    secSet('sec-progress', '进度：'
+      + (SEC.smtpHasPassword ? '①✅ 发送邮箱' : '①⬜ 发送邮箱') + ' · '
+      + (d.security_email_verified ? '②✅ 安全邮箱' : '②⬜ 安全邮箱') + ' · '
+      + ((d.lan_cidrs || []).length ? '③✅ 网段' : '③⬜ 网段') + ' · '
+      + (d.has_local_key ? '④✅ 密钥' : '④⬜ 密钥') + ' · '
+      + (d.enabled ? '⑤✅ 已启用' : '⑤⬜ 未启用'));
 
     var ok = d.last_mail_ok_at ? new Date(d.last_mail_ok_at * 1000) : null;
     secSet('sec-mail-ok', ok ? ('最近成功 ' + ok.toLocaleString()) : '尚无成功记录');
@@ -1589,11 +1628,23 @@ function secBanner(text, danger) {
 }
 
 async function secSendEmailCode() {
-  var email = (document.getElementById('sec-new-email') || {}).value || '';
+  var email = ((document.getElementById('sec-new-email') || {}).value || '').trim();
+  if (!email) {
+    secSet('sec-email-status', '❌ 请先填写要接收验证码的安全邮箱');
+    return;
+  }
+  var form = secSmtpForm();
+  if (!secSmtpReady(form)) {
+    secSet('sec-email-status', '❌ 请先在 ① 填写发送邮箱与客户端专用密码（填好即可发码，不必先保存）');
+    return;
+  }
   secSet('sec-email-status', '发送中...');
-  var data = await secApi('/api/security/email/start', { email: email.trim() });
-  secSet('sec-email-status', data.message || '');
-  if (data.success) secSet('sec-email-status', (data.message || '已发送') + '（10 分钟内回填）');
+  var data = await secApi('/api/security/email/start', { email: email, smtp: form });
+  if (data.success) {
+    secSet('sec-email-status', (data.message || '已发送') + '（10 分钟内回填）');
+  } else {
+    secSet('sec-email-status', '❌ ' + (data.message || '发送失败'));
+  }
 }
 
 async function secConfirmEmail() {
@@ -1607,14 +1658,18 @@ async function secConfirmEmail() {
 }
 
 async function secTestSmtp() {
+  var body = secSmtpForm();
+  var to = ((document.getElementById('sec-new-email') || {}).value || '').trim();
+  if (to) body.security_email = to;          // F1：界面上的安全邮箱优先于已保存值
+  if (!secSmtpReady(body)) {
+    secSet('sec-smtp-status', '❌ 请先在本区填写发送邮箱与客户端专用密码');
+    return;
+  }
+  if (!to && !SEC.hasSecurityEmail) {
+    secSet('sec-smtp-status', '❌ 请先在 ② 填写安全邮箱（测试信要发到这个地址）');
+    return;
+  }
   secSet('sec-smtp-status', '测试中（最长约 12 秒）...');
-  var body = {
-    host: (document.getElementById('sec-smtp-host') || {}).value || '',
-    port: (document.getElementById('sec-smtp-port') || {}).value || '',
-    tls_mode: (document.getElementById('sec-smtp-tls') || {}).value || 'ssl',
-    user: (document.getElementById('sec-smtp-user') || {}).value || '',
-    password: (document.getElementById('sec-smtp-pass') || {}).value || ''
-  };
   var data = await secApi('/api/security/smtp/test', body);
   if (data.success) {
     secSet('sec-smtp-status', '✅ 测试邮件已发送，请到收件箱查收');
@@ -1628,13 +1683,11 @@ async function secTestSmtp() {
 }
 
 async function secSaveSmtp() {
-  var body = {
-    host: (document.getElementById('sec-smtp-host') || {}).value || '',
-    port: (document.getElementById('sec-smtp-port') || {}).value || '',
-    tls_mode: (document.getElementById('sec-smtp-tls') || {}).value || 'ssl',
-    user: (document.getElementById('sec-smtp-user') || {}).value || '',
-    password: (document.getElementById('sec-smtp-pass') || {}).value || ''
-  };
+  var body = secSmtpForm();
+  if (!body.user) {
+    secSet('sec-smtp-status', '❌ 请填写发送邮箱（完整地址）');
+    return;
+  }
   var data = await secApi('/api/security/smtp/save', body);
   secSet('sec-smtp-status', data.message || '');
   if (data.success) {

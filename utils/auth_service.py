@@ -18,6 +18,7 @@
     为什么不写进 /data/teslausb-web.json：那份文件由 config_manager 的 dataclass
     整体重写，任何不在 dataclass 里的字段都会被下一次 save_config() 抹掉。
 """
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -863,18 +864,54 @@ PENDING_EMAIL_TTL = 600
 PENDING_EMAIL_TRIES = 3
 
 
-def start_email_change(new_email: str, ip: str, ua: str) -> Dict[str, Any]:
-    """向**新邮箱**发测试码。要求：调用方已校验本地网络 + 已登录 + reauth。"""
+def start_email_change(new_email: str, ip: str, ua: str,
+                       smtp_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """向**新邮箱**发绑定验证码。要求：调用方已校验本地网络 + 已登录 + reauth。
+
+    smtp_override（F1）：设置页里**当前输入**的 SMTP 表单值。首次配置时 SMTP 还没保存，
+    若只读已保存配置，用户会卡在「发码要求先保存 SMTP，保存又要求邮箱先验证」的死锁里。
+    override 只用于本次发信、**不落盘**（与 /api/security/smtp/test 行为一致）。
+
+    F0：这里必须发**含验证码**的邮件。旧实现调 _send_test()，那是一封"通道测试"信，
+    正文里没有验证码 → 用户永远无法回填 → 安全邮箱永远存不上。
+    """
+    from utils.mailer import is_valid_email, send_email_code
+
     new_email = (new_email or "").strip()
-    if not new_email or "@" not in new_email or len(new_email) > 254:
-        return {"ok": False, "error_code": 4012, "message": "邮箱格式不正确"}
+    if not new_email:
+        return {"ok": False, "error_code": 4012, "message": "请先填写要接收验证码的安全邮箱"}
+    if not is_valid_email(new_email):
+        return {"ok": False, "error_code": 4012,
+                "message": "邮箱格式不正确，请填完整地址（例如 someone@example.com）"}
+
     cfg = load_config()
-    smtp_user = ((cfg.get("smtp") or {}).get("user") or "").strip()
+    # F6：深拷贝，避免 probe_cfg["smtp"] 与 cfg["smtp"] 共享同一个 dict
+    smtp = copy.deepcopy(cfg.get("smtp") or {})
+    for k in ("host", "port", "tls_mode", "user", "from_addr", "password"):
+        v = (smtp_override or {}).get(k)
+        if v not in (None, ""):
+            smtp[k] = v
+
+    smtp_user = (smtp.get("user") or "").strip()
     if smtp_user and smtp_user.lower() == new_email.lower():
         return {"ok": False, "error_code": 4012,
                 "message": "安全邮箱不能与发送邮箱相同（否则邮箱失守即等于双通道同时失守）"}
+    if not smtp_user or not smtp.get("password"):
+        return {"ok": False, "error_code": 4012, "error_type": "config",
+                "message": "请先在 ① 填写发送邮箱与客户端专用密码（填好即可发码，不必先保存）"}
 
     code = "%06d" % secrets.randbelow(1000000)
+    probe_cfg = copy.deepcopy(cfg)
+    probe_cfg["smtp"] = smtp
+    probe_cfg["security_email"] = new_email
+    result = send_email_code(probe_cfg, code, PENDING_EMAIL_TTL, purpose="email_change")
+    if not result.get("ok"):
+        audit("email_change_send_failed", ip=ip, ua=ua, to=mask_email(new_email),
+              error_type=result.get("error_type"))
+        return {"ok": False, "error_code": 4006, "message": result.get("message"),
+                "error_type": result.get("error_type")}
+
+    # 发信成功才落 pending：失败时不留一个"用户从没收到过码"的待确认状态
     with _locked():
         rt = _load_runtime()
         rt["pending_email"] = {
@@ -886,16 +923,6 @@ def start_email_change(new_email: str, ip: str, ua: str) -> Dict[str, Any]:
             "tries": 0,
         }
         _save_runtime(rt)
-
-    from utils.mailer import _send_test
-    probe_cfg = dict(cfg)
-    probe_cfg["security_email"] = new_email
-    result = _send_test(probe_cfg, new_email)
-    if not result.get("ok"):
-        audit("email_change_send_failed", ip=ip, ua=ua, to=mask_email(new_email),
-              error_type=result.get("error_type"))
-        return {"ok": False, "error_code": 4006, "message": result.get("message"),
-                "error_type": result.get("error_type")}
     audit("email_change_request", ip=ip, ua=ua, to=mask_email(new_email))
     return {"ok": True, "error_code": 0, "message": "测试码已发送至新邮箱，请查收并回填",
             "sent_to": mask_email(new_email), "expires_in": PENDING_EMAIL_TTL}

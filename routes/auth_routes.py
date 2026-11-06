@@ -292,27 +292,44 @@ def smtp_save():
     cfg = auth.load_config()
     smtp = dict(cfg.get("smtp") or {})
 
-    host = (body.get("host") or smtp.get("host") or "").strip()
+    def _pick(key, default=""):
+        """F4：字段出现在请求里就用它的值（含空串），只有完全没提交才回退到已保存值。
+
+        旧写法 `body.get(k) or smtp.get(k)` 会让"清空输入框后保存"变成
+        "静默沿用旧值"——用户以为清空了，其实没清。
+        """
+        if key in body and body.get(key) is not None:
+            return body.get(key)
+        v = smtp.get(key)
+        return default if v is None else v
+
+    from utils.mailer import is_valid_email
+
+    host = str(_pick("host", "")).strip()
     try:
-        port = int(body.get("port") or smtp.get("port") or 465)
+        port = int(_pick("port", 465) or 465)
     except (TypeError, ValueError):
         return _err(4012, "端口必须是数字", 400)
     if not host or len(host) > 253:
-        return _err(4012, "SMTP 服务器地址不合法", 400)
+        return _err(4012, "请填写 SMTP 服务器地址（腾讯企业邮：smtp.exmail.qq.com）", 400)
     if not (1 <= port <= 65535):
-        return _err(4012, "端口超出范围", 400)
-    tls_mode = (body.get("tls_mode") or smtp.get("tls_mode") or "ssl").lower()
+        return _err(4012, "端口超出范围（465 或 587）", 400)
+    tls_mode = str(_pick("tls_mode", "ssl")).lower()
     if tls_mode not in ("ssl", "starttls", "none"):
         return _err(4012, "TLS 模式不合法", 400)
-    user = (body.get("user") or smtp.get("user") or "").strip()
-    from_addr = (body.get("from_addr") or smtp.get("from_addr") or user).strip()
-    if "@" not in user or "@" not in from_addr:
-        return _err(4012, "发送邮箱必须是完整邮箱地址", 400)
+    user = str(_pick("user", "")).strip()
+    if not user:
+        return _err(4012, "请填写发送邮箱（完整地址，例如 someone@example.com）", 400)
+    if not is_valid_email(user):
+        return _err(4012, "发送邮箱格式不正确：需要 local@domain.tld（例如 someone@example.com）", 400)
+    from_addr = str(_pick("from_addr", "")).strip() or user
+    if not is_valid_email(from_addr):
+        return _err(4012, "发件人地址格式不正确（需为完整邮箱）", 400)
     if user.lower() == (cfg.get("security_email") or "").strip().lower():
         return _err(4012, "发送邮箱不能与安全邮箱相同", 400)
-    password = body.get("password") or smtp.get("password") or ""
+    password = str(_pick("password", "") or "")
     if not password:
-        return _err(4012, "请填写发送邮箱密码（企业邮需用 16 位客户端专用密码）", 400)
+        return _err(4012, "请填写发送邮箱的客户端专用密码（企业邮为 16 位，不是登录密码）", 400)
 
     smtp.update({"host": host, "port": port, "tls_mode": tls_mode,
                  "user": user, "from_addr": from_addr, "password": password})
@@ -328,7 +345,9 @@ def email_start():
     if not ok:
         return resp
     body = _json()
-    result = auth.start_email_change(body.get("email", ""), _client_ip(), _ua())
+    # F1：把设置页当前的 SMTP 表单值一起带进来（首次配置时 config 里还没有它）
+    override = body.get("smtp") if isinstance(body.get("smtp"), dict) else None
+    result = auth.start_email_change(body.get("email", ""), _client_ip(), _ua(), override)
     if result.get("ok"):
         return _ok({k: v for k, v in result.items() if k not in ("ok", "error_code", "message")},
                    result.get("message", "已发送"))
