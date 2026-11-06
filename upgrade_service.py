@@ -14,6 +14,7 @@ import tarfile
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 from datetime import datetime
 import config
@@ -22,7 +23,12 @@ DEPLOY_BASE = "/opt/radxa_data"
 SYMLINK = os.path.join(DEPLOY_BASE, "teslausb")
 BACKUP_DIR = os.path.join(DEPLOY_BASE, "teslausb-backups")  # 旧版目录级备份（v0.3.1.35 起废弃，仅迁移/兼容扫描）
 BAK_DIR = os.path.join(DEPLOY_BASE, "teslausb-bak")         # v0.3.1.35：运行版本压缩包备份（tar.gz + .sha256）
-BAK_KEEP = 10                                                # teslausb-bak 保留压缩包数量
+BAK_KEEP = 5                                                 # teslausb-bak 保留压缩包数量（v0.3.1.74：10→5）
+VERSION_DIR_KEEP = 5                                         # 版本目录保留数量（v0.3.1.74）
+SHARED_DIR = os.path.join(DEPLOY_BASE, "shared")             # 跨版本共享目录（v0.3.1.74）
+SHARED_THUMBNAILS = os.path.join(SHARED_DIR, "thumbnails")   # 缩略图唯一存放位置
+KEEP_TMP_PREFIX = "upgrade-keep-"                            # 升级临时目录前缀（沿用 /tmp）
+KEEP_TMP_MIN_AGE = 300                                       # 清理遗留临时目录的最小年龄（秒）
 VERSION_FILE = os.path.join(config.DATA_DIR, "version_history.json")
 
 # 备份打包时排除的运行时产物（白名单：仅打包代码 + config + data）
@@ -83,12 +89,15 @@ def get_current_version_dir():
 def _save_user_data(base_dir):
     """保存 config/、data/ 和 static/thumbnails/ 目录（升级时保留用户配置和缩略图）
 
-    永久保护：无论调用方是否理解 3 元组返回值，static/thumbnails/ 始终会被保存。
-    这样即使升级前运行的是旧版（2 元组版），缩略图也不会丢——因为新代码接管后
-    _restore_user_data 会自动从 saved_thumbs 恢复。
+    永久保护：config/、data/、static/thumbnails/ 始终会被保存/恢复。
+
+    v0.3.1.74：
+      · 返回 4 元组 (tmpd, cfg, data, thumbs)，调用方**必须在 finally 里**
+        shutil.rmtree(tmpd)，否则每次升级泄漏一整份备份（曾泄漏 3 份 / 5.5G）；
+      · 若 static/thumbnails 已是指向共享目录的 symlink，只复制**链接本身**，
+        不再 copytree 上万个文件（升级耗时与磁盘占用双双下降）。
     """
-    import tempfile
-    tmpd = tempfile.mkdtemp(prefix='upgrade-keep-')
+    tmpd = tempfile.mkdtemp(prefix=KEEP_TMP_PREFIX)
     saved_cfg = None
     saved_data = None
     saved_thumbs = None
@@ -102,13 +111,26 @@ def _save_user_data(base_dir):
         if os.path.isdir(old_data):
             saved_data = os.path.join(tmpd, 'data')
             shutil.copytree(old_data, saved_data, symlinks=True)
-        # 关键：缩略图保存是"路径驱动"的，不依赖调用者是否解包第三元素
-        if os.path.isdir(old_thumbs):
-            saved_thumbs = os.path.join(tmpd, 'thumbnails')
+        # 关键：缩略图保存是"路径驱动"的，不依赖调用者是否解包第四元素
+        saved_thumbs = os.path.join(tmpd, 'thumbnails')
+        if os.path.islink(old_thumbs):
+            # 已共享 → 只复制链接（瞬时），_restore_user_data 会按链接重建
+            os.symlink(os.readlink(old_thumbs), saved_thumbs)
+        elif os.path.isdir(old_thumbs):
             shutil.copytree(old_thumbs, saved_thumbs, symlinks=True)
+        else:
+            saved_thumbs = None
     except Exception:
         pass
-    return saved_cfg, saved_data, saved_thumbs
+    return tmpd, saved_cfg, saved_data, saved_thumbs
+
+
+def _release_keep_tmp(ctx):
+    """删除本次升级的临时备份目录（幂等；失败不影响升级结果）。"""
+    tmpd = (ctx or {}).get("keep_tmpd")
+    if tmpd:
+        shutil.rmtree(tmpd, ignore_errors=True)
+        ctx["keep_tmpd"] = None
 
 
 def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
@@ -123,11 +145,23 @@ def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
         if os.path.exists(dest):
             shutil.rmtree(dest)
         shutil.copytree(saved_data, dest, symlinks=True)
-    if saved_thumbs and os.path.isdir(saved_thumbs):
-        dest = os.path.join(target_dir, 'static', 'thumbnails')
-        if os.path.exists(dest):
-            shutil.rmtree(dest)
-        shutil.copytree(saved_thumbs, dest, symlinks=True)
+    dest_thumbs = os.path.join(target_dir, 'static', 'thumbnails')
+    if saved_thumbs and os.path.islink(saved_thumbs):
+        # 共享目录模式：恢复成同样的 symlink（不要 copytree，否则又把 1.8G 复制一遍）
+        if os.path.islink(dest_thumbs) or os.path.exists(dest_thumbs):
+            try:
+                if os.path.islink(dest_thumbs) or os.path.isfile(dest_thumbs):
+                    os.unlink(dest_thumbs)
+                else:
+                    shutil.rmtree(dest_thumbs)
+            except OSError:
+                pass
+        os.makedirs(os.path.dirname(dest_thumbs), exist_ok=True)
+        os.symlink(os.readlink(saved_thumbs), dest_thumbs)
+    elif saved_thumbs and os.path.isdir(saved_thumbs):
+        if os.path.exists(dest_thumbs):
+            shutil.rmtree(dest_thumbs)
+        shutil.copytree(saved_thumbs, dest_thumbs, symlinks=True)
 
 
 def _write_upgrade_marker(target_dir, version):
@@ -156,11 +190,23 @@ def _write_upgrade_marker(target_dir, version):
         return False
 
 
-def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
+def do_upgrade(new_version, asset_url, sha256_expected=None, sig_url=None):
     """一键升级。返回 (success, message)
 
     步骤: 备份 → 下载 → SHA-256 → Ed25519验签 → 解压 → venv → 切symlink → 记录版本
+          → 缩略图共享 → 清理旧版本目录 → 清理遗留临时目录
+
+    v0.3.1.74：真正实现移到 _do_upgrade_impl，本函数只保证**临时备份目录一定被删**
+    （成功、失败、异常都走 finally）。
     """
+    ctx = {}
+    try:
+        return _do_upgrade_impl(ctx, new_version, asset_url, sha256_expected, sig_url)
+    finally:
+        _release_keep_tmp(ctx)
+
+
+def _do_upgrade_impl(ctx, new_version, asset_url, sha256_expected=None, sig_url=None):
     steps = []
 
     # ── 0. 前置检查 ──
@@ -232,7 +278,8 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     # ── 5. 保存旧版本数据（升级后恢复，避免 config/wecom.json 等丢失）──
     _write_progress("保存配置", 66)
     steps.append("保存配置...")
-    saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    ctx["keep_tmpd"] = keep_tmpd   # finally 里统一删除（v0.3.1.74）
 
     # ── 6. 解压并安装 ──
     _write_progress("解压安装", 72)
@@ -326,6 +373,8 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
     elif _lg_ok is True:
         steps.append(_lg_msg)
 
+    _post_upgrade_storage(new_dir, steps)
+
     _write_progress("等待重启生效", 98)
     steps.append("等待重启生效")  # 重启由 API 层异步执行，避免杀死 HTTP 响应
     # S4：成功返回前清除进度文件（防残留 98% 脏状态导致 progress API 误报 running）
@@ -334,7 +383,18 @@ def do_upgrade(new_version, asset_url, sha256_expected, sig_url=None):
 
 
 def do_upgrade_from_tarball(tarball_path, new_version):
-    """从本地 tar.gz 升级（跳过下载+校验，调用方已做）。返回 (success, message)"""
+    """从本地 tar.gz 升级（跳过下载+校验，调用方已做）。返回 (success, message)
+
+    v0.3.1.74：同 do_upgrade，临时备份目录由 finally 保证删除。
+    """
+    ctx = {}
+    try:
+        return _do_upgrade_from_tarball_impl(ctx, tarball_path, new_version)
+    finally:
+        _release_keep_tmp(ctx)
+
+
+def _do_upgrade_from_tarball_impl(ctx, tarball_path, new_version):
     steps = []
     import re as _re
     if not _re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', str(new_version)):
@@ -355,7 +415,8 @@ def do_upgrade_from_tarball(tarball_path, new_version):
     steps[-1] = f"已备份到 {msg}" if ok else f"备份警告: {msg}（继续升级）"
 
     # 保存旧版本 config/data
-    saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    ctx["keep_tmpd"] = keep_tmpd   # finally 里统一删除（v0.3.1.74）
 
     # 解压安装（内联，不调用 _extract_and_setup——运行中进程可能用旧版）
     steps.append("解压安装...")
@@ -426,6 +487,8 @@ def do_upgrade_from_tarball(tarball_path, new_version):
         steps.append(f"post-install 警告: {_lg_msg}")
     elif _lg_ok is True:
         steps.append(_lg_msg)
+
+    _post_upgrade_storage(new_dir, steps)
 
     steps.append("等待重启生效")
     return True, "\n".join(steps)
@@ -1273,6 +1336,232 @@ def _backup_current():
     if ok:
         return True, f"teslausb-bak/{os.path.basename(msg)}"
     return False, msg
+
+
+# ═══════════════════════════════════════════════════════════════
+# 存储治理（v0.3.1.74）
+#   缩略图共享目录 / 旧版本目录清理 / 遗留临时目录清理
+#   安全原则：只碰 DEPLOY_BASE 下**名字严格匹配版本号**的真实目录，
+#            永不删除符号链接、当前运行目录、以及 shared/ teslausb-bak/ 等特殊目录。
+# ═══════════════════════════════════════════════════════════════
+_VERSION_DIR_RE = re.compile(r'^teslausb-v(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$')
+# 这些名字即使匹配规则也绝不参与清理
+_VERSION_DIR_NEVER = {"shared", "teslausb", "teslausb-bak", "teslausb-backups"}
+
+
+def _version_dir_key(name):
+    """teslausb-v0.3.1.72 → (0,3,1,72)；不匹配返回 None（= 非版本目录，永不删除）。"""
+    m = _VERSION_DIR_RE.match(name or "")
+    if not m:
+        return None
+    return tuple(int(x or 0) for x in m.groups())
+
+
+def _dir_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _merge_into_shared(src, dst):
+    """把 src 下**共享目录里还没有的**条目搬进 dst（同文件系统下 os.replace 瞬时完成）。
+
+    返回 (moved, skipped)。skipped = 共享目录已存在同名项（重复副本），
+    调用方随后 rmtree(src) 即可去重，不会覆盖共享目录里的现有文件。
+    """
+    moved = skipped = 0
+    os.makedirs(dst, exist_ok=True)
+    for entry in os.scandir(src):
+        target = os.path.join(dst, entry.name)
+        if os.path.lexists(target):
+            skipped += 1
+            continue
+        try:
+            os.replace(entry.path, target)
+            moved += 1
+        except OSError:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.copytree(entry.path, target, dirs_exist_ok=True, symlinks=True)
+                else:
+                    shutil.copy2(entry.path, target)
+                moved += 1
+            except Exception:
+                skipped += 1
+    return moved, skipped
+
+
+def ensure_shared_thumbnails(version_dir=None):
+    """把 <version_dir>/static/thumbnails 统一成指向共享目录的 symlink（幂等）。
+
+    三种情形：
+      · 已是 -> SHARED_THUMBNAILS 的链接：直接返回；
+      · 是真实目录：内容并入共享目录（同名跳过）后删除，再建链接；
+      · 链到别处：thumbnails 只是可再生缓存，改指共享目录。
+
+    返回 (ok, message)。
+    """
+    version_dir = version_dir or get_current_version_dir()
+    if not version_dir or not os.path.isdir(version_dir):
+        return False, "版本目录不存在：%r" % (version_dir,)
+    link = os.path.join(version_dir, "static", "thumbnails")
+    shared_real = os.path.realpath(SHARED_THUMBNAILS)
+    try:
+        os.makedirs(SHARED_THUMBNAILS, exist_ok=True)
+    except OSError as e:
+        return False, "创建共享目录失败: %s" % e
+
+    if os.path.islink(link):
+        if os.path.realpath(link) == shared_real:
+            return True, "已指向共享目录"
+        try:
+            os.unlink(link)
+        except OSError as e:
+            return False, "替换旧链接失败: %s" % e
+    elif os.path.isdir(link):
+        try:
+            moved, skipped = _merge_into_shared(link, SHARED_THUMBNAILS)
+            shutil.rmtree(link)
+        except OSError as e:
+            return False, "迁移旧缩略图失败: %s" % e
+        try:
+            os.symlink(SHARED_THUMBNAILS, link)
+        except OSError as e:
+            return False, "创建链接失败: %s" % e
+        return True, "已迁移 %d 个文件（去重 %d 个）到共享目录" % (moved, skipped)
+
+    try:
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(SHARED_THUMBNAILS, link)
+    except OSError as e:
+        return False, "创建链接失败: %s" % e
+    return True, "已建立指向共享目录的链接"
+
+
+def prune_version_dirs(keep=VERSION_DIR_KEEP, protect=None):
+    """删除更早的版本目录，保留最近 keep 个。
+
+    安全护栏（任一不满足就跳过该条目，绝不抛异常）：
+      1. 只处理 DEPLOY_BASE 下**真实目录**且名字严格匹配 teslausb-v<数字>.<数字>.<数字>[.<数字>]
+         —— tim/、shared/、teslausb-web/、vmanual-upload/ 等一律不碰；
+      2. 路径 realpath 的父目录必须就是 DEPLOY_BASE（防 ../ 穿越）；
+      3. 符号链接一律跳过；SYMLINK 当前指向的目录 + protect 列表永不删除；
+      4. keep <= 0 时直接返回（防误配置成"全删"）。
+
+    返回 (removed_names, freed_bytes, skipped_names)。
+    """
+    if not isinstance(keep, int) or keep <= 0:
+        return [], 0, []
+    base = os.path.realpath(DEPLOY_BASE)
+    if not os.path.isdir(base):
+        return [], 0, []
+
+    prot = set()
+    for p in (protect or []):
+        if p:
+            try:
+                prot.add(os.path.realpath(p))
+            except OSError:
+                pass
+    try:
+        if os.path.islink(SYMLINK):
+            prot.add(os.path.realpath(SYMLINK))
+    except OSError:
+        pass
+
+    entries = []
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return [], 0, []
+    for name in names:
+        if name in _VERSION_DIR_NEVER:
+            continue
+        full = os.path.join(base, name)
+        key = _version_dir_key(name)
+        if key is None:
+            continue                      # 非版本目录 → 永不删除
+        if os.path.islink(full) or not os.path.isdir(full):
+            continue                      # 符号链接 / 非目录 → 跳过
+        try:
+            if os.path.dirname(os.path.realpath(full)) != base:
+                continue                  # 父目录不是 DEPLOY_BASE → 跳过
+        except OSError:
+            continue
+        entries.append((key, name, full))
+
+    entries.sort(key=lambda x: x[0], reverse=True)
+    removed, freed, skipped = [], 0, []
+    for idx, (_key, name, full) in enumerate(entries):
+        if idx < keep:
+            continue                      # 最近 keep 个保留
+        if os.path.realpath(full) in prot:
+            skipped.append(name + "(在用)")
+            continue
+        size = _dir_size(full)
+        try:
+            shutil.rmtree(full)
+        except Exception as e:
+            skipped.append("%s(%s)" % (name, e))
+            continue
+        removed.append(name)
+        freed += size
+    return removed, freed, skipped
+
+
+def cleanup_stale_temp(min_age=KEEP_TMP_MIN_AGE):
+    """清理 /tmp 下**遗留**的 upgrade-keep-*（保留正在使用的：年龄 < min_age）。"""
+    removed = []
+    tmp = tempfile.gettempdir()
+    now = time.time()
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return removed
+    for name in names:
+        if not name.startswith(KEEP_TMP_PREFIX):
+            continue
+        p = os.path.join(tmp, name)
+        try:
+            if now - os.path.getmtime(p) < min_age:
+                continue
+        except OSError:
+            continue
+        try:
+            shutil.rmtree(p, ignore_errors=True)
+            removed.append(name)
+        except OSError:
+            pass
+    return removed
+
+
+def _post_upgrade_storage(new_dir, steps):
+    """升级收尾：缩略图共享 + 旧版本清理 + 遗留临时目录清理（每步都不阻断升级）。"""
+    try:
+        ok, msg = ensure_shared_thumbnails(new_dir)
+        steps.append(("缩略图共享: " + msg) if ok else ("缩略图共享警告: " + msg))
+    except Exception as e:
+        steps.append("缩略图共享异常: %s" % e)
+    try:
+        removed, freed, skipped = prune_version_dirs(keep=VERSION_DIR_KEEP, protect=[new_dir])
+        if removed:
+            steps.append("已清理旧版本 %d 个（释放 %.1f MB）: %s"
+                         % (len(removed), freed / 1024.0 / 1024.0, ", ".join(removed)))
+        if skipped:
+            steps.append("未清理: %s" % ", ".join(skipped))
+    except Exception as e:
+        steps.append("旧版本清理异常: %s" % e)
+    try:
+        stale = cleanup_stale_temp()
+        if stale:
+            steps.append("已清理遗留临时目录 %d 个" % len(stale))
+    except Exception as e:
+        steps.append("临时目录清理异常: %s" % e)
 
 
 def _prune_bak(keep=BAK_KEEP):
