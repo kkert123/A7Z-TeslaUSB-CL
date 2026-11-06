@@ -738,8 +738,14 @@ def check_session(sess: Dict[str, Any]) -> Tuple[bool, str]:
         return False, "kicked"
 
     now = time.time()
+    if "last_act" not in sess:
+        # 兼容本版之前建立的会话：它们从没记过"最后活动时间"，
+        # 若拿登录时间当基准，正在操作的用户也会被误判为"长时间未操作"。
+        # 从这一刻开始计时，不做回溯。
+        sess["last_act"] = now
+        return True, ""
     try:
-        last = float(sess.get("last_act") or sess.get("auth_at") or 0)
+        last = float(sess.get("last_act") or 0)
     except (TypeError, ValueError):
         last = 0.0
     ttl = session_idle_seconds()
