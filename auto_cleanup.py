@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -269,6 +270,85 @@ def detect_folders(partition_path: str) -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════
+# 清理历史的原子读写（教训 M122）
+# ═══════════════════════════════════════════════════════════
+# 旧实现有两份、都在用 open(path,"w") + json.dump：文件先被截断成 0 字节，
+# 再一点点写回。两个写者并发时，一方 dump 到 8KB 处被另一方 truncate，
+# 产物就断在 char 8200（= 8192 + 8）—— 实测损坏位置正是这里。
+# 现在统一到「先写临时文件 + os.replace 原子替换」，读坏了就隔离重建。
+
+_HISTORY_STATE = {"corrupted": False, "quarantine": ""}
+
+
+def atomic_write_json(path: str, obj) -> None:
+    """原子写 JSON：同目录临时文件 + fsync + os.replace。"""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    # 前缀刻意不用 .tmp_ / *.tmp：那两类是 cleanup_temp_files 的清理目标，
+    # 同目录并发清理时有被当垃圾删掉的可能（虽然还有 mtime 保护）。
+    fd, tmp = tempfile.mkstemp(
+        prefix=".atomic-" + os.path.basename(path) + ".", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, 0o644)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def load_cleanup_history(path: Optional[str] = None) -> List[Dict]:
+    """读清理历史。文件损坏时隔离为 .corrupt-<ts> 并返回空列表（不抛异常）。
+
+    读侧必须假设「可能读到坏内容」（M114）：宁可丢历史，也不能让页面 500。
+    """
+    path = path or CLEANUP_LOG_FILE
+    _HISTORY_STATE["corrupted"] = False
+    _HISTORY_STATE["quarantine"] = ""
+    try:
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError) as exc:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        quarantine = "%s.corrupt-%s" % (path, stamp)
+        try:
+            os.replace(path, quarantine)
+            _HISTORY_STATE["corrupted"] = True
+            _HISTORY_STATE["quarantine"] = quarantine
+            logger.error("清理历史损坏（%s），已隔离到 %s 并重建空历史", exc, quarantine)
+        except OSError as exc2:
+            logger.error("清理历史损坏（%s），隔离失败: %s", exc, exc2)
+        return []
+
+
+def append_cleanup_history(entry: Dict, path: Optional[str] = None,
+                           keep: int = 50) -> bool:
+    """把一条记录插到最前面并原子落盘。返回是否写入成功。"""
+    path = path or CLEANUP_LOG_FILE
+    try:
+        history = load_cleanup_history(path)
+        history.insert(0, entry)
+        atomic_write_json(path, history[:keep] if keep > 0 else history)
+        return True
+    except Exception as exc:      # noqa: BLE001 — 落盘失败不能影响清理结果
+        logger.error("保存清理历史失败: %s", exc)
+        return False
+
+
+# ═══════════════════════════════════════════════════════════
 # AutoCleaner 核心类
 # ═══════════════════════════════════════════════════════════
 
@@ -279,6 +359,8 @@ class AutoCleaner:
         self.dry_run = dry_run
         self.policies = load_policies()
         self.uploaded_folders: Set[str] = set()
+        # 本轮已确认「非空」的父目录 —— O(n²) 防护，见 _prune_empty_parents
+        self._nonempty_parents: Set[str] = set()
         self.stats = {
             "deleted_files": 0,
             "freed_bytes": 0,
@@ -587,6 +669,48 @@ class AutoCleaner:
     # execute_cleanup
     # ═════════════════════════════════════════════════════════
 
+    def _dir_is_empty(self, path: str) -> bool:
+        """O(1) 判断目录是否为空。
+
+        旧实现用 ``not os.listdir(path)``：它要把**整个目录**读出来再判断，
+        耗时随目录项数线性增长（真机实测 23341 项 = 16.91 ms）。而这个判断
+        又在「每删一个文件」之后被调用，于是删 n 个文件 = n × O(n) = O(n²)：
+        23341 × 16.91 ms = 395 秒，与 2026-11-07 那次 6 分 35 秒的清理严丝合缝。
+        ``os.scandir`` 只读一条目录项就能判定，与目录大小无关。
+        """
+        try:
+            with os.scandir(path) as it:
+                return next(it, None) is None
+        except OSError:
+            return False
+
+    def _prune_empty_parents(self, parent: str, levels: int = 3) -> None:
+        """删掉因本次删除而变空的父目录（最多上溯 levels 层）。
+
+        同一目录在本轮内只判定一次（``_nonempty_parents``）：缩略图这种
+        几万个文件平铺在同一目录的场景，第一次判定为非空后就永不重复探测。
+        """
+        seen = getattr(self, "_nonempty_parents", None)
+        if seen is None:
+            seen = set()
+            self._nonempty_parents = seen
+        for _ in range(levels):
+            if not parent or parent == "/":
+                break
+            if parent in seen:
+                break
+            try:
+                if not self._dir_is_empty(parent):
+                    seen.add(parent)
+                    break
+                if not self.dry_run:
+                    os.rmdir(parent)
+                parent = os.path.dirname(parent)
+                seen.discard(parent)      # 上层刚被掏空，需要重新判定
+            except OSError:
+                seen.add(parent)
+                break
+
     def _delete_file_safe(self, fpath: str) -> Tuple[bool, int]:
         """安全删除文件 + 清理空父目录。返回 (成功, 文件大小)"""
         try:
@@ -598,20 +722,14 @@ class AutoCleaner:
             fsize = os.path.getsize(fpath)
             if not self.dry_run:
                 os.remove(fpath)
-                # 尝试删除空父目录链
-                parent = os.path.dirname(fpath)
-                for _ in range(3):
-                    if not parent or parent == "/":
-                        break
-                    try:
-                        if os.path.isdir(parent) and not os.listdir(parent):
-                            os.rmdir(parent)
-                            parent = os.path.dirname(parent)
-                        else:
-                            break
-                    except OSError:
-                        break
+                # 尝试删除空父目录链（O(1) 判定，见 _dir_is_empty）
+                self._prune_empty_parents(os.path.dirname(fpath))
             return True, fsize
+        except FileNotFoundError:
+            # 并发清理时另一份已把该文件删掉 —— 正常竞态，计 missing，
+            # 不再打成 ERROR（旧实现在 395 秒里刷了几十条假错误）。
+            self.stats["missing_files"] = self.stats.get("missing_files", 0) + 1
+            return False, 0
         except PermissionError as e:
             self.stats["errors"].append(f"权限不足 {fpath}: {e}")
             if self.stats.get("missing_files", 0) > 100:
@@ -646,6 +764,7 @@ class AutoCleaner:
             "breakdown": {},
         }
 
+        self._nonempty_parents = set()   # 每轮重置：目录可能因本轮删除而变空
         logger.info("=== 清理执行开始 ===")
         if self.dry_run:
             logger.info("[DRY RUN 模式 - 不会实际删除文件]")
@@ -777,6 +896,7 @@ class AutoCleaner:
 
     def cleanup_previews(self) -> int:
         """清理过期的预览图（按 mtime 年龄 + 孤儿检测）"""
+        self._nonempty_parents = set()
         freed = 0
         freed += self._cleanup_previews_by_age()
         freed += self._cleanup_orphan_previews()
@@ -877,7 +997,8 @@ class AutoCleaner:
         # 数据目录下的 .tmp 文件
         if os.path.isdir(DATA_DIR):
             for fname in os.listdir(DATA_DIR):
-                if fname.startswith(".tmp_") or fname.endswith(".tmp"):
+                if (fname.startswith(".tmp_") or fname.startswith(".atomic-")
+                        or fname.endswith(".tmp")):
                     fpath = os.path.join(DATA_DIR, fname)
                     try:
                         st = os.stat(fpath)
@@ -1126,19 +1247,8 @@ class AutoCleaner:
     # ═════════════════════════════════════════════════════════
 
     def _save_cleanup_history(self):
-        """保存清理历史记录"""
-        try:
-            os.makedirs(os.path.dirname(CLEANUP_LOG_FILE), exist_ok=True)
-            history = []
-            if os.path.exists(CLEANUP_LOG_FILE):
-                with open(CLEANUP_LOG_FILE, "r") as f:
-                    history = json.load(f)
-            history.insert(0, self.stats)
-            history = history[:50]  # 最多保留 50 条
-            with open(CLEANUP_LOG_FILE, "w") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"保存清理历史失败: {e}")
+        """保存清理历史记录（原子写，见 atomic_write_json / M122）"""
+        append_cleanup_history(self.stats, CLEANUP_LOG_FILE)
 
     @staticmethod
     def _fmt_bytes(size: int) -> str:

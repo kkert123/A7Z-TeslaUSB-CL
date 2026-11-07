@@ -350,6 +350,10 @@ function esc(s){
 }
 
 let _camMode='';
+// M122：清理执行中标记。必须跨 30 秒轮询保持，否则按钮会被
+// applyCleanupMode 重新点亮 → 用户再点一次就并发跑两份清理。
+let _cleanupRunning=false;
+let _cleanupTimer=null;
 
 // 根据当前 cam 模式控制「立即执行清理」按钮与提示
 function applyCleanupMode(mode){
@@ -372,8 +376,9 @@ function applyCleanupMode(mode){
     hint.style.color='var(--danger)';
     hint.textContent='⚠ cam 分区未挂载，无法清理。请确认 Tesla USB 已连接。';
   }else{
-    btn.disabled=false;
-    btn.title='';
+    // 清理正在执行时，不能被 30 秒轮询重新点亮（M122）
+    btn.disabled=_cleanupRunning;
+    btn.title=_cleanupRunning?'清理正在执行，请勿重复点击':'';
     hint.style.display='none';
     hint.textContent='';
   }
@@ -558,11 +563,15 @@ async function loadCleanupHistory(){
     if(!d.success) throw new Error(d.error||'API 返回失败');
     const hist=d.history||[];
     const el=document.getElementById('cleanup-history-list');
+    // M122：历史文件曾损坏 → 后端已隔离备份并重建，明确告知而不是静默变空
+    const resetNote=d.history_reset
+      ? '<div style="font-size:var(--text-sm);color:var(--warning);padding:var(--s2) 0;text-align:center">⚠ 原清理历史文件已损坏，已隔离为 .corrupt 备份并重建（旧记录可能不完整）</div>'
+      : '';
     if(!hist.length){
-      el.innerHTML='<div style="font-size:var(--text-sm);color:var(--text-muted);padding:var(--s2) 0;text-align:center">📭 暂无清理记录 — 系统尚未触发过自动或手动清理</div>';
+      el.innerHTML=resetNote+'<div style="font-size:var(--text-sm);color:var(--text-muted);padding:var(--s2) 0;text-align:center">📭 暂无清理记录 — 系统尚未触发过自动或手动清理</div>';
       return;
     }
-    el.innerHTML=hist.map(c=>{
+    el.innerHTML=resetNote+hist.map(c=>{
       // 修复：截断微秒，避免 new Date() 解析失败
       let ts='—';
       if(c.timestamp){
@@ -646,6 +655,8 @@ async function runCleanupPreview(){
 }
 
 async function runCleanupExecute(){
+  // 已经在跑就不再弹确认框：按钮被 30 秒轮询点亮后重复点击会并发跑两份清理（M122）
+  if(_cleanupRunning){return;}
   if(!confirm('确认立即执行清理？\n此操作将根据策略删除符合条件的文件，无法撤销！')){return;}
 
   const btn=document.getElementById('btn-execute');
@@ -653,15 +664,33 @@ async function runCleanupExecute(){
   const outText=document.getElementById('cleanup-output-text');
   const outTitle=document.getElementById('cleanup-output-title');
 
+  const t0=Date.now();
+  _cleanupRunning=true;
   btn.disabled=true;
-  btn.textContent='⚡ 执行中...';
+  btn.textContent='⚡ 执行中 0s';
   outTitle.textContent='执行结果';
   outDiv.style.display='block';
   outText.textContent='正在执行清理，请稍候...';
 
+  // 每秒刷新已用时；超过 30 秒明确提示"别重复点、别刷新"
+  _cleanupTimer=setInterval(()=>{
+    const sec=Math.floor((Date.now()-t0)/1000);
+    btn.textContent='⚡ 执行中 '+sec+'s';
+    if(sec>=30 && outText.textContent.indexOf('清理仍需时间')<0){
+      outText.textContent='正在执行清理，已用时 '+sec+' 秒。\n'
+        +'⚠ 清理仍需时间（删除大量缩略图或大文件时可能要数分钟），请勿重复点击，也不要刷新页面。';
+    }
+  },1000);
+
   try{
     const r=await fetch('/api/cleanup/execute',{method:'POST'});
     const d=await r.json();
+    // 409 = 另一次清理还在跑（另一个窗口/上一次没结束）。不是失败，如实告知即可。
+    if(r.status===409 && d.cleaning){
+      outTitle.textContent='已在执行中';
+      outText.textContent=d.output||d.error||'上一次清理仍在执行，请稍候';
+      return;
+    }
     let output=d.output||d.error||'（无输出）';
     const es=fmtErrs(d.errors);
     // 后端 output 里已经带了"错误信息（共 N 条…）"，避免重复贴一遍
@@ -670,6 +699,7 @@ async function runCleanupExecute(){
     if(d.success){
       // 刷新分区状态和历史
       setTimeout(()=>{loadCleanupPolicies();},1000);
+      loadCleanupHistory();      // 成功也要刷新历史（旧版只在失败分支刷新）
     }else{
       outTitle.textContent='执行失败';
       // 失败时同步模式状态（Present 只读 → 按钮禁用 + 切模式入口）
@@ -677,8 +707,12 @@ async function runCleanupExecute(){
       loadCleanupHistory();
     }
   }catch(e){
+    outTitle.textContent='执行失败';
     outText.textContent='请求失败: '+e.message;
   }finally{
+    clearInterval(_cleanupTimer);
+    _cleanupTimer=null;
+    _cleanupRunning=false;
     btn.textContent='⚡ 立即执行清理';
     // 不能无条件恢复可点击：Present/未挂载时按钮必须保持禁用
     btn.disabled=(_camMode==='present'||_camMode==='unmounted');

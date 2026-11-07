@@ -2,6 +2,7 @@
 from flask import Blueprint, jsonify, request, current_app
 import os
 import json
+import threading
 import time
 import subprocess
 from datetime import datetime
@@ -301,8 +302,119 @@ def api_cleanup_preview():
         return jsonify({'success': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
+# ── 清理执行的「单飞锁」（M122）───────────────────────────────────
+# 现象：页面按钮在清理进行中会被每 30 秒一次的 loadCleanupPolicies →
+# applyCleanupMode 重新置为可点，用户再点一次就并发跑了两份清理：
+# 两份同时删同一批文件 → 刷 [Errno 2] → 两个写者把历史文件写坏。
+# 双层锁：进程内 threading.Lock（快）+ /var/run/cleanup.lock 文件锁（跨进程）。
+_CLEANUP_LOCK = threading.Lock()
+_CLEANUP_LOCK_FILE = '/var/run/cleanup.lock'
+_CLEANUP_RUN_STATE = {'started_at': 0.0, 'fp': None}
+
+try:
+    import fcntl as _fcntl
+except ImportError:          # Windows 本地跑测试时没有 fcntl，退化为纯线程锁
+    _fcntl = None
+
+
+def _read_lock_started_at():
+    """读锁文件里的开始时间，用于告诉用户「已进行 N 秒」。"""
+    try:
+        with open(_CLEANUP_LOCK_FILE, 'r') as f:
+            return float(json.load(f).get('started_at') or 0)
+    except Exception:
+        return 0.0
+
+
+def _acquire_cleanup_lock():
+    """返回 (是否拿到, 已在进行的秒数)。不排队、不重入。"""
+    if not _CLEANUP_LOCK.acquire(blocking=False):
+        started = _CLEANUP_RUN_STATE.get('started_at') or 0
+        return False, int(time.time() - started) if started else 0
+
+    if _fcntl is not None:
+        fp = None
+        try:
+            fp = open(_CLEANUP_LOCK_FILE, 'w')
+        except OSError:
+            # 锁文件建不了（只读根分区/权限不足）→ 退化为纯线程锁。
+            # 这里必须 fail-open：把"建不了锁文件"当成"别人占着锁"会永久 409。
+            fp = None
+        if fp is not None:
+            try:
+                _fcntl.flock(fp.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                _CLEANUP_RUN_STATE['fp'] = fp
+            except OSError:
+                started = _read_lock_started_at()
+                try:
+                    fp.close()
+                except Exception:
+                    pass
+                _CLEANUP_LOCK.release()
+                return False, int(time.time() - started) if started else 0
+
+    _CLEANUP_RUN_STATE['started_at'] = time.time()
+    fp = _CLEANUP_RUN_STATE.get('fp')
+    if fp is not None:
+        try:
+            fp.seek(0)
+            fp.truncate()
+            json.dump({'pid': os.getpid(),
+                       'started_at': _CLEANUP_RUN_STATE['started_at']}, fp)
+            fp.flush()
+        except Exception:
+            pass
+    return True, 0
+
+
+def _release_cleanup_lock():
+    """释放锁并清掉锁文件内容（失败不影响主流程）。"""
+    fp = _CLEANUP_RUN_STATE.pop('fp', None)
+    _CLEANUP_RUN_STATE['started_at'] = 0.0
+    if fp is not None:
+        try:
+            fp.seek(0)
+            fp.truncate()
+            fp.flush()
+        except Exception:
+            pass
+        try:
+            fp.close()          # close 即释放 flock
+        except Exception:
+            pass
+    try:
+        _CLEANUP_LOCK.release()
+    except RuntimeError:
+        pass
+
+
 @cleanup_bp.route('/api/cleanup/execute', methods=['POST'])
 def api_cleanup_execute():
+    """执行清理（外层：单飞锁）。
+
+    已在执行时直接 409，不排队、不重入 —— 排队会让用户以为「没反应」，
+    重入会同时删同一批文件并把历史文件写坏。
+    """
+    ok, elapsed = _acquire_cleanup_lock()
+    if not ok:
+        if elapsed > 0:
+            msg = '上一次清理仍在执行（已进行 %d 秒），请勿重复点击' % elapsed
+        else:
+            msg = '上一次清理仍在执行，请勿重复点击'
+        return jsonify({
+            'success': False,
+            'cleaning': True,
+            'elapsed_seconds': elapsed,
+            'error': msg,
+            'output': '⚠ %s。\n   请等待其完成后刷新查看结果；本次未删除任何文件。' % msg,
+        }), 409
+    try:
+        return _cleanup_execute_impl()
+    finally:
+        _release_cleanup_lock()
+
+
+def _cleanup_execute_impl():
     """执行清理（v2 per-folder age/size/count 策略）"""
     try:
         import auto_cleanup
@@ -544,30 +656,32 @@ def api_cleanup_save_policy():
 
 
 def _save_cleanup_history(entry):
-    """保存清理历史记录"""
+    """保存清理历史记录。
+
+    M122：原来这里自带一份 open(w)+json.dump，而 auto_cleanup 里还有一份
+    写同一个文件 —— 两个写者 + 非原子写把文件截断在 char 8200（8KB 边界）。
+    现在统一委托给 auto_cleanup 的原子实现，失败会记日志（不再裸 except: pass）。
+    """
     try:
-        os.makedirs(os.path.dirname(CLEANUP_LOG), exist_ok=True)
-        history = []
-        if os.path.exists(CLEANUP_LOG):
-            with open(CLEANUP_LOG, 'r') as f:
-                history = json.load(f)
-        history.insert(0, entry)
-        # 最多保留 50 条
-        history = history[:50]
-        with open(CLEANUP_LOG, 'w') as f:
-            json.dump(history, f, indent=2)
-    except:
-        pass
+        import auto_cleanup as _ac
+        return _ac.append_cleanup_history(entry, CLEANUP_LOG, keep=50)
+    except Exception as exc:          # noqa: BLE001
+        try:
+            current_app.logger.error('保存清理历史失败: %s', exc)
+        except Exception:
+            pass
+        return False
 
 
 @cleanup_bp.route('/api/cleanup/history')
 def api_cleanup_history():
     """清理历史记录（最近 20 条）"""
     try:
-        history = []
-        if os.path.exists(CLEANUP_LOG):
-            with open(CLEANUP_LOG, 'r') as f:
-                history = json.load(f)
+        # M122：统一走 load_cleanup_history —— 文件损坏时隔离并返回空列表，
+        # 而不是把 JSONDecodeError 抛成 500（页面即「清理历史加载失败」）。
+        import auto_cleanup as _ac
+        history = _ac.load_cleanup_history(CLEANUP_LOG)
+        _hist_corrupted = bool((_ac._HISTORY_STATE or {}).get('corrupted'))
         # 只返回最近 20 条，避免响应过大
         history = history[:20] if isinstance(history, list) else []
         # v0.3.1.63：历史条目里的 errors 可能是上千条（旧格式全量落盘，实测单条
@@ -593,7 +707,8 @@ def api_cleanup_history():
             entry['errors'] = [str(x)[:200] for x in list(errs)[:5]]
             slim.append(entry)
         history = slim
-        return jsonify({'success': True, 'history': history})
+        return jsonify({'success': True, 'history': history,
+                        'history_reset': _hist_corrupted})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
