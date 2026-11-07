@@ -1,0 +1,27 @@
+[Unit]
+Description=TeslaUSB Guardian-B (park self-check watchdog, VPS side)
+Documentation=file:///opt/guard-b/INSTALL-TS.md
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+# 说明：默认绑定 Tailscale 接口 IP（GUARD_BIND_HOST=100.x.x.x）。
+# 若 tailscaled 尚未就绪，bind 会失败 → Restart=always 5s 后重试，直到隧道起来。
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/guard-b
+# 配置全部来自环境文件（不进镜像/仓库）。见 guard-b.env.example
+EnvironmentFile=/opt/guard-b/guard-b.env
+ExecStart=/opt/guard-b/venv/bin/python /opt/guard-b/app.py
+Restart=always
+RestartSec=5
+# 心跳/判死对时延不敏感，但别让它抢占 VPS 资源
+Nice=5
+# 基础加固（不影响 1Panel；若 1Panel 冲突可逐项删）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/guard-b/data
+
+[Install]
+WantedBy=multi-user.target

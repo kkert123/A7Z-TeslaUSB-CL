@@ -185,6 +185,9 @@ class Config:
         # gadget health monitor (2026-07-11 UDC 解绑自动恢复)
         # 2026-09-19 M80：自愈已移交 usb_guard，本模块降级为只读
         "gadget_health.py",
+        # 自检守护心跳（2026-11-07 v0.3.1.76）：A 端快照采集 + 心跳发送（默认关闭）
+        # 注意：config/guard.json **不入白名单**——升级包不得覆盖用户 token/端点
+        "guard_client.py",
         # USB 链路守护（2026-09-19 M80）：独立常驻服务 + 其 systemd 单元
         # 判据 = 线在位(online) + UDC state == configured；含拔线闸/熔断/五步阶梯
         "usb_guard.py",

@@ -1,0 +1,12 @@
+# guardian-b 本地运行产物（勿提交）
+data/
+venv/
+.venv/
+*.env
+*.log
+__pycache__/
+*.pyc
+
+# 单测是交付物（根 .gitignore 的 test_*.py 会挡掉）
+!tests/
+!tests/*.py

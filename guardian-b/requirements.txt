@@ -1,0 +1,10 @@
+# guardian-b 运行时依赖（B 端 VPS）
+# Python >= 3.8（腾讯云轻量常见 Debian/Ubuntu 自带 3.10+）
+Flask>=3.0
+requests>=2.31
+
+# 可选：本地 .env 装载（deploy/guard-b.env 更推荐用 systemd EnvironmentFile）
+python-dotenv>=1.0
+
+# 可选：生产 WSGI（默认 Flask 内置 threaded=True 已够单客户端场景）
+# waitress>=3.0

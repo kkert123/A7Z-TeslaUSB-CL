@@ -250,4 +250,16 @@ if __name__ == '__main__':
     threading.Thread(target=_send_boot_notification, daemon=True,
                      name="boot-notification").start()
 
+    # ── 自检守护心跳（v0.3.1.76）──
+    # 默认关闭：config/guard.json 里 enabled=false 时不启线程、不发任何请求，
+    # 行为与上一版等价（M116）。启动失败只告警，绝不影响主服务（M95：不阻塞 bind）。
+    try:
+        import guard_client
+        if guard_client.start_background():
+            app.logger.info("自检守护心跳已启动（后台线程）")
+        else:
+            app.logger.info("自检守护未启用，跳过（config/guard.json）")
+    except Exception as e:
+        app.logger.warning(f"自检守护启动失败（不影响主服务）: {e}")
+
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

@@ -1400,3 +1400,27 @@ def api_system_stats_stream():
 # 缩略图服务
 # ═══════════════════════════════════════════════════════════════
 
+
+
+# ═══════════════════════════════════════════════════════════════
+# 自检守护（v0.3.1.76）
+#   只读：不触发网络请求、不改配置。心跳本体在 guard_client 的后台线程里。
+# ═══════════════════════════════════════════════════════════════
+
+@system_bp.route('/api/guard/status', methods=['GET'])
+def api_guard_status():
+    """最近一次心跳快照 + 发送器计数（设计文档 §3.4 状态页的最小实现）。"""
+    try:
+        import guard_client
+        data = guard_client.get_last_status()
+        cfg = guard_client.load_config()
+        eps = cfg.get('endpoints') or {}
+        return jsonify({
+            'success': True,
+            'available': bool(data.get('available')),
+            'enabled': bool(cfg.get('enabled')),
+            'channels': {k: bool(v) for k, v in eps.items()},
+            'snapshot': data if data.get('available') else None,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500

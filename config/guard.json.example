@@ -1,0 +1,17 @@
+{
+  "_comment": "自检守护（A 端心跳）配置。改完需重启 teslausb-web 生效。enabled=false 时零行为变化。",
+  "enabled": false,
+  "token": "",
+  "endpoints": {
+    "ts": "",
+    "https": ""
+  },
+  "ca_path": "",
+  "interval_s": 60,
+  "ts_timeout_s": 8,
+  "https_timeout_s": 10,
+  "probe_every_s": 150,
+  "states_interval_s": 300,
+  "queue_max": 200,
+  "offline_default_s": 3600
+}
