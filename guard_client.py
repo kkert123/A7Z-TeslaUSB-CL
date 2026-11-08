@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
+import re
 import socket
 import subprocess
 import tempfile
@@ -49,6 +51,12 @@ USB_GUARD_STATUS = os.path.join(app_config.DATA_DIR, "usb_guard_status.json")
 PREVIEW_QUEUE = os.path.join(app_config.DATA_DIR, "preview_queue.json")
 PREVIEW_BLOCKED = os.path.join(app_config.DATA_DIR, "preview_blocked.json")
 PREVIEW_SCAN = os.path.join(app_config.DATA_DIR, "preview_scan.json")
+# 僚机版本同步：本地 B 包存放目录 / 升级窗口标记 / 签名身份
+PKG_DIR = os.path.join(app_config.DATA_DIR, "guard_pkg")
+UPGRADE_WINDOW_PATH = os.path.join(app_config.DATA_DIR, "guard_upgrade_window.json")
+PKG_SIGNER_IDENTITY = "a7z-guard"
+PKG_SIGN_NAMESPACE = "a7z-guard-pkg"      # 与 A 自身升级包的 namespace `file` 隔离
+PKG_MAX_BYTES = 8 * 1024 * 1024
 MODE_FILE = "/tmp/teslausb_mode"
 WIFI_IFACE = "wlan0"
 
@@ -78,6 +86,10 @@ DEFAULTS: Dict[str, Any] = {
     "report_daily_at": "20:00",  # 每日摘要时刻（空串 = 关闭）
     "report_cooldown_s": 1800,   # 同一档位的去重窗口
     "ping_fail_threshold": 3,    # 连续 N 次 ping 不通判「B 侧失联」
+    # ── 僚机版本同步 ──
+    # B 包的 Ed25519 公钥（**离线签名机**持有私钥；A 只用来预验签）
+    # 格式：允许带或不带 principal 前缀，统一按 `a7z-guard <key>` 使用。
+    "pkg_pubkey": "",
 }
 
 # 模块级缓存（线程安全由调用方保证：仅在后台线程使用）
@@ -324,6 +336,11 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     cfg["report_daily_at"] = _norm_hhmm(cfg.get("report_daily_at"))
     cfg["token"] = str(cfg.get("token") or "")
     cfg["ca_path"] = str(cfg.get("ca_path") or "")
+    # 公钥可能是用户从终端粘贴的整行（含 principal 前缀），统一剥成裸 key
+    pk = str(cfg.get("pkg_pubkey") or "")
+    if pk.startswith(PKG_SIGNER_IDENTITY + " "):
+        pk = pk[len(PKG_SIGNER_IDENTITY) + 1:]
+    cfg["pkg_pubkey"] = pk.strip()
     return cfg
 
 
@@ -1051,6 +1068,20 @@ class GuardSender:
     def _ping_failed(self, kind: str) -> None:
         self._ping_fail += 1
         self._ping_kind = kind
+
+        # 升级窗口内抑制失联告警：B 一停机重启，ping 必然连续失败——
+        # 这是**我们自己制造的**失败，不是它挂了。若照常推送，每次升级都会收到一条
+        # 假「B 侧失联」，久了就没人信这条告警（M85：后台操作逆转的状态要落成持久抑制）。
+        #
+        # 但**只抑制传输层失败**（timeout / unreachable / b_5xx）。
+        # auth（令牌错）和 config（通道配错）跟"B 在重启"无关，它们在窗口内
+        # 依然要报——尤其是 auth：升级后恰好看不出"令牌被换掉了"是最糟的时机。
+        if kind in ("timeout", "unreachable", "b_5xx"):
+            left = in_upgrade_window()
+            if left > 0:
+                logger.info("升级窗口内（剩余 %ds）ping 失败 %s，暂不判失联", left, kind)
+                return
+
         threshold = int(self.cfg.get("ping_fail_threshold") or 3)
         if self._ping_fail < threshold or self._b_down_notified:
             return                       # 去重：一次失联只通知一条，抖回去也不重复
@@ -1513,6 +1544,9 @@ class GuardSender:
             "report_pending": len(self._pending_reports),
             "last_result": self._last_result,
             "pending_offline": bool(self._pending_offline),
+            # 升级窗口剩余秒数：不显示出来的话，用户看到"心跳正常但没告警"
+            # 会以为是守护坏了（其实是我们主动压着）
+            "upgrade_window": in_upgrade_window(),
         }
 
 
@@ -1713,3 +1747,333 @@ def send_test_report() -> tuple:
         "已配" if (eps.get("https") or "").strip() else "未配"))
     lines.append("心跳线程：%s" % ("运行中" if is_running() else "未运行"))
     return _push_wecom("\n".join(lines))
+
+
+# ═══════════════════════════════════════════════════════════
+# 僚机版本同步（v0.3.1.78）
+#
+# 定位：A 端只是**分发者 + 发起者**，不是签发者。
+#   · 包的 Ed25519 私钥在离线开发机（A 上只有公钥，只做预验签）
+#   · B 端会独立再验一次签，并且**要人工输确认码**才切换
+# 这样即使 A 被完全拿下，攻击者最多让 B 下载一个「真实发布过的包」，无法让它生效。
+# ═══════════════════════════════════════════════════════════
+
+def in_upgrade_window() -> int:
+    """升级窗口剩余秒数（0 = 不在窗口内）。
+
+    落盘而不是只放内存：窗口跨进程重启仍要有效，
+    否则"升级中重启了一次 web"就立刻冒出一条假「B 侧失联」。
+    """
+    d = _read_json(UPGRADE_WINDOW_PATH)
+    if not isinstance(d, dict):
+        return 0
+    until = d.get("until")
+    if not isinstance(until, (int, float)):
+        return 0
+    left = int(float(until) - time.time())
+    return left if left > 0 else 0
+
+
+def open_upgrade_window(seconds: int = 900, note: str = "") -> None:
+    body = {"until": int(time.time()) + int(seconds),
+            "note": note,
+            "at": int(time.time())}
+    atomic_write_json(UPGRADE_WINDOW_PATH, body, mode=0o600)
+
+
+def close_upgrade_window() -> None:
+    try:
+        os.remove(UPGRADE_WINDOW_PATH)
+    except OSError:
+        pass
+
+
+def _pkg_pubkey(cfg: Optional[Dict[str, Any]] = None) -> str:
+    cfg = cfg or load_config()
+    pk = str(cfg.get("pkg_pubkey") or "").strip()
+    if pk.startswith(PKG_SIGNER_IDENTITY + " "):
+        pk = pk[len(PKG_SIGNER_IDENTITY) + 1:]
+    return pk
+
+
+def _extract_from_tar(raw: bytes, wanted: str) -> Optional[bytes]:
+    """从 tar.gz 里只取指定文件（不落盘、不解压其它内容）。"""
+    import io as _io
+    import tarfile as _tarfile
+    try:
+        with _tarfile.open(fileobj=_io.BytesIO(raw), mode="r:gz") as tf:
+            for m in tf.getmembers():
+                if not m.isfile():
+                    continue
+                if posixpath.basename(posixpath.normpath(m.name)) == wanted:
+                    f = tf.extractfile(m)
+                    if f is None:
+                        return None
+                    return f.read(PKG_MAX_BYTES)
+    except (_tarfile.TarError, OSError):
+        return None
+    return None
+
+
+def verify_package(raw: bytes, cfg: Optional[Dict[str, Any]] = None) -> tuple:
+    """A 端预验签：**只证明「manifest 是这把私钥签的」**，不做逐文件 hash 复核。
+
+    返回值 (ok, manifest_dict, err_code)。
+
+    边界必须说清楚（UI 文案也据此写）：
+      · 它拦得住"不是我签的包"和"清单被改过的包"；
+      · 它拦不住"清单没动、载荷文件被换了"——那由 B 端逐文件核 hash 兜住
+        （`guardian-b/upgrade.py` 的 stage_package，以及落地前的二次复核）。
+    所以 A 端这层的价值是 **fail fast**：坏包别上传、别占 B 的带宽和磁盘，
+    而不是"我已经验证过内容了"。
+    """
+    cfg = cfg or load_config()
+    if len(raw) > PKG_MAX_BYTES:
+        return False, None, "pkg_too_large"
+    pk = _pkg_pubkey(cfg)
+    if not pk:
+        return False, None, "no_pkg_pubkey"
+
+    man_raw = _extract_from_tar(raw, "manifest.json")
+    sig_raw = _extract_from_tar(raw, "manifest.json.sig")
+    if not man_raw:
+        return False, None, "no_manifest"
+    if not sig_raw:
+        return False, None, "no_signature"
+
+    import tempfile as _tempfile
+    tmpdir = _tempfile.mkdtemp(prefix="a7zpkg-")
+    try:
+        allowed = os.path.join(tmpdir, "allowed")
+        with open(allowed, "w", encoding="utf-8") as f:
+            f.write("%s %s\n" % (PKG_SIGNER_IDENTITY, pk))
+        os.chmod(allowed, 0o600)
+        sigf = os.path.join(tmpdir, "m.sig")
+        with open(sigf, "wb") as f:
+            f.write(sig_raw)
+        try:
+            r = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", allowed,
+                 "-I", PKG_SIGNER_IDENTITY, "-n", PKG_SIGN_NAMESPACE, "-s", sigf],
+                input=man_raw, capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return False, None, "ssh_keygen_failed"
+        if r.returncode != 0:
+            return False, None, "bad_signature"
+    finally:
+        try:
+            for n in os.listdir(tmpdir):
+                os.remove(os.path.join(tmpdir, n))
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+    try:
+        man = json.loads(man_raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return False, None, "bad_manifest"
+    if not isinstance(man, dict) or man.get("kind") != "guardian-b":
+        return False, None, "bad_manifest"
+    ver = str(man.get("version") or "")
+    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$", ver):
+        return False, None, "bad_version"
+    return True, man, ""
+
+
+def save_local_package(raw: bytes, cfg: Optional[Dict[str, Any]] = None) -> tuple:
+    """验签通过后落地到 data/guard_pkg/guardian-b-v<ver>.tar.gz。"""
+    ok, man, err = verify_package(raw, cfg)
+    if not ok:
+        return False, err, None
+    ver = str(man.get("version"))
+    os.makedirs(PKG_DIR, exist_ok=True)
+    path = os.path.join(PKG_DIR, "guardian-b-v%s.tar.gz" % ver)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+    # 只保留最近 2 个版本：A7Z 是 959MB 内存的小机器，别让包堆满分区
+    items = list_local_packages()
+    for it in items[2:]:
+        try:
+            os.remove(it["path"])
+        except OSError:
+            pass
+    return True, "", {"version": ver, "path": path, "bytes": len(raw),
+                      "files": len(man.get("files") or [])}
+
+
+def list_local_packages() -> List[Dict[str, Any]]:
+    """本地已签名的 B 包（按版本倒序）。"""
+    out: List[Dict[str, Any]] = []
+    try:
+        names = os.listdir(PKG_DIR)
+    except OSError:
+        return out
+    for n in names:
+        if not (n.startswith("guardian-b-v") and n.endswith(".tar.gz")):
+            continue
+        p = os.path.join(PKG_DIR, n)
+        ver = n[len("guardian-b-v"):-len(".tar.gz")]
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append({"version": ver, "path": p, "bytes": st.st_size,
+                    "at": int(st.st_mtime)})
+    out.sort(key=lambda x: _ver_tuple(x["version"]), reverse=True)
+    return out
+
+
+def _ver_tuple(s: str) -> tuple:
+    try:
+        return tuple(int(x) for x in str(s).split("."))
+    except (TypeError, ValueError):
+        return (0, 0, 0)
+
+
+def _peer_candidates(cfg: Dict[str, Any]) -> List[tuple]:
+    """TS 优先、HTTPS 兜底（与 _send 同一顺序）。"""
+    eps = cfg.get("endpoints") or {}
+    out = []
+    if (eps.get("ts") or "").strip():
+        out.append(("ts", eps["ts"].strip(), cfg.get("ts_timeout_s") or 8))
+    if (eps.get("https") or "").strip():
+        out.append(("https", eps["https"].strip(), cfg.get("https_timeout_s") or 10))
+    return out
+
+
+def _peer_kind_from_status(code: int) -> str:
+    if code in (401, 403):
+        return "auth"
+    if code >= 500:
+        return "b_5xx"
+    return "http_%s" % code
+
+
+def peer_call(cfg, method: str, path: str, json_body: Any = None,
+              files: Any = None, timeout: int = 20) -> tuple:
+    """向 B 发一个请求（TS→HTTPS failover）。
+
+    返回 (ok, payload, err)。err 是**稳定错误码**，前端按码翻译文案——
+    「升级失败」这种笼统提示等于没提示，会把排查方向带错。
+    """
+    candidates = _peer_candidates(cfg)
+    if not candidates:
+        return False, None, "no_endpoint"
+    token = str(cfg.get("token") or "")
+    if not token:
+        return False, None, "no_token"
+    ca = (cfg.get("ca_path") or "").strip()
+    errors = []
+
+    for ch, base, tmo in candidates:
+        url = base.rstrip("/") + path
+        verify: Any = True
+        if ch == "https" and not url.startswith("https://"):
+            errors.append("https=https_scheme_required")
+            continue
+        if url.startswith("https://"):
+            if not ca or not os.path.isfile(ca):
+                errors.append("%s=https_without_ca" % ch)
+                continue
+            verify = ca
+        headers = {"Authorization": "Bearer " + token}
+        try:
+            import requests
+            r = requests.request(method, url, json=json_body, files=files,
+                                 headers=headers, timeout=max(timeout, tmo),
+                                 verify=verify)
+        except Exception as e:
+            name = type(e).__name__.lower()
+            kind = "timeout" if "timeout" in name else "unreachable"
+            errors.append("%s=%s" % (ch, kind))
+            continue
+
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = None
+        if 200 <= r.status_code < 300:
+            return True, payload, ""
+        # B 的拒绝理由原样带回（upgrade_disabled / bad_signature / ...），
+        # 方便直接显示，不必在 A 端再维护一份错误码表
+        code = ""
+        if isinstance(payload, dict):
+            code = str(payload.get("error") or "")
+        errors.append("%s=%s" % (ch, code or _peer_kind_from_status(r.status_code)))
+        # 403/409/400 是 B 的明确答复，换通道也是同样结果 → 不再试
+        if r.status_code in (400, 403, 409, 413):
+            return False, payload, code or _peer_kind_from_status(r.status_code)
+
+    return False, None, "; ".join(errors) or "unreachable"
+
+
+def get_peer_status(cfg: Optional[Dict[str, Any]] = None) -> tuple:
+    cfg = cfg or load_config()
+    return peer_call(cfg, "GET", "/guard/status", timeout=8)
+
+
+def peer_prepare(cfg: Optional[Dict[str, Any]] = None, version: str = "") -> tuple:
+    """把本地包上传给 B 预置（不生效）。成功时打开升级窗口，抑制假失联告警。"""
+    cfg = cfg or load_config()
+    pkgs = list_local_packages()
+    if not pkgs:
+        return False, None, "no_local_package"
+    if version:
+        pkgs = [p for p in pkgs if p["version"] == version]
+        if not pkgs:
+            return False, None, "package_not_found"
+    pkg = pkgs[0]
+    try:
+        with open(pkg["path"], "rb") as f:
+            raw = f.read()
+    except OSError:
+        return False, None, "package_unreadable"
+
+    ok, man, err = verify_package(raw, cfg)
+    if not ok:
+        return False, None, err
+
+    # 先开窗口再上传：上传过程中 B 会短暂忙，ping 可能超时
+    open_upgrade_window(900, note="prepare %s" % pkg["version"])
+    try:
+        ok2, payload, err2 = peer_call(
+            cfg, "POST", "/guard/upgrade/prepare",
+            files={"pkg": ("guardian-b-v%s.tar.gz" % pkg["version"],
+                           raw, "application/gzip")},
+            timeout=90)
+    except Exception:
+        close_upgrade_window()
+        raise
+    if not ok2:
+        close_upgrade_window()
+        return False, payload, err2
+    return True, payload, ""
+
+
+def peer_confirm(cfg: Optional[Dict[str, Any]] = None, job: str = "",
+                 code: str = "") -> tuple:
+    cfg = cfg or load_config()
+    if not job:
+        return False, None, "no_job"
+    # B 要重启，ping 会失败一段时间：窗口给足（apply + 健康检查最长 10 分钟）
+    open_upgrade_window(900, note="confirm %s" % job)
+    ok, payload, err = peer_call(cfg, "POST", "/guard/upgrade/confirm",
+                                 json_body={"job": job, "code": code}, timeout=30)
+    if not ok:
+        # 确认失败（码错了 / 过期 / 任务不匹配）→ B **不会**重启，
+        # 此时若把窗口留着，等于白白让它 15 分钟不报失联——
+        # 而"码打错"恰恰是最常见的情形（审查实证）。
+        close_upgrade_window()
+    return ok, payload, err
+
+
+def peer_upgrade_state(cfg: Optional[Dict[str, Any]] = None, job: str = "") -> tuple:
+    cfg = cfg or load_config()
+    q = ("?job=" + job) if job else ""
+    return peer_call(cfg, "GET", "/guard/upgrade/status" + q, timeout=10)

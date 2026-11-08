@@ -5,23 +5,54 @@ After=network-online.target tailscaled.service
 Wants=network-online.target tailscaled.service
 # 说明：默认绑定 Tailscale 接口 IP（GUARD_BIND_HOST=100.x.x.x）。
 # 若 tailscaled 尚未就绪，bind 会失败 → Restart=always 5s 后重试，直到隧道起来。
+#
+# v1.1.0 起：ExecStart 走 current 符号链接（升级只切链接，不原地改文件）。
+#
+# 连续崩 3 次进 failed：apply helper 据此判定"升级后起不来"并回滚。
+# 不靠 Python 自己计数 —— 进程崩了就没人计数了。
+# 注意：这两个是 **[Unit]** 段的指令；写在 [Service] 里会被 systemd 忽略（只打一条 warning）。
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/guard-b
+
+# 以专用用户运行：**它对自己要执行的代码没有写权限**，这是"本地锁死"的核心。
+# 只有当代码目录属主不是本用户时这条才真正成立（install.sh 负责）。
+User=guardb
+Group=guardb
+
 # 配置全部来自环境文件（不进镜像/仓库）。见 guard-b.env.example
 EnvironmentFile=/opt/guard-b/guard-b.env
-ExecStart=/opt/guard-b/venv/bin/python /opt/guard-b/app.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=GUARD_TOOLS_DIR=/opt/guard-b/.tools
+ExecStart=/opt/guard-b/venv/bin/python /opt/guard-b/current/app.py
+
 Restart=always
 RestartSec=5
+
 # 心跳/判死对时延不敏感，但别让它抢占 VPS 资源
 Nice=5
-# 基础加固（不影响 1Panel；若 1Panel 冲突可逐项删）
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
+
+# ── 沙箱 ────────────────────────────────────────────────────
+# strict：/opt 也变只读；只有 ReadWritePaths 里的目录可写。
+# 这样即便 Flask 被 RCE，也只能改 data/，改不了自己下一轮要跑的代码。
+ProtectSystem=strict
 ReadWritePaths=/opt/guard-b/data
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# 清空全部 capability（它以普通用户跑，本来也不需要）
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# 可选加强（**验证通过后再启用**，贸然打开可能起不来）：
+#   MemoryDenyWriteExecute=yes      纯 Python 可承受，但引入 C 扩展/JIT 会失败
+#   SystemCallFilter=@system-service
+#   ProtectKernelTunables=yes  ProtectKernelModules=yes  ProtectControlGroups=yes
 
 [Install]
 WantedBy=multi-user.target

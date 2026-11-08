@@ -1455,6 +1455,8 @@ GUARD_EDITABLE = {
     'states_interval_s', 'queue_max', 'offline_default_s',
     'report_transition', 'report_daily_at', 'report_cooldown_s',
     'ping_fail_threshold',
+    # 僚机包签名公钥（只有公钥，泄露无害；私钥在离线签名机上）
+    'pkg_pubkey',
 }
 
 
@@ -1523,6 +1525,14 @@ def api_guard_config_save():
                 raw[k] = data.get(k)
 
         cfg = guard_client.normalize_config(raw)
+
+        # 公钥格式校验：只收 ed25519。接受别的算法等于把"签名强度"这个前提
+        # 交给配置的人随手改（rsa1024 也能签，但那不是这套设计的前提）。
+        if 'pkg_pubkey' in touched:
+            pk = (cfg.get('pkg_pubkey') or '').strip()
+            if pk and not pk.startswith('ssh-ed25519 '):
+                return jsonify({'success': False,
+                                'error': '僚机包公钥必须是 ssh-ed25519（离线签名机生成的那把）'}), 400
 
         # 启用前必须自洽，否则「保存成功但线程起不来」是最难排查的状态
         if cfg.get('enabled'):
@@ -1599,5 +1609,214 @@ def api_guard_push_bot():
         if msg is None:
             msg = ('僚机拒绝了令牌（两侧 token 不一致）' if 'http_401' in err else err)
         return jsonify({'success': False, 'error': msg})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════
+# 僚机版本同步（v0.3.1.78）
+#
+# 设计前提（不要在实现里"简化"掉）：
+#   · A 只分发、不签发：包的签名私钥在离线开发机，A 上只有公钥；
+#   · B 独立验签 + **人工确认码**后才切换 → A 被拿下也换不掉见证者；
+#   · 升级期间 B 必然停机，ping 会连续失败 → 用落盘窗口抑制假「B 侧失联」。
+# ═══════════════════════════════════════════════════════════
+
+# B 端错误码 → 中文。**逐条翻译**：笼统的"升级失败"会把排查方向带错。
+PEER_ERR_CN = {
+    'upgrade_disabled': '僚机未启用远程升级（需在 B 上把 GUARD_UPGRADE_ENABLE 设为 1）',
+    'addr_not_allowed': '僚机只接受 Tailscale 网段发起的升级（当前来源被拒）',
+    'verifier_missing': '僚机缺少验签模块（/opt/guard-b/.tools），需重新执行 install.sh',
+    'ssh_keygen_missing': '僚机缺少 openssh-client，无法验签',
+    'no_pubkey': '僚机未安装签名公钥（.trusted/pkg.pub）',
+    'pubkey_identity_mismatch': '僚机公钥身份不是 a7z-guard（文件被换过？）',
+    'no_signature': '包里缺 manifest.json.sig',
+    'bad_signature': '签名校验不通过（包被改动，或不是这把私钥签的）',
+    'hash_mismatch': '包内文件与清单不符（文件被替换）',
+    'missing_file': '包缺清单里声明的文件',
+    'unexpected_file': '包里有清单之外的文件（已拒绝整包）',
+    'path_traversal': '包含路径穿越条目（已拒绝）',
+    'absolute_path': '包含绝对路径条目（已拒绝）',
+    'not_regular_file': '包含符号链接/设备等非普通文件（已拒绝）',
+    'setuid_bit': '包含 setuid 位文件（已拒绝）',
+    'forbidden_path': '试图修改禁止项（env / 状态 / 验签器）',
+    'file_type_not_allowed': '包含不允许的文件类型（只允许 .py）',
+    'not_newer': '版本不比僚机当前版本新（不支持降级）',
+    'below_floor': '版本低于僚机的最低允许版本（防重放旧包）',
+    'incompatible_from': '僚机当前版本不在本包的允许起跳列表里',
+    'bad_version': '版本号格式非法',
+    'pkg_too_large': '包超过 8MB 上限',
+    'too_large': '解包后体积超限',
+    'no_manifest': '包里没有 manifest.json',
+    'bad_manifest': 'manifest.json 结构不合法',
+    'no_local_package': 'A 端还没有已签名的僚机包（先上传）',
+    'package_not_found': '指定版本的包不在 A 端库存里',
+    'no_pkg_pubkey': 'A 端未配置僚机包公钥（设置页 → 守护 → 签名公钥）',
+    'bad_code': '确认码不对',
+    'confirm_expired': '确认码已过期（重发一次升级包即可）',
+    'too_many_attempts': '确认码错太多次，本次升级已作废',
+    'job_mismatch': '任务号不匹配（可能已被新的升级请求替换）',
+    'no_pending': '僚机没有待确认的升级任务',
+    'upgrade_in_progress': '僚机正在应用上一次升级，请稍后再试',
+    'auth': '僚机令牌不匹配（两侧 token 不一致）',
+    'unauthorized': '僚机令牌不匹配（两侧 token 不一致）',
+    'http_401': '僚机令牌不匹配（两侧 token 不一致）',
+    'http_403': '僚机拒绝了这次请求（403）',
+    'b_5xx': '僚机内部错误（5xx）',
+    'no_endpoint': '还没配守护通道（TS/HTTPS 地址为空）',
+    'no_token': '守护令牌为空',
+    'unreachable': '僚机连不上（网络/进程）',
+    'timeout': '僚机响应超时',
+    'no_channel': '没有可用通道',
+}
+
+
+def _peer_err(err):
+    """把可能的 `ts=xxx; https=yyy` 组合错误拆开翻译，主要看非 auth 的那条。"""
+    if not err:
+        return ''
+    parts = [p.strip() for p in str(err).split(';') if p.strip()]
+    out = []
+    for p in parts:
+        code = p.split('=', 1)[-1] if '=' in p else p
+        out.append(PEER_ERR_CN.get(code, code))
+    seen = []
+    for x in out:
+        if x not in seen:
+            seen.append(x)
+    return '；'.join(seen)
+
+
+@system_bp.route('/api/guard/peer', methods=['GET'])
+def api_guard_peer():
+    """僚机版本总览：可达性 + 版本 + 升级状态 + A 端本地包库存。"""
+    try:
+        import guard_client
+        cfg = guard_client.load_config()
+        eps = cfg.get('endpoints') or {}
+        out = {
+            'success': True,
+            'configured': bool((eps.get('ts') or '').strip()
+                               or (eps.get('https') or '').strip()),
+            'enabled': bool(cfg.get('enabled')),
+            'pubkey_set': bool((cfg.get('pkg_pubkey') or '').strip()),
+            'packages': [{'version': p['version'], 'bytes': p['bytes'], 'at': p['at']}
+                         for p in guard_client.list_local_packages()],
+            'upgrade_window': guard_client.in_upgrade_window(),
+            'reachable': False,
+            'peer': None,
+            'error': '',
+        }
+        if not out['configured']:
+            out['error'] = PEER_ERR_CN['no_endpoint']
+            return jsonify(out)
+
+        ok, payload, err = guard_client.get_peer_status(cfg)
+        if not ok:
+            out['error'] = _peer_err(err)
+            return jsonify(out)
+
+        payload = payload if isinstance(payload, dict) else {}
+        up = payload.get('upgrade') or {}
+        out['reachable'] = True
+        out['peer'] = {
+            'version': payload.get('version'),
+            'classify': payload.get('classify'),
+            'alert_configured': bool((payload.get('alert') or {}).get('configured')),
+            'upgrade_enabled': bool(up.get('enabled')),
+            'state': up.get('state'),
+            'job': up.get('job'),
+            'target_version': up.get('version'),
+            'confirm_code': up.get('confirm_code'),
+            'confirm_expires_in': up.get('confirm_expires_in'),
+            'upgrade_error': up.get('error'),
+        }
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/peer/package', methods=['POST'])
+def api_guard_peer_package():
+    """上传 B 包：A 端先验签，坏包不进库存（fail fast）。"""
+    try:
+        import guard_client
+        f = request.files.get('pkg')
+        if f is None:
+            return jsonify({'success': False, 'error': '没有收到文件'}), 400
+        # 先看声明的长度再读流：A7Z 只有 959MB 内存，8MB 的包连读两次
+        # 在内存紧张时会直接 OOM（Flask 解析 multipart 已缓冲一份）
+        if request.content_length and request.content_length > guard_client.PKG_MAX_BYTES + 65536:
+            return jsonify({'success': False, 'error': '包超过 8MB 上限'}), 413
+        raw = f.read(guard_client.PKG_MAX_BYTES + 1)
+        if len(raw) > guard_client.PKG_MAX_BYTES:
+            return jsonify({'success': False, 'error': '包超过 8MB 上限'}), 413
+        ok, err, info = guard_client.save_local_package(raw)
+        if not ok:
+            return jsonify({'success': False, 'error': _peer_err(err)}), 400
+        return jsonify({'success': True, 'package': info})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/peer/upgrade', methods=['POST'])
+def api_guard_peer_upgrade():
+    """把本地已签名包推给 B 预置（**不生效**），返回待确认的任务号。"""
+    try:
+        import guard_client
+        data = request.get_json(silent=True) or {}
+        ver = str((data or {}).get('version') or '')
+        ok, payload, err = guard_client.peer_prepare(version=ver)
+        if not ok:
+            return jsonify({'success': False, 'error': _peer_err(err)}), 400
+        payload = payload if isinstance(payload, dict) else {}
+        return jsonify({
+            'success': True,
+            'job': payload.get('job'),
+            'version': payload.get('version'),
+            'files': payload.get('files'),
+            'expires_in': payload.get('confirm_expires_in'),
+            # B 端是否通过 API 回码（GUARD_UPGRADE_CODE_VIA_API）。为 0 时
+            # 只能去 B 上看日志，UI 要提示这一点。
+            'confirm_code': payload.get('confirm_code') or '',
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/peer/confirm', methods=['POST'])
+def api_guard_peer_confirm():
+    """回传人工确认码 → B 切版本并重启。"""
+    try:
+        import guard_client
+        data = request.get_json(silent=True) or {}
+        job = str((data or {}).get('job') or '')
+        code = str((data or {}).get('code') or '').strip()
+        if not job or not code:
+            return jsonify({'success': False, 'error': '任务号与确认码都必须填'}), 400
+        ok, _payload, err = guard_client.peer_confirm(job=job, code=code)
+        if not ok:
+            return jsonify({'success': False, 'error': _peer_err(err)}), 400
+        return jsonify({'success': True, 'message': '已确认，僚机正在切换版本并重启（约 1 分钟）'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/peer/job', methods=['GET'])
+def api_guard_peer_job():
+    """轮询升级任务状态（B 的 journal）。"""
+    try:
+        import guard_client
+        job = str(request.args.get('job') or '')
+        ok, payload, err = guard_client.peer_upgrade_state(job=job)
+        if not ok:
+            return jsonify({'success': False, 'error': _peer_err(err)}), 400
+        payload = payload if isinstance(payload, dict) else {}
+        up = payload.get('upgrade') or {}
+        if up.get('state') in ('healthy', 'rolled_back', 'failed'):
+            # 任务已终态 → 关窗，恢复正常失联判定
+            guard_client.close_upgrade_window()
+        return jsonify({'success': True, 'peer_version': payload.get('version'),
+                        'upgrade': up})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

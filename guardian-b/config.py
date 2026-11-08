@@ -118,6 +118,31 @@ class Config:
         self.runtime_path: str = _env_str("GUARD_RUNTIME_PATH", "/opt/guard-b/data/runtime.json")
         self._apply_runtime()
 
+        # ── 远程升级（v1.1.0，**默认关闭**）────────────────────
+        # 关闭时所有 /guard/upgrade/* 一律 403：这不是"配置项"，是安全默认值。
+        # 打开需要改 root-owned 的 env 文件（见 docs §5.2）。
+        self.upgrade_enable: bool = _env_str("GUARD_UPGRADE_ENABLE", "0") in ("1", "true", "yes")
+        self.upgrade_dir: str = _env_str("GUARD_UPGRADE_DIR", "/opt/guard-b/data/upgrade")
+        self.pubkey_path: str = _env_str("GUARD_UPGRADE_PUBKEY", "/opt/guard-b/.trusted/pkg.pub")
+        self.floor_path: str = _env_str("GUARD_UPGRADE_FLOOR", "/opt/guard-b/.trusted/floor")
+        self.releases_dir: str = _env_str("GUARD_RELEASES_DIR", "/opt/guard-b/releases")
+        # 只允许 TS 网段访问升级接口（默认 100.64.0.0/10 = Tailscale CGNAT）
+        self.ts_cidr: str = _env_str("GUARD_TS_CIDR", "100.64.0.0/10")
+        self.allow_loopback: bool = _env_str("GUARD_UPGRADE_ALLOW_LOOPBACK", "1") in ("1", "true", "yes")
+        # 确认码是否也通过 /guard/status 暴露：
+        #   0 = 只能看 `journalctl -u guard-b` / data/guard-b.log（**真正的带外确认**，默认）
+        #   1 = 便利模式：A 端能自动读到码 → 但这也意味着"拿到 A 的攻击者能全自动完成"，
+        #       等于把人工确认降级成"人看一眼"。打开前请确认你接受这个折中。
+        self.code_via_api: bool = _env_str("GUARD_UPGRADE_CODE_VIA_API", "0") in ("1", "true", "yes")
+        # 触发 root helper 的方式。默认**留空** = 写请求文件，
+        # 由 `guardb-upgrade.path` 监听后拉起 `guardb-upgrade.service`。
+        #
+        # 为什么不用 `sudo systemctl start ...`：`guard-b.service` 开了
+        # `NoNewPrivileges=yes`（本地锁死的前提），而 NNP 会禁止 sudo 提权 ——
+        # 两者互斥，写 sudo 的结果是 100% 失败（审查实证）。
+        # 只有在你明确放弃 NNP 时才把它设成一条命令。
+        self.apply_cmd: str = _env_str("GUARD_UPGRADE_APPLY_CMD", "")
+
     def _apply_runtime(self) -> None:
         """runtime.json 覆盖 env 中的「可在线修改项」。优先级：runtime > env > 默认。
 

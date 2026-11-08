@@ -64,3 +64,8 @@ _*.ps1
 
 # Signing private key — NEVER commit (Ed25519 upgrade signing key)
 upgrade_key
+
+# B 端签名私钥（只在开发机；绝不入包、绝不上 A7Z）
+guardian-b/signing/guard_push
+guardian-b/signing/*.pub.bak
+guardian-b/.tmp_pack/

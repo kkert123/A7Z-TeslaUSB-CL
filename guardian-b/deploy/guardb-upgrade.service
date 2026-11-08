@@ -1,0 +1,26 @@
+[Unit]
+Description=Guardian-B apply verified upgrade (root, oneshot)
+Documentation=file:///opt/guard-b/INSTALL-TS.md
+# 只有 journal 存在时才需要解析依赖；没在升级中的常态下本 unit 不会被启动。
+After=guard-b.service
+ConditionPathExists=/opt/guard-b/data/upgrade/journal.json
+
+[Service]
+Type=oneshot
+# 这是整条链路里**唯一**能写 /opt/guard-b 的进程（root）。
+# 切 symlink → 重启 → 语义健康检查 → 失败回滚，全在 apply.py 里做，
+# 且它会**重新核一遍文件哈希**（暂存目录对 guardb 可写，不能信任中间产物）。
+ExecStart=/opt/guard-b/venv/bin/python /opt/guard-b/.tools/apply.py
+TimeoutStartSec=600
+Nice=0
+
+# 沙箱：只放开 /opt/guard-b，其他一律只读
+ProtectSystem=strict
+ReadWritePaths=/opt/guard-b
+ProtectHome=yes
+PrivateTmp=yes
+# 注意：不能加 NoNewPrivileges，因为要 systemctl restart guard-b（走 D-Bus，不需要提权，
+# 但保持默认更省心；这里显式不加。）
+
+[Install]
+# 不 enable：只由 guardb 通过 sudoers 白名单里的那一条 systemctl start 触发

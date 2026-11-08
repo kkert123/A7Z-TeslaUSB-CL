@@ -18,9 +18,12 @@ B 只做三件事：**收心跳 → 判死 → 发告警**（§1）。不做远�
 """
 
 import hmac
+import ipaddress
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -34,7 +37,32 @@ from judge import Judge
 
 logger = logging.getLogger("guard-b")
 
-VERSION = "1.0.2"
+# 升级失败时给 A 端的 HTTP 状态：其余一律 400（客户端/包的问题）
+_ERR_STATUS = {
+    "pkg_too_large": 413,
+    "ssh_keygen_missing": 503,
+    "no_pubkey": 503,
+    "verifier_missing": 503,
+}
+
+VERSION = "1.1.0"
+
+# 判死线程最近一次 tick 的墙钟（供升级后的健康检查判断"线程真的在跑"）。
+# 只判端口通是不够的：新版本可能起来了但判死线程崩了，
+# 那样"升级成功"会变成一次静默的守护失效。
+_JUDGE_LAST_TICK = 0.0
+
+# ── 验签库装载（**关键：不在升级包可覆盖范围内**）───────────────
+# 生产环境从 /opt/guard-b/.tools 装载（root 0444，不随包升级）；
+# 开发/测试环境回落到本文件同目录的副本。
+_TOOLS_DIR = os.environ.get("GUARD_TOOLS_DIR") or "/opt/guard-b/.tools"
+if os.path.isdir(_TOOLS_DIR) and _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+try:
+    import upgrade as upgrade_lib
+except Exception:                      # pragma: no cover - 缺库时降级为"功能不可用"
+    upgrade_lib = None
+    logger.error("升级校验库加载失败：远程升级功能将不可用（fail closed）")
 
 
 # ── 日志 ────────────────────────────────────────────────────
@@ -121,6 +149,8 @@ def create_app(cfg=None):
             "warn_s": cfg.warn_s,
             "alarm_s": cfg.alarm_s,
             "alert": alerter.status(),      # 只回 configured/key_tail/dry_run，不回明文
+            "upgrade": _upgrade_brief(),    # A 端版本页据此显示「僚机 vX / 待确认」
+            "judge_last_tick": _JUDGE_LAST_TICK,
             "state": snap,
         })
 
@@ -200,6 +230,234 @@ def create_app(cfg=None):
         return jsonify({"ok": True, "version": VERSION,
                         "changed": changed, "alert": alerter.status()})
 
+    # ── 远程升级（v1.1.0，默认关闭）──────────────────────────
+    # 分层：本进程只做「收包 → 验签 → 暂存 → 记账」；
+    # 切版本/重启由 root-owned 的 guardb-upgrade.service 执行，
+    # 因为本进程被 systemd 沙箱限制为**对代码目录零写权限**。
+    def _up_paths():
+        d = cfg.upgrade_dir
+        return {
+            "pubkey": cfg.pubkey_path,
+            "floor": cfg.floor_path,
+            "staging": os.path.join(d, "staged"),
+            "journal": os.path.join(d, "journal.json"),
+            "secret": os.path.join(d, "secret"),
+        }
+
+    def _request_apply():
+        """让 root helper 去切版本：写一个请求文件，由 `guardb-upgrade.path` 触发。
+
+        **不用 sudo**：`guard-b.service` 开着 `NoNewPrivileges=yes`，
+        而 NNP 会让 sudo 无法提权（setuid 被禁）——两条要求互斥，
+        写 sudo 的结果是 100% 失败、journal 永久卡在 committed，后续每次升级 409。
+        走 path unit 既保住 NNP，也不需要给 guardb 任何 sudo 权限。
+
+        `GUARD_UPGRADE_APPLY_CMD` 非空时才走"直接执行命令"的老路径（需自行放弃 NNP）。
+        """
+        cmd = str(cfg.apply_cmd or "").strip()
+        if cmd:
+            _spawn_apply(cmd, _mark_apply_failed)
+            return
+        d = cfg.upgrade_dir
+        try:
+            os.makedirs(d, exist_ok=True)
+            target = os.path.join(d, "request")
+            tmp = target + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+            logger.warning("已投递升级请求（%s），等待 guardb-upgrade.path 触发", target)
+        except OSError as exc:
+            logger.exception("投递升级请求失败")
+            _mark_apply_failed("request_write_failed: %r" % (exc,))
+
+    def _journal():
+        return upgrade_lib.Journal(_up_paths()["journal"])
+
+    def _addr_ok():
+        """只接受 Tailscale 网段（以及可选的本机回环）。不看任何 XFF 头。"""
+        ip = (request.remote_addr or "").strip()
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if a.is_loopback:
+            return cfg.allow_loopback
+        try:
+            return a in ipaddress.ip_network(cfg.ts_cidr, strict=False)
+        except ValueError:
+            # CIDR 配错就拒绝，不能因为"配置写坏了"而放行
+            logger.error("GUARD_TS_CIDR 配置非法：%r", cfg.ts_cidr)
+            return False
+
+    def _up_guard():
+        if not cfg.upgrade_enable:
+            return jsonify({"ok": False, "error": "upgrade_disabled"}), 403
+        if upgrade_lib is None:
+            return jsonify({"ok": False, "error": "verifier_missing"}), 503
+        if not _authorized():
+            return _deny()
+        if not _addr_ok():
+            logger.warning("升级接口拒绝非 TS 来源 %s", request.remote_addr)
+            return jsonify({"ok": False, "error": "addr_not_allowed"}), 403
+        return None
+
+    def _err(exc):
+        st = _ERR_STATUS.get(getattr(exc, "code", ""), 400)
+        logger.warning("升级包被拒：%s %s", exc.code, exc.detail)
+        return jsonify({"ok": False, "error": exc.code, "detail": exc.detail}), st
+
+    def _mark_apply_failed(reason):
+        """把卡在 committed 的任务标成 failed。
+
+        不这么做的话 journal 永远是 committed → 后续每次 prepare 都返回 409，
+        用户只能手工清 journal 才能再升级（而且没人知道要去清）。
+        """
+        try:
+            jj = _journal()
+            if jj.data.get("state") == "committed":
+                jj.set(state="failed", error=str(reason)[:200])
+                logger.warning("已将卡住的升级任务标记为失败：%s", reason)
+        except Exception:
+            logger.exception("标记 journal 失败")
+
+    def _upgrade_brief():
+        """给 A 端展示的最小信息（不含确认码，确认码单独按开关给）。"""
+        try:
+            j = _journal()
+        except Exception:
+            return {"enabled": bool(cfg.upgrade_enable), "state": "unknown"}
+        st = upgrade_lib.public_status(j) if upgrade_lib else {"state": "unavailable"}
+        out = {
+            "enabled": bool(cfg.upgrade_enable),
+            "state": st.get("state"),
+            "version": st.get("version"),
+            "job": st.get("job"),
+            "error": st.get("error"),
+            "confirm_expires_in": st.get("confirm_expires_in"),
+        }
+        # 「已确认但一直没动静」必须能被看见：path unit 没装、helper 起不来、
+        # path unit 没装、helper 起不来，都会表现为 journal 永远停在 committed。
+        # 不显式标出来，用户只会看到"卡住"然后反复点。
+        if st.get("state") == "committed":
+            age = int(time.time()) - int((j.data or {}).get("updated_at") or 0)
+            out["committed_for_s"] = age
+            out["stalled"] = age > 900
+        if cfg.code_via_api and st.get("state") == "verified" and upgrade_lib:
+            try:
+                sec = upgrade_lib._secret(_up_paths()["secret"])
+                d = j.data or {}
+                out["confirm_code"] = upgrade_lib.make_code(
+                    sec, d.get("job", ""), d.get("pkg_sha256", ""))
+            except Exception:
+                pass
+        return out
+
+    @app.route("/guard/upgrade/prepare", methods=["POST"])
+    def upgrade_prepare():
+        bad = _up_guard()
+        if bad:
+            return bad
+        j = _journal()
+        if j.data.get("state") == "committed":
+            return jsonify({"ok": False, "error": "upgrade_in_progress"}), 409
+
+        # 长度检查必须在**碰 request.files 之前**：Flask 访问 files 时就会解析
+        # 整个 multipart（body 已进内存/临时文件），放到后面等于白占一遍内存。
+        if request.content_length and request.content_length > upgrade_lib.MAX_PKG_BYTES + 65536:
+            return jsonify({"ok": False, "error": "pkg_too_large"}), 413
+        f = request.files.get("pkg")
+        if f is None:
+            return jsonify({"ok": False, "error": "no_package"}), 400
+
+        incoming = os.path.join(cfg.upgrade_dir, "incoming")
+        os.makedirs(incoming, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix="in-", suffix=".tar.gz", dir=incoming)
+        size = 0
+        try:
+            with os.fdopen(fd, "wb") as out:
+                while True:
+                    chunk = f.stream.read(65536)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > upgrade_lib.MAX_PKG_BYTES:
+                        raise upgrade_lib.UpgradeError("pkg_too_large")
+                    out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
+
+            job, man, staged, pkg_sha = upgrade_lib.stage_package(tmp, _up_paths(), VERSION)
+            exp = int(time.time()) + upgrade_lib.CONFIRM_TTL_S
+            j.set(job=job, state="verified", version=man["version"],
+                  from_version=VERSION, pkg_sha256=pkg_sha, staged_dir=staged,
+                  code_exp=exp, confirm_attempts=0, error="")
+            code = upgrade_lib.make_code(upgrade_lib._secret(_up_paths()["secret"]),
+                                         job, pkg_sha)
+            # 权威渠道 = 本机日志（A 端读不到）。API 是否也回码由 code_via_api 决定。
+            logger.warning("升级包已校验并暂存：v%s job=%s 文件 %d 个；"
+                           "确认码 %s（%d 秒内有效，A 端输入后才切换）",
+                           man["version"], job, len(man["files"]), code,
+                           upgrade_lib.CONFIRM_TTL_S)
+            return jsonify({
+                "ok": True, "job": job, "version": man["version"],
+                "files": len(man["files"]), "bytes": size,
+                "from_version": VERSION,
+                "confirm_expires_in": upgrade_lib.CONFIRM_TTL_S,
+                "confirm_code": code if cfg.code_via_api else "",
+            }), 202
+        except upgrade_lib.UpgradeError as exc:
+            return _err(exc)
+        except Exception as exc:                       # noqa: BLE001
+            logger.exception("升级包处理异常")
+            return jsonify({"ok": False, "error": "internal", "detail": repr(exc)[:200]}), 500
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    @app.route("/guard/upgrade/confirm", methods=["POST"])
+    def upgrade_confirm():
+        bad = _up_guard()
+        if bad:
+            return bad
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "body_must_be_object"}), 400
+        job = str(data.get("job") or "").strip()
+        code = str(data.get("code") or "").strip()
+        j = _journal()
+        if not job or j.data.get("job") != job:
+            return jsonify({"ok": False, "error": "job_mismatch"}), 409
+
+        okc, reason = upgrade_lib.confirm(j, code, _up_paths()["secret"])
+        if not okc:
+            logger.warning("升级确认失败：%s（job=%s）", reason, job)
+            return jsonify({"ok": False, "error": reason}), 403
+
+        logger.warning("升级已确认，交 root helper 执行：v%s job=%s",
+                       j.data.get("version"), job)
+        _request_apply()
+        return jsonify({"ok": True, "state": "committed", "job": job,
+                        "version": j.data.get("version")}), 202
+
+    @app.route("/guard/upgrade/status", methods=["GET"])
+    def upgrade_status():
+        # 这个接口在"未启用升级"时也要能读：A 端需要区分
+        # 「B 没开升级功能」和「B 连不通」，两者处置完全不同。
+        if not _authorized():
+            return _deny()
+        if upgrade_lib is None:
+            return jsonify({"ok": False, "error": "verifier_missing"}), 503
+        try:
+            brief = _upgrade_brief()
+        except Exception as exc:                       # noqa: BLE001
+            return jsonify({"ok": False, "error": "journal_unreadable",
+                            "detail": repr(exc)[:120]}), 500
+        return jsonify({"ok": True, "version": VERSION, "upgrade": brief,
+                        "ts_cidr": cfg.ts_cidr})
+
     # ── 后台线程：judge + dead-man ──────────────────────────
     if cfg.judge_enable:
         _start_judge_thread(cfg, judge)
@@ -211,11 +469,13 @@ def create_app(cfg=None):
 
 def _start_judge_thread(cfg, judge) -> None:
     def loop():
+        global _JUDGE_LAST_TICK
         logger.info("judge 线程启动 interval=%ss T=%ss warn=%ss alarm=%ss",
                     cfg.judge_interval, cfg.heartbeat_interval, cfg.warn_s, cfg.alarm_s)
         while True:
             try:
                 events = judge.tick()
+                _JUDGE_LAST_TICK = time.time()
                 for e in events:
                     if e.get("type") not in ("ok", "silent", "warn"):
                         logger.info("judge 事件: %s", e)
@@ -241,6 +501,39 @@ def _start_deadman_thread(cfg) -> None:
 
     t = threading.Thread(target=loop, name="guard-deadman", daemon=True)
     t.start()
+
+
+def _spawn_apply(cmd, mark_failed=None) -> None:
+    """触发 root helper（切版本/重启）。不 shell=True：命令写死在 env，不允许拼接。
+
+    **必须检查返回值**：这条支路只在 `GUARD_UPGRADE_APPLY_CMD` 非空时才会走到
+    （默认走 path unit，见 `_request_apply`）。命令失败时 journal 会永远停在
+    committed，之后每次 prepare 都 409 —— 用户看到"升级卡住"，日志里却什么都没有。
+    """
+    def run():
+        argv = str(cmd or "").split()
+        if not argv:
+            logger.error("GUARD_UPGRADE_APPLY_CMD 为空，无法执行升级")
+            if mark_failed:
+                mark_failed("apply_cmd_empty")
+            return
+        try:
+            r = subprocess.run(argv, capture_output=True, timeout=600)
+        except Exception as exc:                        # noqa: BLE001
+            logger.exception("apply helper 启动失败")
+            if mark_failed:
+                mark_failed(repr(exc)[:160])
+            return
+        if r.returncode != 0:
+            err = (r.stderr or b"")[:300].decode("utf-8", "replace").strip()
+            logger.error("apply helper 失败 rc=%s %s（检查 GUARD_UPGRADE_APPLY_CMD "
+                         "与执行权限）", r.returncode, err)
+            if mark_failed:
+                mark_failed("apply_cmd_failed rc=%s %s" % (r.returncode, err))
+            return
+        logger.info("apply helper 已提交")
+
+    threading.Thread(target=run, name="guard-apply", daemon=True).start()
 
 
 def main() -> int:

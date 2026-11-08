@@ -1,0 +1,20 @@
+[Unit]
+Description=Guardian-B upgrade request watcher
+Documentation=file:///opt/guard-b/INSTALL-TS.md
+# 这个 unit 是「guardb 用户 → root helper」的**唯一**通道。
+#
+# 为什么不用 sudo / polkit：
+#   guard-b.service 开着 NoNewPrivileges=yes（本地锁死的前提），
+#   而 NNP 会让 sudo 拿不到 root（setuid 被禁）——两者互斥。
+#   走 path unit：guardb 只能"写一个文件"，至于写完之后跑什么，由 root 侧定义。
+#   这比给 guardb 一条 sudo 规则更窄：它连"选择命令"的能力都没有。
+#
+# 触发条件：Flask 在 confirm 成功后原子写 data/upgrade/request。
+# 目录不存在时 systemd 会监听最近的已存在父目录（systemd ≥ 233，Debian 11 = 247）。
+
+[Path]
+PathChanged=/opt/guard-b/data/upgrade/request
+Unit=guardb-upgrade.service
+
+[Install]
+WantedBy=multi-user.target

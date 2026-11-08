@@ -138,6 +138,38 @@
       </div>
     </div>
 
+    <!-- 僚机（B 端）版本同步 -->
+    <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)" data-page-node-id="peerSyncBlock">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:0.8rem;font-weight:600">🛰 僚机（B 端）版本</span>
+        <span style="display:flex;gap:6px;align-items:center">
+          <span class="status-dot" id="peer-dot"></span>
+          <span id="peer-state" style="font-size:0.72rem;color:var(--text-muted)">读取中…</span>
+          <button class="btn btn-sm btn-outline" onclick="loadPeer(true)">刷新</button>
+        </span>
+      </div>
+      <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.8">
+        <div>僚机版本：<b id="peer-ver" style="color:var(--text-base)">—</b>
+          <span id="peer-upg-state" style="margin-left:6px"></span></div>
+        <div>A 端包库：<span id="peer-pkgs">—</span></div>
+        <div id="peer-hint" style="display:none;color:#e6a23c"></div>
+      </div>
+      <div class="btn-row" style="margin-top:8px;flex-wrap:wrap;gap:6px">
+        <input type="file" id="peer-file" accept=".tar.gz" style="display:none" onchange="uploadPeerPkg()">
+        <button class="btn btn-sm btn-outline" onclick="document.getElementById('peer-file').click()">上传僚机包</button>
+        <button class="btn btn-sm btn-primary" id="btn-peer-upgrade" onclick="peerUpgrade()" disabled>预置到僚机</button>
+        <span id="peer-job-box" style="display:none;align-items:center;gap:6px">
+          <input id="peer-code" placeholder="确认码 6 位" maxlength="6" autocomplete="off"
+                 style="width:120px;font-family:monospace;text-transform:uppercase;letter-spacing:2px">
+          <button class="btn btn-sm btn-primary" onclick="peerConfirm()">确认切换</button>
+        </span>
+      </div>
+      <div id="peer-msg" style="font-size:0.72rem;margin-top:6px;line-height:1.6"></div>
+      <div style="font-size:0.66rem;color:var(--text-muted);margin-top:4px">
+        包由离线签名机签发，A 端只做分发；僚机独立验签并要求人工输码后才切换。
+      </div>
+    </div>
+
     <!-- 新版本更新说明（最近 5 个 release，页面加载时自动展开最新版本） -->
     <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)" data-page-node-id="dC4BOzNjCeyDsVNsFrqv9z">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px" data-page-node-id="9RaZRG6Z9AVZGCq8xBJJrc">
@@ -1586,6 +1618,262 @@ function savePreviewConfig() {
 }
 
 // ═══ Version management ═══
+// ═══ 僚机（B 端）版本同步 ═══
+var _peer = { job: '', version: '', busy: false, pending: false,
+              confirming: false, timer: null, tries: 0 };
+
+function peerMsg(html, tone) {
+  var el = document.getElementById('peer-msg');
+  if (!el) return;
+  el.innerHTML = html || '';
+  el.style.color = tone === 'err' ? '#e74c3c' : (tone === 'ok' ? '#34c759' : 'var(--text-muted)');
+}
+
+function peerDot(cls) {
+  var d = document.getElementById('peer-dot');
+  if (d) d.className = 'status-dot ' + cls;
+}
+
+function peerVerTuple(v) {
+  return String(v || '').split('.').map(function (x) { return parseInt(x, 10) || 0; });
+}
+
+function peerVerCmp(a, b) {
+  var x = peerVerTuple(a), y = peerVerTuple(b);
+  for (var i = 0; i < 3; i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0) ? 1 : -1;
+  }
+  return 0;
+}
+
+async function loadPeer(manual) {
+  // busy 时不能直接丢弃这次刷新：peerUpgrade 的 finally 里会调 loadPeer，
+  // 丢掉就等于"操作完页面不更新"。记一个 pending，当前这轮结束后补跑一次。
+  if (_peer.busy) { _peer.pending = true; return; }
+  _peer.busy = true;
+  try {
+    var r = await fetch('/api/guard/peer?t=' + Date.now());
+    var d = await r.json();
+    var hint = document.getElementById('peer-hint');
+    hint.style.display = 'none';
+
+    if (!d.success) {
+      peerDot('err'); document.getElementById('peer-state').textContent = '读取失败';
+      peerMsg(escapeHtml(d.error || '未知错误'), 'err');
+      return;
+    }
+
+    // 包库（A 端本地，已验签）
+    var pkgs = d.packages || [];
+    document.getElementById('peer-pkgs').textContent = pkgs.length
+      ? pkgs.map(function (p) {
+          return 'v' + p.version + '（' + Math.round((p.bytes || 0) / 1024) + 'KB）';
+        }).join('、')
+      : '空（先上传已签名的包）';
+
+    if (!d.configured) {
+      peerDot('off'); document.getElementById('peer-state').textContent = '未配置';
+      document.getElementById('peer-ver').textContent = '—';
+      document.getElementById('btn-peer-upgrade').disabled = true;
+      peerMsg('还没配守护通道（健康与通知 → 守护），配好才能读到僚机版本。');
+      return;
+    }
+
+    if (!d.reachable) {
+      peerDot('err');
+      document.getElementById('peer-state').textContent = '连不上';
+      document.getElementById('peer-ver').textContent = '—';
+      document.getElementById('btn-peer-upgrade').disabled = true;
+      peerMsg(escapeHtml(d.error || '僚机不可达'), 'err');
+      return;
+    }
+
+    var p = d.peer || {};
+    peerDot('ok');
+    document.getElementById('peer-state').textContent = '在线';
+    document.getElementById('peer-ver').textContent = 'v' + (p.version || '?');
+
+    var stEl = document.getElementById('peer-upg-state');
+    var st = p.state || 'idle';
+    var stText = { idle: '', verified: '· 已就绪待确认', committed: '· 正在切换',
+                   healthy: '· 升级已完成', rolled_back: '· 已回滚', failed: '· 升级失败' };
+    stEl.textContent = stText[st] || ('· ' + st);
+
+    // 待确认 → 亮出确认码输入框
+    var box = document.getElementById('peer-job-box');
+    if (st === 'verified' && p.job) {
+      _peer.job = p.job;
+      _peer.version = p.target_version || '';
+      box.style.display = 'flex';
+      var codeInput = document.getElementById('peer-code');
+      // 只在**用户没输入过**时自动填，别覆盖人手输了一半的内容
+      if (!codeInput.value && p.confirm_code) codeInput.value = p.confirm_code;
+      peerMsg('包已在僚机校验并暂存（v' + escapeHtml(_peer.version) + '），'
+        + (p.confirm_expires_in ? '还剩 ' + p.confirm_expires_in + ' 秒' : '')
+        + '。<br>'
+        + (p.confirm_code
+            ? '确认码已取到（便利模式：僚机开了 GUARD_UPGRADE_CODE_VIA_API=1）。'
+              + '<b>请确认版本号对得上</b>再点「确认切换」；要真正的带外确认，'
+              + '把该开关设为 0，码就只出现在僚机日志里。'
+            : '请到僚机执行 <code>journalctl -u guard-b | grep 确认码</code> 取 6 位码。'));
+    } else {
+      box.style.display = 'none';
+      if (st === 'committed') {
+        _peer.job = p.job || _peer.job;
+        peerMsg('僚机正在切换版本并重启，约 1 分钟…');
+        startPeerPoll();
+      } else if (st === 'rolled_back') {
+        peerMsg('升级未通过健康检查，僚机已回滚到原版本。'
+          + (p.upgrade_error ? '<br>' + escapeHtml(p.upgrade_error) : ''), 'err');
+      } else if (st === 'failed') {
+        peerMsg('升级失败：' + escapeHtml(p.upgrade_error || '未给出原因'), 'err');
+      }
+    }
+
+    if (!p.upgrade_enabled) {
+      hint.style.display = 'block';
+      hint.textContent = '僚机未启用远程升级（B 上 GUARD_UPGRADE_ENABLE=0）。可以读版本，但推不上去。';
+    }
+
+    // 升级按钮：有更新的包 + 僚机开了远程升级 + 当前没有进行中的任务
+    var newest = pkgs.length ? pkgs[0].version : '';
+    var canUp = !!(newest && p.upgrade_enabled && st !== 'verified' && st !== 'committed'
+                   && peerVerCmp(newest, p.version) > 0);
+    var btn = document.getElementById('btn-peer-upgrade');
+    btn.disabled = !canUp;
+    btn.textContent = (newest && peerVerCmp(newest, p.version) > 0)
+      ? ('预置 v' + newest + ' 到僚机')
+      : '已是最新';
+
+    if (manual) peerMsg('已刷新');
+  } catch (e) {
+    peerDot('err');
+    document.getElementById('peer-state').textContent = '读取失败';
+    peerMsg(escapeHtml(e.message || String(e)), 'err');
+  } finally {
+    _peer.busy = false;
+    if (_peer.pending) { _peer.pending = false; setTimeout(loadPeer, 80); }
+  }
+}
+
+async function uploadPeerPkg() {
+  var inp = document.getElementById('peer-file');
+  if (!inp.files || !inp.files.length) return;
+  var f = inp.files[0];
+  var fd = new FormData();
+  fd.append('pkg', f);
+  peerMsg('上传并验签中…');
+  try {
+    var r = await fetch('/api/guard/peer/package', { method: 'POST', body: fd });
+    var d = await r.json();
+    if (d.success) {
+      peerMsg('✅ 签名有效，已入库：v' + escapeHtml(d.package.version)
+        + '（' + d.package.files + ' 个文件，' + Math.round(d.package.bytes / 1024) + 'KB）'
+        + '<br><span style="color:var(--text-muted)">这里只验了签名；每个文件的 hash 由僚机复核。</span>', 'ok');
+      loadPeer();
+    } else {
+      peerMsg('❌ ' + escapeHtml(d.error || '上传失败'), 'err');
+    }
+  } catch (e) {
+    peerMsg('❌ ' + escapeHtml(e.message || String(e)), 'err');
+  } finally {
+    inp.value = '';      // 允许重复选同一个文件
+  }
+}
+
+async function peerUpgrade() {
+  var btn = document.getElementById('btn-peer-upgrade');
+  if (!confirm('把已签名的僚机包推送到 B 端并校验？\n\n'
+    + '· 这一步**不会**立即切换版本，只做预置\n'
+    + '· 之后需要输入确认码才会真的生效\n'
+    + '· 校验期间 B 会短暂忙，不影响判死')) return;
+  btn.disabled = true;
+  peerMsg('推送并校验中…');
+  try {
+    var r = await fetch('/api/guard/peer/upgrade', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    var d = await r.json();
+    if (d.success) {
+      _peer.job = d.job; _peer.version = d.version;
+      document.getElementById('peer-job-box').style.display = 'flex';
+      if (d.confirm_code) document.getElementById('peer-code').value = d.confirm_code;
+      peerMsg('✅ 已预置 v' + escapeHtml(d.version) + '（' + d.files + ' 个文件）。'
+        + (d.confirm_code ? '确认码已填好，确认后点「确认切换」。'
+                          : '请到僚机日志取确认码。'), 'ok');
+    } else {
+      peerMsg('❌ ' + escapeHtml(d.error || '推送失败'), 'err');
+    }
+  } catch (e) {
+    peerMsg('❌ ' + escapeHtml(e.message || String(e)), 'err');
+  } finally {
+    // 按钮状态交给 loadPeer 重算，这里不硬置 true（会把"已是最新"覆盖成可点）
+    loadPeer();
+  }
+}
+
+async function peerConfirm() {
+  var code = (document.getElementById('peer-code').value || '').trim();
+  if (!code) { peerMsg('请先填确认码', 'err'); return; }
+  if (!_peer.job) { peerMsg('没有待确认的任务，请重新预置', 'err'); return; }
+  // 连点保护：B 端确认成功后会重启，重复提交只会让用户看到一堆失败
+  if (_peer.confirming) return;
+  if (!confirm('确认让僚机切换到 v' + _peer.version + '？\n\n'
+    + '切换过程会重启僚机服务，约 1 分钟不可用。\n'
+    + '若健康检查不通过，会自动回滚到原版本。')) return;
+
+  _peer.confirming = true;
+  peerMsg('已提交，等待僚机切换…');
+  try {
+    var r = await fetch('/api/guard/peer/confirm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job: _peer.job, code: code })
+    });
+    var d = await r.json();
+    if (d.success) {
+      peerMsg('✅ ' + escapeHtml(d.message || '已确认'), 'ok');
+      startPeerPoll();
+    } else {
+      peerMsg('❌ ' + escapeHtml(d.error || '确认失败'), 'err');
+    }
+  } catch (e) {
+    peerMsg('❌ ' + escapeHtml(e.message || String(e)), 'err');
+  } finally {
+    _peer.confirming = false;
+  }
+}
+
+// 轮询任务状态：3 秒一次，最多 ~3 分钟。
+// 注意用**跨轮询的标记位**（_peer.timer），不能靠按钮 disabled ——
+// 它会被 30 秒的全局刷新重置掉，导致重复下发（M122）。
+function startPeerPoll() {
+  if (_peer.timer) return;
+  _peer.tries = 0;
+  _peer.timer = setInterval(async function () {
+    _peer.tries++;
+    if (_peer.tries > 60) { clearInterval(_peer.timer); _peer.timer = null; return; }
+    try {
+      var r = await fetch('/api/guard/peer/job?job=' + encodeURIComponent(_peer.job || ''));
+      var d = await r.json();
+      if (!d.success) return;
+      var u = d.upgrade || {};
+      if (u.state === 'healthy') {
+        clearInterval(_peer.timer); _peer.timer = null;
+        peerMsg('🎉 僚机已升级到 v' + escapeHtml(u.version || _peer.version) + '，健康检查通过。', 'ok');
+        document.getElementById('peer-job-box').style.display = 'none';
+        loadPeer();
+      } else if (u.state === 'rolled_back' || u.state === 'failed') {
+        clearInterval(_peer.timer); _peer.timer = null;
+        peerMsg('⚠ 升级未成功，僚机已回滚：' + escapeHtml(u.error || ''), 'err');
+        loadPeer();
+      } else {
+        peerMsg('切换中…（' + escapeHtml(u.state || 'committed') + '）');
+      }
+    } catch (e) { /* 网络抖动，下一轮再试 */ }
+  }, 3000);
+}
+
 function checkVersionNow() {
   var le = document.getElementById('ver-latest'), se = document.getElementById('ver-status');
   var badge = document.getElementById('ver-status-badge');
@@ -1760,6 +2048,7 @@ loadWecomConfig(); loadPushHealth(); loadServices(); loadThumbResetConfig(); loa
 loadGuardConfig();
 loadPowerStatus();
 setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500); setTimeout(loadChangelogList, 2000);
+setTimeout(loadPeer, 2500);   // 僚机版本：等版本区展开后再拉，避免和 A 自身版本检查抢连接
 setInterval(loadPowerStatus, 60000);  // 每 60 秒刷新位置状态
 setInterval(function() { loadWecomConfig(); loadPushHealth(); loadSummary(); loadServices(); loadGuardStatus(); }, 30000);
 setInterval(function() { loadSummary(); }, 15000);

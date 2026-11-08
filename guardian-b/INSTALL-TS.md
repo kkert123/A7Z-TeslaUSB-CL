@@ -262,3 +262,98 @@ curl -s -X POST http://100.111.252.121:8899/guard/heartbeat \
 # 期望：{"ok":true,"channel":"ts","result":{"event":"test","ignored":true}}
 # 再查 status：last_seen.ts 仍是 0，last_test.version = "manual-test"，且 5 分钟后不告警
 ```
+
+---
+
+## 10. 升级到 v1.1.0（目录布局变更 + 远程升级能力）
+
+> **这一步不是"覆盖文件"**：v1.1.0 把代码改成 `releases/<版本>/ + current 符号链接`，
+> 并新增两个 systemd 单元。`install.sh` 会自动迁移旧布局，但**请按顺序做**。
+
+v1.1.0 带来的变化：
+
+| 变化 | 为什么 |
+|---|---|
+| 代码进 `releases/<ver>/`，`current` 指向它 | 升级只切链接（原子），旧版本保留可回滚 |
+| 进程改以 `guardb` 用户运行，代码目录 root 只读 | "本地锁死"：即便 Flask 被 RCE 也改不了自己的代码 |
+| 新增 `.tools/`（验签库 + root helper） | 验签器**不能**被升级包替换，否则校验形同虚设 |
+| 新增 `guardb-upgrade.service` + `guardb-upgrade.path` | 只有它能写代码目录；guardb 只能**写一个请求文件**，跑什么由 root 侧定义（不用 sudo——`NoNewPrivileges` 会让 sudo 失效） |
+| `guard-b.env` 变成 `root:guardb 0440` | 进程能读 key（要发告警）但不能改 key（防改告警目的地） |
+
+### 10.1 步骤
+
+```bash
+# 1) 传包并校验
+scp guardian-b-deploy-v1.1.0.tar.gz root@100.111.252.121:/root/
+ssh root@100.111.252.121
+sha256sum /root/guardian-b-deploy-v1.1.0.tar.gz    # 必须等于发布说明里的值
+
+# 2) 停服务再迁移（避免 mv 掉 *.py 的瞬间被 restart 撞上）
+systemctl stop guard-b
+
+# 3) 解压到新目录再跑 install.sh
+rm -rf /root/gb3 && mkdir -p /root/gb3
+tar xzf /root/guardian-b-deploy-v1.1.0.tar.gz -C /root/gb3
+cd /root/gb3/guardian-b && bash install.sh
+# 期望输出里有：迁移旧平铺布局 → releases/1.0.2 / 安装 releases/1.1.0 / 切换 current
+
+# 4) 装**升级包**签名公钥（一行；principal 必须是 a7z-guard）
+echo 'a7z-guard ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOGgjJGFoLcfRpflu14lFkf37M7wxefXyBOZs/BPey/E a7z-guard' \
+  | tee /opt/guard-b/.trusted/pkg.pub
+chmod 0444 /opt/guard-b/.trusted/pkg.pub
+
+# 5) 清掉可能被污染的判死状态（见 §9 / M125；没做过手工测试可跳过）
+mv /opt/guard-b/data/state.json /opt/guard-b/data/state.json.bak-$(date +%s) 2>/dev/null || true
+
+# 6) 起服务 + 自检
+systemctl start guard-b
+sleep 3
+systemctl --no-pager --lines=20 status guard-b
+ls -l /opt/guard-b/current                     # 应指向 releases/1.1.0
+ps -o user=,cmd= -p $(systemctl show -p MainPID --value guard-b)   # 应是 guardb
+```
+
+### 10.2 启用远程升级（可选，默认关闭）
+
+```bash
+# 只改这一行，然后重启
+sed -i 's/^GUARD_UPGRADE_ENABLE=.*/GUARD_UPGRADE_ENABLE=1/' /opt/guard-b/guard-b.env
+systemctl restart guard-b
+
+# 验证（三项缺一都会 403，这是设计）
+curl -s http://<TS_IP>:8899/guard/upgrade/status \
+  -H "Authorization: Bearer $(grep -E '^GUARD_TOKEN=' /opt/guard-b/guard-b.env | cut -d= -f2-)" \
+  | python3 -m json.tool
+# 期望：{"ok":true,"version":"1.1.0","upgrade":{"enabled":true,"state":"idle",...}}
+```
+
+**确认码在哪看**（这是防"A 被拿下换掉见证者"的关键一环）：
+
+```bash
+journalctl -u guard-b | grep 确认码 | tail -1
+# 或
+grep 确认码 /opt/guard-b/data/guard-b.log | tail -1
+```
+
+> `GUARD_UPGRADE_CODE_VIA_API=0`（**默认**）时确认码只在僚机本地日志里，A 端读不到
+> —— 这才是真正的带外确认。改成 `1` 后 A 端能自动取到码，操作更省事，
+> 但"拿到 A 的攻击者"也能全自动完成整个升级，等于把人工确认降级成"人看一眼"。
+
+### 10.3 回滚
+
+```bash
+ls /opt/guard-b/releases            # 保留 current + 2 代
+# 方式一：手工切回（立刻生效）
+ln -sfn releases/<旧版本> /opt/guard-b/current.swap && mv -Tf /opt/guard-b/current.swap /opt/guard-b/current
+systemctl restart guard-b
+
+# 方式二：让账本回滚（下次 apply 时执行）
+#   把 data/upgrade/journal.json 的 state 改成 committed、version 改成旧版本 —— 不推荐，
+#   正常升级失败时 apply.py 会自动回滚并在 status 里显示 rolled_back。
+```
+
+### 10.4 三个必须知道的边界
+
+1. **升级期间判死告警会被抑制**：A 端在发起升级时开一个 900 秒的抑制窗口，避免"B 重启"被报成"B 失联"。窗口内若设备真的掉线，要等窗口结束才会告警。
+2. **回滚不保证数据新**：`state.json` 若因新版本 schema 变了，回滚只切代码。升级前如需保底，先 `cp -a data data.bak-$(date +%s)`。
+3. **包不能带脚本、不能改 env/状态**：`file_type_not_allowed` / `forbidden_path` 是硬拒绝，不做"跳过"。要改这些只能人工登录操作——这正是锁死的含义。

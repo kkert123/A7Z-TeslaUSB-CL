@@ -101,6 +101,10 @@ gc.PREVIEW_QUEUE = os.path.join(TMP, "preview_queue.json")
 gc.PREVIEW_BLOCKED = os.path.join(TMP, "preview_blocked.json")
 gc.PREVIEW_SCAN = os.path.join(TMP, "preview_scan.json")
 gc.SENTRY_CONFIG = os.path.join(TMP, "sentry.json")
+# 升级窗口也必须指到临时目录：它会让 `_ping_failed` 抑制失联告警，
+# 若读到上一次运行/别的测试残留的窗口文件，本套件会出现"复跑就过"的假失败。
+gc.PKG_DIR = os.path.join(TMP, "guard_pkg")
+gc.UPGRADE_WINDOW_PATH = os.path.join(TMP, "upgrade_window.json")
 
 import config as app_config  # noqa: E402
 app_config.PUSH_HEALTH_FILE = os.path.join(TMP, "push_health.json")
