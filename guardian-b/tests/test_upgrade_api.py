@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 
 TOKEN = "u" * 48
@@ -185,8 +186,10 @@ def a3_没带令牌401():
 
 @case
 def a4_正常包被暂存():
-    # 当前运行版本是 1.1.0（app.VERSION），所以必须用更新版本，否则命中 not_newer
-    raw = build_pkg(version="1.2.0", frm=("1.1.0",))
+    # 目标版本必须比当前运行版本新，且清单的 from 必须包含当前版本，否则先撞
+    # not_newer / incompatible_from。**当前版本从 app.VERSION 取**，不要写死——
+    # 写死会让"只改版本号"的发布直接红一条，而实现其实完全正确。
+    raw = build_pkg(version="1.2.0", frm=(gapp.VERSION,))
     c = client()
     r = c.post("/guard/upgrade/prepare", headers=H,
                data={"pkg": (io.BytesIO(raw), "guardian-b-v1.1.0.tar.gz")},
@@ -281,6 +284,97 @@ def a11_卡住的committed会被标出来():
     c = client()
     d = c.get("/guard/upgrade/status", headers=H).get_json()
     ok(d["upgrade"].get("stalled") is True, "超过 15 分钟未推进应标 stalled：%s" % d)
+
+
+@case
+def a12_确认码推企微():
+    """v1.1.2：码生成后推一条到企微（异步），任一路失败都不影响升级。
+
+    这里直接测 `_notify_code`，不经 HTTP —— 推送是后台线程，从 HTTP 层只能靠
+    sleep 猜时序，那种测试必然偶发红。判据全部落在「消息体里有没有该有的字段」。
+    """
+    class FakeAlerter:
+        def __init__(self, configured=True, boom=False):
+            self.configured = configured
+            self.boom = boom
+            self.sent = []
+            self.done = threading.Event()
+
+        def status(self):
+            return {"configured": self.configured, "key_tail": "…abcd", "dry_run": False}
+
+        def send_text(self, text):
+            try:
+                if self.boom:
+                    raise RuntimeError("webhook down")
+                self.sent.append(text)
+                return "sent"
+            finally:
+                self.done.set()
+
+    class On:
+        code_notify = True
+
+    class Off:
+        code_notify = False
+
+    # ① 正常路径：消息里必须有码 / 版本 / 任务号 / 来源
+    fa = FakeAlerter()
+    gapp._notify_code(fa, On(), "abcd1234ef567890", "654321", "1.1.2", 600, "100.116.18.42")
+    ok(fa.done.wait(5), "推送线程没跑起来")
+    ok(len(fa.sent) == 1, "应只发一条，实际 %d" % len(fa.sent))
+    for frag, why in (("654321", "确认码"), ("1.1.2", "目标版本"),
+                      ("abcd1234", "任务号前 8 位"), ("100.116.18.42", "来源 IP")):
+        ok(frag in fa.sent[0], "消息里缺%s：%s" % (why, fa.sent[0]))
+
+    # ② 开关关闭 → 一条都不发
+    fa2 = FakeAlerter()
+    gapp._notify_code(fa2, Off(), "j", "111111", "1.1.2", 600, "x")
+    ok(fa2.done.wait(0.5) is False, "GUARD_UPGRADE_CODE_NOTIFY=0 时不应推送")
+
+    # ③ 企微未配置 → 不发，也不能抛
+    fa3 = FakeAlerter(configured=False)
+    gapp._notify_code(fa3, On(), "j", "222222", "1.1.2", 600, "x")
+    ok(fa3.done.wait(0.5) is False, "未配置 key 时不应推送")
+
+    # ④ 投递抛异常 → 必须在线程内被吞掉（主线程零影响）
+    fa4 = FakeAlerter(boom=True)
+    gapp._notify_code(fa4, On(), "j", "333333", "1.1.2", 600, "x")
+    ok(fa4.done.wait(5), "异常路径也要真正跑到")
+
+
+@case
+def a13_prepare成功后触发推送():
+    """证明推送真的接在 prepare 的成功路径上，而不是「写了个函数没人调」。
+
+    把 `_notify_code` 换成记录器：异步线程不好断言，"被调用 + 参数正确"才是判据。
+    """
+    # a11 把 journal 留在 committed，prepare 会直接 409 → 先恢复到可预置状态
+    _journal(state="verified")
+    calls = []
+
+    def _rec(*a, **kw):
+        calls.append(a)
+
+    orig = gapp._notify_code
+    gapp._notify_code = _rec
+    try:
+        raw = build_pkg(version="1.2.1", frm=(gapp.VERSION,))
+        r = client().post("/guard/upgrade/prepare", headers=H,
+                          data={"pkg": (io.BytesIO(raw), "guardian-b-v1.2.1.tar.gz")},
+                          content_type="multipart/form-data")
+    finally:
+        gapp._notify_code = orig
+
+    d = r.get_json()
+    ok(r.status_code == 202, "%s %s" % (r.status_code, d))
+    ok(len(calls) == 1, "prepare 成功必须恰好触发一次推送，实际 %d" % len(calls))
+    # 签名：(alerter, cfg, job, code, version, ttl, src_ip)
+    args = calls[0]
+    ok(str(args[2]) and len(str(args[2])) >= 8, "推送必须带 job")
+    ok(len(str(args[3])) == 6 and str(args[3]).isdigit(), "推送必须带 6 位数字码：%r" % (args[3],))
+    ok(args[4] == "1.2.1", "推送必须带目标版本：%r" % (args[4],))
+    ok(int(args[5]) == up.CONFIRM_TTL_S, "推送必须带有效期：%r" % (args[5],))
 
 
 def main():

@@ -134,6 +134,14 @@ class Config:
         #   1 = 便利模式：A 端能自动读到码 → 但这也意味着"拿到 A 的攻击者能全自动完成"，
         #       等于把人工确认降级成"人看一眼"。打开前请确认你接受这个折中。
         self.code_via_api: bool = _env_str("GUARD_UPGRADE_CODE_VIA_API", "0") in ("1", "true", "yes")
+        # 确认码是否**推送到企微**（v1.1.2，默认开）。
+        #
+        # 这是把「带外确认」从"登服务器看日志"降到"手机看一眼"的正规做法：
+        # 码走的是 B → 企微服务器 → 用户手机，A 端既读不到群消息、也改不了这个开关
+        # （开关在 root:guardb 0440 的 env 里）。所以它**不削弱**安全模型。
+        #
+        # 关闭场景：多个人的企微群，不想让别人看到码 → 建单人群，或设 0 退回只写日志。
+        self.code_notify: bool = _env_str("GUARD_UPGRADE_CODE_NOTIFY", "1") in ("1", "true", "yes")
         # 触发 root helper 的方式。默认**留空** = 写请求文件，
         # 由 `guardb-upgrade.path` 监听后拉起 `guardb-upgrade.service`。
         #

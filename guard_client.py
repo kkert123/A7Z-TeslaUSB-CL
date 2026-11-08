@@ -46,6 +46,12 @@ SENTRY_CONFIG = os.path.join(app_config.CONFIG_DIR, "sentry.json")
 # `_disabled` 后缀的禁用语义，UI 只需多一个 bot 条目。
 GUARD_BOT_CONFIG_KEY = "wecom_guard_webhook_key"
 STATUS_PATH = os.path.join(app_config.DATA_DIR, "guard_status.json")
+# 本模块**自己**的推送健康（真实发送路径）。
+# 不能借用 push_health.json：那个文件只由 weixin_notifier（哨兵事件推送）写，
+# 而自检报告/告警走的是这里的 _push_wecom。判据读别人的文件，就会出现
+# 「明明收到了推送，自检却说 172 天没成功过」——M127：先验后用必须同一份数据。
+PUSH_HEALTH_OWN = os.path.join(app_config.DATA_DIR, "guard_push_health.json")
+_PUSH_HEALTH_LOCK = threading.Lock()
 QUEUE_PATH = os.path.join(app_config.DATA_DIR, "guard_queue.json")
 USB_GUARD_STATUS = os.path.join(app_config.DATA_DIR, "usb_guard_status.json")
 PREVIEW_QUEUE = os.path.join(app_config.DATA_DIR, "preview_queue.json")
@@ -64,6 +70,7 @@ WIFI_IFACE = "wlan0"
 THUMB_PENDING_WARN = 50          # 待生成缩略图积压阈值
 WECHAT_OK_MAX_AGE = 24 * 3600    # 24h 内有过成功推送算健康
 WECHAT_FAIL_STREAK = 3           # 连续失败次数达此值判 fail
+WECHAT_FAIL_WARN_S = 1800        # 单次失败只在这么近的时间内才算「可疑」
 GADGET_STALE_S = 300             # usb_guard_status.json 超过此年龄视为守护停摆
 THUMB_SCAN_STALE_S = 600         # preview_scan.json 超过此年龄视为扫描循环停摆
                                  # 正常每 30s 扫一次；但一批缩略图的 ffmpeg 可能阻塞
@@ -521,18 +528,85 @@ def _thumb_snapshot() -> Dict[str, Any]:
     }
 
 
-def _wechat_snapshot() -> Dict[str, Any]:
-    """企微推送健康：读 push_health.json（PushHealthTracker 写的）。
+def _num(v, default: float = 0.0) -> float:
+    """把任意值安全转成 float（配置文件被手改/跨版本恢复都可能塞进字符串）。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
-    注意该文件由 `PushHealthTracker._save_health_data` 用 `open("w")` 直写（非原子），
-    恰逢推送时可能读到半截 JSON → 这里重试一次再判「无数据」，
-    否则自检会因为别人的写竞态抖成 warn（M114 同类缺陷，读侧先自保）。
+
+def _note_push(ok: bool, count: bool = True) -> None:
+    """记录一次**真实发送尝试**的结果，供自检的 wechat 项判定。
+
+    写自己的文件而不是 push_health.json：那是 weixin_notifier 的地盘，
+    两个写者做「读-改-写」会互相丢更新（M114/M122 同类缺陷）。
+
+    `count=False` 用于**同一份报告的重试**：重试失败不重复累加 streak，
+    否则一次 90 秒的网络抖动就能把连续失败推到阈值、把自检刷成 fail。
+
+    **绝不抛异常**：调用点在 B 侧失联状态机里（先发通知、再清去重标记），
+    这里抛出去会让「已通知」标记永久卡住 —— 之后真失联也不会再通知。
     """
+    try:
+        now = time.time()
+        with _PUSH_HEALTH_LOCK:
+            prev = _read_json(PUSH_HEALTH_OWN) or {}
+            if not isinstance(prev, dict):
+                prev = {}
+            d = {
+                "last_ok": _num(prev.get("last_ok")),
+                "last_fail": _num(prev.get("last_fail")),
+                "consecutive_fail": int(_num(prev.get("consecutive_fail"))),
+                "last_attempt_ok": bool(ok),
+                "updated": now,
+            }
+            if ok:
+                d["last_ok"] = now
+                d["consecutive_fail"] = 0
+            else:
+                d["last_fail"] = now
+                if count:
+                    d["consecutive_fail"] = d["consecutive_fail"] + 1
+            if not atomic_write_json(PUSH_HEALTH_OWN, d, mode=0o644):
+                logger.warning("推送健康记录落盘失败（自检可能读到旧值）")
+    except Exception as exc:                       # noqa: BLE001
+        logger.warning("推送健康记录异常（不影响发送路径）: %r", exc)
+
+
+def _wechat_snapshot() -> Dict[str, Any]:
+    """企微推送健康：**优先读本模块自己的记录**，读不到才回退 push_health.json。
+
+    为什么必须优先读自己的：`push_health.json` 只由旧的 weixin_notifier（哨兵事件）
+    写，而自检报告/告警走本模块的 `_push_wecom`。判据读别人的文件，结果就是
+    「用户明明收到了推送，自检报 172 天没成功过」（M127）。
+
+    回退分支仍有价值：升级到本版之前的记录只存在于 push_health.json，
+    别让判据直接瞎掉（那时没有 last_attempt_ok，只能按时间窗兜底）。
+    """
+    key_set = bool(_guard_bot_key())
+    own = _read_json(PUSH_HEALTH_OWN)
+    if isinstance(own, dict) and (own.get("last_ok") or own.get("last_fail")):
+        ok_ts = _num(own.get("last_ok"))
+        fail_ts = _num(own.get("last_fail"))
+        return {
+            "source": "self",
+            "bot_key_set": key_set,
+            "last_ok_age_s": round(max(0.0, time.time() - ok_ts)) if ok_ts > 0 else None,
+            # 单次失败只在近期才算可疑，需要这个时间差
+            "last_fail_age_s": round(max(0.0, time.time() - fail_ts)) if fail_ts > 0 else None,
+            "consecutive_fail": int(_num(own.get("consecutive_fail"))),
+            "last_attempt_ok": bool(own.get("last_attempt_ok")),
+            "bots": 1 if key_set else 0,
+        }
+
     data = _read_json(app_config.PUSH_HEALTH_FILE)
     if data is None:
         time.sleep(0.02)
         data = _read_json(app_config.PUSH_HEALTH_FILE)
-    out: Dict[str, Any] = {"last_ok_age_s": None, "consecutive_fail": 0, "bots": 0}
+    out: Dict[str, Any] = {"last_ok_age_s": None, "consecutive_fail": 0, "bots": 0,
+                          "source": "legacy", "last_attempt_ok": None,
+                          "bot_key_set": key_set, "last_fail_age_s": None}
     if not isinstance(data, dict):
         return out
     bots = data.get("bots")
@@ -684,9 +758,27 @@ def _selfcheck(net: Dict[str, Any], gadget: Dict[str, Any],
     else:
         items["thumb"] = "pass"
 
+    # 判据：连续失败 → fail；能拿到「最近一次尝试」的结果就按它判（通道可用即 pass）。
+    #
+    # 不再要求「24h 内有过成功」：没消息要发的时候成功记录本来就不会更新，
+    # 停着不动的设备会永久挂黄 —— 那正是自检最怕的"狼来了"。
+    # 只有回退到旧 push_health.json（拿不到 last_attempt_ok）时才用时间窗兜底。
+    streak = int(wechat.get("consecutive_fail") or 0)
+    last_attempt_ok = wechat.get("last_attempt_ok")
     age = wechat.get("last_ok_age_s")
-    if (wechat.get("consecutive_fail") or 0) >= WECHAT_FAIL_STREAK:
+    fail_age = wechat.get("last_fail_age_s")
+    if wechat.get("bot_key_set") is False:
+        # 没配机器人 = 通知能力为零。这是配置问题不是通道抖动，判 warn 提醒去配；
+        # 判 fail 会让人以为企微挂了，反而找错方向。
+        items["wechat"] = "warn"
+    elif streak >= WECHAT_FAIL_STREAK:
         items["wechat"] = "fail"
+    elif last_attempt_ok is True:
+        items["wechat"] = "pass"
+    elif last_attempt_ok is False:
+        # 单次失败不能粘住一整天：只有近 30 分钟内才判可疑，否则按通道可用处理
+        items["wechat"] = ("warn" if (fail_age is not None
+                                      and fail_age <= WECHAT_FAIL_WARN_S) else "pass")
     elif age is None or age > WECHAT_OK_MAX_AGE:
         items["wechat"] = "warn"
     else:
@@ -1419,6 +1511,7 @@ class GuardSender:
         ok, err = _push_wecom(text)
         if ok:
             self._report_ok += 1
+            _note_push(True)
             logger.info("自检报告已推送（%d 字）", len(text))
             return
         self._report_fail += 1
@@ -1427,8 +1520,9 @@ class GuardSender:
             if not self._no_key_warned:
                 self._no_key_warned = True
                 logger.warning("自检报告未推送：未配置「A7Z 守护」机器人（设置页 → 健康与通知）")
-            return
+            return          # 配置缺失不算通道故障，不记入推送健康
 
+        _note_push(False)   # 真正的投递失败才计入连续失败
         self._pending_reports.append({
             "text": text,
             "critical": bool(critical),
@@ -1461,9 +1555,11 @@ class GuardSender:
         if ok:
             self._pending_reports.remove(item)
             self._report_ok += 1
+            _note_push(True)
             logger.info("自检报告补发成功（待发 %d 条）", len(self._pending_reports))
             return
 
+        _note_push(False, count=False)   # 同一份报告的重试不重复累加 streak
         if not item.get("critical") and item["tries"] >= len(self._REPORT_BACKOFF):
             self._pending_reports.remove(item)
             logger.warning("自检报告重试耗尽，丢弃 1 条（待发 %d 条）",
@@ -1746,7 +1842,11 @@ def send_test_report() -> tuple:
         "已配" if (eps.get("ts") or "").strip() else "未配",
         "已配" if (eps.get("https") or "").strip() else "未配"))
     lines.append("心跳线程：%s" % ("运行中" if is_running() else "未运行"))
-    return _push_wecom("\n".join(lines))
+    ok, err = _push_wecom("\n".join(lines))
+    # 测试即验证：用户点这一下就是为了确认「A → 企微」通不通，
+    # 结果必须计入推送健康，否则点成功自检仍显示 warn，没人会信。
+    _note_push(ok)
+    return ok, err
 
 
 # ═══════════════════════════════════════════════════════════

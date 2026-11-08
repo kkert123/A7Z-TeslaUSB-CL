@@ -105,6 +105,9 @@ gc.SENTRY_CONFIG = os.path.join(TMP, "sentry.json")
 # 若读到上一次运行/别的测试残留的窗口文件，本套件会出现"复跑就过"的假失败。
 gc.PKG_DIR = os.path.join(TMP, "guard_pkg")
 gc.UPGRADE_WINDOW_PATH = os.path.join(TMP, "upgrade_window.json")
+# PUSH_HEALTH_OWN 在 import 时就绑定了 app_config.DATA_DIR，必须显式改成临时路径：
+# 否则 G 系列每跑一次都会写真实数据目录（真机上等于用合成数据覆盖生产健康记录）。
+gc.PUSH_HEALTH_OWN = os.path.join(TMP, "guard_push_health.json")
 
 import config as app_config  # noqa: E402
 app_config.PUSH_HEALTH_FILE = os.path.join(TMP, "push_health.json")
@@ -703,6 +706,108 @@ s5._pending_reports[0]["at"] = 0
 s5._retry_pending_report()
 ok("G13g 全部补发完", len(s5._pending_reports) == 0, str(len(s5._pending_reports)))
 
+
+
+
+# ── G14 推送健康：自检必须看**自己的**发送结果（M127）──────
+import json as _json
+import threading as _th
+
+PH = gc.PUSH_HEALTH_OWN
+
+
+def _ph_read():
+    try:
+        return _json.load(open(PH, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _ph_reset():
+    try:
+        os.remove(PH)
+    except OSError:
+        pass
+
+
+def _sc(wechat):
+    return gc._selfcheck({"connected": True, "internet_ok": True},
+                         {"mode": "present", "udc_connected": True, "age_s": 1},
+                         {"service": True, "queue": 0, "last_scan_age_s": 1},
+                         wechat)
+
+
+_ph_reset()
+gc._note_push(True)
+d = _ph_read()
+ok("G14a 成功写入 last_attempt_ok",
+   d.get("last_attempt_ok") is True and int(d.get("consecutive_fail") or 0) == 0, str(d))
+
+_ph_reset()
+gc._note_push(False)
+gc._note_push(False)
+d = _ph_read()
+ok("G14b 连续失败累加到 2", int(d.get("consecutive_fail") or 0) == 2, str(d))
+
+gc._note_push(True)
+d = _ph_read()
+ok("G14c 成功清零 streak 且保留 last_fail",
+   int(d.get("consecutive_fail") or 0) == 0 and float(d.get("last_fail") or 0) > 0, str(d))
+
+_ph_reset()
+gc._note_push(False)
+gc._note_push(False, count=False)
+gc._note_push(False, count=False)
+d = _ph_read()
+ok("G14d 重试不重复累加 streak", int(d.get("consecutive_fail") or 0) == 1, str(d))
+
+_ph_reset()
+open(PH, "w", encoding="utf-8").write('{"last_ok":"abc","consecutive_fail":"x"}')
+try:
+    gc._note_push(True)
+    ok("G14e 脏数据不抛异常（会污染 B 失联状态机）", True)
+except Exception as exc:                        # noqa: BLE001
+    ok("G14e 脏数据不抛异常（会污染 B 失联状态机）", False, repr(exc))
+
+_ph_reset()
+gc._note_push(True)
+w = gc._wechat_snapshot()
+ok("G14f snapshot 优先走 self 分支", w.get("source") == "self", str(w))
+ok("G14g snapshot 带 bot_key_set", "bot_key_set" in w, str(w))
+
+ok("G14h 单次成功即 pass（不再卡 24h 窗口）",
+   _sc({"source": "self", "bot_key_set": True, "last_attempt_ok": True,
+        "last_ok_age_s": 99 * 86400, "last_fail_age_s": None,
+        "consecutive_fail": 0})["items"]["wechat"] == "pass")
+
+ok("G14i 近期单次失败 → warn",
+   _sc({"source": "self", "bot_key_set": True, "last_attempt_ok": False,
+        "last_ok_age_s": 100, "last_fail_age_s": 300,
+        "consecutive_fail": 1})["items"]["wechat"] == "warn")
+
+ok("G14j 陈旧失败不粘住（30 分钟外判 pass）",
+   _sc({"source": "self", "bot_key_set": True, "last_attempt_ok": False,
+        "last_ok_age_s": None, "last_fail_age_s": 4000,
+        "consecutive_fail": 1})["items"]["wechat"] == "pass")
+
+ok("G14k 连续 3 次失败 → fail",
+   _sc({"source": "self", "bot_key_set": True, "last_attempt_ok": False,
+        "last_ok_age_s": None, "last_fail_age_s": 10,
+        "consecutive_fail": 3})["items"]["wechat"] == "fail")
+
+ok("G14l 未配机器人 → warn（配置问题，不误判通道故障）",
+   _sc({"source": "self", "bot_key_set": False, "last_attempt_ok": True,
+        "last_ok_age_s": 10, "last_fail_age_s": None,
+        "consecutive_fail": 0})["items"]["wechat"] == "warn")
+
+_ph_reset()
+_ts = [_th.Thread(target=gc._note_push, args=(False,)) for _ in range(16)]
+for _t in _ts:
+    _t.start()
+for _t in _ts:
+    _t.join()
+d = _ph_read()
+ok("G14m 并发 16 次写入无丢更新", int(d.get("consecutive_fail") or 0) == 16, str(d))
 
 # ═══════════════════════════════════════════════════════════
 srv.shutdown()

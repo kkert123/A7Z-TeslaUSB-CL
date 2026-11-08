@@ -45,7 +45,57 @@ _ERR_STATUS = {
     "verifier_missing": 503,
 }
 
-VERSION = "1.1.0"
+VERSION = "1.1.2"
+
+
+def _notify_code(alerter, cfg, job, code, version, ttl, src_ip):
+    """把确认码推到用户手机（企微），**完全异步**。
+
+    为什么必须异步：webhook 超时上限 10s + 重试 1 次，同步做会把 prepare 的响应
+    拖到 20s 以上；A 端那边有自己的超时 —— 用户看到「预置失败」，而 B 其实已经
+    staged 成功、码也生成了。这种「操作成功但界面报错」最难排查。
+
+    失败**绝不**影响升级：本地日志（见 prepare 里的 logger.warning）永远是权威渠道，
+    推送只是让「带外确认」从"登服务器捞日志"降到"手机看一眼"。
+
+    安全性：码走 B → 企微服务器 → 用户手机，A 端既读不到群消息、也改不了这个开关
+    （开关与 key 都在 root:guardb 0440 的 env 里）。所以它不削弱带外模型。
+    """
+    if not getattr(cfg, "code_notify", True):
+        logger.info("确认码推送已关闭（GUARD_UPGRADE_CODE_NOTIFY=0），仅写本地日志")
+        return
+    try:
+        ready = bool((alerter.status() or {}).get("configured"))
+    except Exception:                                  # noqa: BLE001
+        ready = False
+    if not ready:
+        logger.info("确认码未推送：企微 key/url 未配置（仅写本地日志）")
+        return
+
+    text = "\n".join([
+        "【A7Z 守护 · 僚机升级确认】",
+        "目标版本：v%s" % version,
+        "确认码：%s" % code,
+        "有效期：%d 秒（过期请重新预置）" % int(ttl),
+        "任务号：%s" % (job or "")[:8],
+        "来源：%s" % (src_ip or "?"),
+        "时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+        "",
+        "在 A7Z「系统 → 版本管理 → 🛰 僚机（B 端）版本」输入上面的码才会切换。",
+        "不是你发起的，请忽略，并检查 A 端是否被他人操作。",
+    ])
+
+    def _run():
+        try:
+            r = alerter.send_text(text)
+            logger.warning("确认码已推送企微：%s job=%s", r, job)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("确认码推送企微异常（不影响升级）: %r", exc)
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="guard-code-notify").start()
+    except Exception as exc:                           # noqa: BLE001
+        logger.warning("确认码推送线程启动失败（不影响升级）: %r", exc)
 
 # 判死线程最近一次 tick 的墙钟（供升级后的健康检查判断"线程真的在跑"）。
 # 只判端口通是不够的：新版本可能起来了但判死线程崩了，
@@ -401,6 +451,9 @@ def create_app(cfg=None):
                            "确认码 %s（%d 秒内有效，A 端输入后才切换）",
                            man["version"], job, len(man["files"]), code,
                            upgrade_lib.CONFIRM_TTL_S)
+            # 异步推企微（v1.1.2）：让"带外确认"不用登服务器。失败只记日志。
+            _notify_code(alerter, cfg, job, code, man["version"],
+                         upgrade_lib.CONFIRM_TTL_S, request.remote_addr)
             return jsonify({
                 "ok": True, "job": job, "version": man["version"],
                 "files": len(man["files"]), "bytes": size,

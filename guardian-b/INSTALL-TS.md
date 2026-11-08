@@ -317,8 +317,24 @@ ps -o user=,cmd= -p $(systemctl show -p MainPID --value guard-b)   # 应是 guar
 
 ```bash
 # 只改这一行，然后重启
-sed -i 's/^GUARD_UPGRADE_ENABLE=.*/GUARD_UPGRADE_ENABLE=1/' /opt/guard-b/guard-b.env
+# ★ 先确认这一行**存不存在**：从 v1.0.x 升上来的 env 里没有 GUARD_UPGRADE_ENABLE
+#   （那是 v1.1.0 才加的键），而 install.sh 按设计保留旧 env 不覆盖。
+#   此时 `sed -i 's/^KEY=.*/KEY=1/'` 匹配不到任何行 → **静默无操作、退出码 0**，
+#   表现是"改完了但 upgrade.enabled 还是 False"，极易误判成权限或缓存问题。
+#   所以一律用「有则替换、无则追加」，并在改完立刻 grep 回读。
+cp -a /opt/guard-b/guard-b.env /root/guard-b.env.bak-$(date +%s)
+if grep -q '^GUARD_UPGRADE_ENABLE=' /opt/guard-b/guard-b.env; then
+    sed -i 's/^GUARD_UPGRADE_ENABLE=.*/GUARD_UPGRADE_ENABLE=1/' /opt/guard-b/guard-b.env
+else
+    echo 'GUARD_UPGRADE_ENABLE=1' >> /opt/guard-b/guard-b.env
+fi
+# ★ 必须补这两行：sed -i 是「新建临时文件 + rename」，会把属主从 root:guardb 变成
+#   root:root；env 是 0440，guardb 随即读不到 → 进程拿不到 token → 所有接口 401。
+#   这个故障看起来像「token 错了」，实际是权限被 sed 改坏了。
+chown root:guardb /opt/guard-b/guard-b.env && chmod 0440 /opt/guard-b/guard-b.env
+grep -n '^GUARD_UPGRADE' /opt/guard-b/guard-b.env          # 回读：必须看到 =1
 systemctl restart guard-b
+sudo -u guardb cat /opt/guard-b/guard-b.env >/dev/null && echo "guardb 可读 OK"
 
 # 验证（三项缺一都会 403，这是设计）
 curl -s http://<TS_IP>:8899/guard/upgrade/status \
@@ -329,13 +345,22 @@ curl -s http://<TS_IP>:8899/guard/upgrade/status \
 
 **确认码在哪看**（这是防"A 被拿下换掉见证者"的关键一环）：
 
+> **v1.1.2 起默认推企微**：码生成后会立刻发一条「【A7Z 守护 · 僚机升级确认】」
+> 到 `GUARD_WECOM_KEY` 对应的群，手机直接收，不用登服务器。
+> 想关掉设 `GUARD_UPGRADE_CODE_NOTIFY=0`；群里有别人时建议改单人群。
+>
+> 推送是**真带外**：码走 B → 企微 → 你手机，A 端读不到群消息，也改不了这个开关
+> （开关和 key 都在 `root:guardb 0440` 的 env 里）。推送失败不影响升级。
+
+日志兜底（推送失败或开关关闭时，这一路**永远**在）：
+
 ```bash
-journalctl -u guard-b | grep 确认码 | tail -1
+journalctl -u guard-b --no-pager | grep 确认码 | tail -1
 # 或
 grep 确认码 /opt/guard-b/data/guard-b.log | tail -1
 ```
 
-> `GUARD_UPGRADE_CODE_VIA_API=0`（**默认**）时确认码只在僚机本地日志里，A 端读不到
+> `GUARD_UPGRADE_CODE_VIA_API=0`（**默认**）时确认码不会被 A 端读到
 > —— 这才是真正的带外确认。改成 `1` 后 A 端能自动取到码，操作更省事，
 > 但"拿到 A 的攻击者"也能全自动完成整个升级，等于把人工确认降级成"人看一眼"。
 

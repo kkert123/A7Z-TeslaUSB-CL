@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,15 +91,30 @@ def t_heartbeat_ok_and_state():
 
 @case
 def t_going_offline_sets_window():
+    """预期离线窗口：优先用相对量 offline_s（跨机安全），绝对量必须被夹取。
+
+    2026-11-09 修正：原断言是 `offline_until == 123456.0`（1970 年），那是**旧实现**
+    的语义。实现早已按 M51 改成「相对量优先 + 绝对量夹到 [now+60, now+6h]」——
+    A 的墙钟可能未同步（冷启动可慢 87 分钟），直接采信 expected_until 会算错窗口：
+    快了漏报、慢了当场误报。测试跟着实现走，不能留一个"实现正确反而红"的红点。
+    """
     app, cfg = build_app()
     c = app.test_client()
+    now = time.time()
     r = c.post("/guard/heartbeat",
-               json={"event": "going_offline", "expected_until": 123456, "reason": "driving"},
+               json={"event": "going_offline", "offline_s": 1800, "reason": "driving"},
                headers={**AUTH, "X-Guard-Channel": "https", "X-Guard-Seq": "6"})
     assert r.status_code == 200, r.data
     store = app.config["GUARD"]["store"]
-    assert store.data["offline_until"] == 123456.0, store.data["offline_until"]
+    assert abs(store.data["offline_until"] - (now + 1800)) < 5, store.data["offline_until"]
     assert store.data["offline_reason"] == "driving"
+
+    # 坏钟保护：给一个已经过去的绝对时刻，不能被采信成"窗口已过期"
+    r = c.post("/guard/heartbeat",
+               json={"event": "going_offline", "expected_until": 123456, "reason": "driving"},
+               headers={**AUTH, "X-Guard-Channel": "https", "X-Guard-Seq": "7"})
+    assert r.status_code == 200, r.data
+    assert store.data["offline_until"] >= time.time() + 55, store.data["offline_until"]
 
 
 @case
