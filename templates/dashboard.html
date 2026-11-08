@@ -141,6 +141,8 @@
       <br><span style="font-size:0.7rem;color:var(--text-muted)">本月家庭WiFi ↓ <span id="monthly-home-rx">—</span> ↑ <span id="monthly-home-tx">—</span></span>
       <br><span style="font-size:0.7rem;color:var(--text-muted)">本月车辆热点 ↓ <span id="monthly-hot-rx">—</span> ↑ <span id="monthly-hot-tx">—</span></span>
       <br><span id="monthly-other-row" style="display:none;font-size:0.7rem;color:var(--text-muted)">本月其他网络 ↓ <span id="monthly-other-rx">—</span> ↑ <span id="monthly-other-tx">—</span></span>
+      <br><span style="font-size:0.7rem;color:var(--text-secondary)">僚机 <span class="status-dot muted" id="guard-peer-dot"></span><span id="guard-peer-text">—</span></span>
+      <br><span style="font-size:0.7rem;color:var(--text-secondary)">自检 <span class="status-dot muted" id="guard-self-dot"></span><span id="guard-self-text">—</span></span>
     </div>
   </div>
 
@@ -360,6 +362,109 @@ function rateBytes(bps) {
 let lastRx = 0, lastTx = 0, lastNetTime = 0;
 
 let statsRetries = 0;
+/* ═══════════════════════════════════════════════════════════════
+   僚机 + 自检（v0.3.1.77）
+   跟随 SSE 更新，30s 节流 —— 不新增 setInterval：
+   弱网下多一条定时轮询会和事件流抢带宽（这也是它放在 SSE 回调里的原因）。
+   ═══════════════════════════════════════════════════════════════ */
+var guardFetchedAt = 0, guardFetching = false;
+
+function guardDot(el, kind) {
+  if (!el) return;
+  el.className = 'status-dot ' + (
+    kind === 'ok' ? 'green' : kind === 'warn' ? 'yellow' :
+    kind === 'err' ? 'red' : 'muted');
+}
+
+function guardAgeText(sec) {
+  if (sec == null || isNaN(sec)) return '';
+  if (sec < 90) return sec + 's前';
+  if (sec < 5400) return Math.round(sec / 60) + 'm前';
+  return Math.round(sec / 3600) + 'h前';
+}
+
+function applyGuardLine(d) {
+  var pDot = document.getElementById('guard-peer-dot');
+  var pTxt = document.getElementById('guard-peer-text');
+  var sDot = document.getElementById('guard-self-dot');
+  var sTxt = document.getElementById('guard-self-text');
+  if (!pDot || !sDot) return;
+
+  if (!d || d.success === false || typeof d !== 'object') {
+    guardDot(pDot, 'off'); pTxt.textContent = '未知';
+    guardDot(sDot, 'off'); sTxt.textContent = '未知';
+    return;
+  }
+
+  var snap = d.snapshot || null;
+  // 兼容两种形状：接口把 sender 提到顶层了，旧形状放在 snapshot 里
+  var sd = d.sender || (snap && snap.sender) || {};
+  var net = (snap && snap.net) || {};
+
+  // ── 僚机 ──
+  if (!d.enabled) {
+    guardDot(pDot, 'off'); pTxt.textContent = '未启用';
+  } else if (snap && net.connected === false) {
+    // 本机网络都断了 → 无从判断 B 的状态，报「未知」而不是红色故障，
+    // 否则会把人往「僚机挂了」的方向带（实际是自己掉线）。
+    guardDot(pDot, 'off'); pTxt.textContent = '未知（本机网络断开）';
+  } else if (!d.running) {
+    guardDot(pDot, 'err'); pTxt.textContent = '线程未运行';
+  } else if (sd.b_down) {
+    var kindCn = {timeout:'连接超时', unreachable:'无法连接', auth:'令牌不匹配',
+                  b_5xx:'B 端异常', config:'通道配置错误'}[sd.ping_kind] || '失联';
+    guardDot(pDot, 'err'); pTxt.textContent = kindCn;
+  } else if (sd.fail_streak > 0) {
+    guardDot(pDot, 'warn');
+    pTxt.textContent = '重试中 · 失败' + sd.fail_streak + '次' +
+      (sd.queue ? ' · 队列' + sd.queue : '');
+  } else if (sd.last_ok_age_s != null) {
+    // 年龄由 A 端算好（同机时间），不用浏览器时钟减 A 的时间戳——
+    // 手机和 A7Z 差 10 分钟就会把「刚发过」显示成「10m前」
+    guardDot(pDot, 'ok'); pTxt.textContent = '正常 · ' + guardAgeText(sd.last_ok_age_s);
+  } else {
+    guardDot(pDot, 'muted'); pTxt.textContent = '等待首轮心跳';
+  }
+
+  // ── 自检 ──
+  if (!d.enabled) {
+    guardDot(sDot, 'off'); sTxt.textContent = '未启用';
+  } else if (!d.available || !snap) {
+    guardDot(sDot, 'off');
+    sTxt.textContent = '暂无快照' + (d.stale ? '（已陈旧）' : '');
+  } else {
+    var sc = snap.selfcheck || {};
+    var items = sc.items || {};
+    var result = sc.result || 'unknown';
+    var bad = [];
+    ['net','gadget','thumb','wechat'].forEach(function(k) {
+      if (items[k] === 'fail' || items[k] === 'warn') bad.push(k);
+    });
+    var names = {net:'网络', gadget:'USB', thumb:'缩略图', wechat:'企微'};
+    if (result === 'pass') {
+      guardDot(sDot, 'ok'); sTxt.textContent = '四项正常 · ' + guardAgeText(snap.age_s);
+    } else if (result === 'fail' || result === 'warn') {
+      guardDot(sDot, result === 'fail' ? 'err' : 'warn');
+      sTxt.textContent = (result === 'fail' ? '异常：' : '注意：') +
+        bad.map(function(k){ return names[k] || k; }).join('/') +
+        ' · ' + guardAgeText(snap.age_s);
+    } else {
+      guardDot(sDot, 'muted'); sTxt.textContent = '未知';
+    }
+  }
+}
+
+function refreshGuardLine(force) {
+  var now = Date.now();
+  if (!force && now - guardFetchedAt < 30000) return;   // 30s 节流
+  if (guardFetching) return;
+  guardFetchedAt = now;
+  guardFetching = true;
+  fetch('/api/guard/status').then(function(r) { return r.json(); })
+    .then(function(d) { guardFetching = false; applyGuardLine(d); })
+    .catch(function() { guardFetching = false; applyGuardLine(null); });
+}
+
 function startStatsStream() {
   const es = new EventSource('/api/system/stats-stream');
   es.onmessage = function(e) {
@@ -367,6 +472,7 @@ function startStatsStream() {
     try {
       const d = JSON.parse(e.data);
       updateDashboard(d);
+      refreshGuardLine(false);   // 搭 SSE 的车，30s 节流
     } catch(ex) {}
   };
   es.onerror = function() {
@@ -801,6 +907,7 @@ function updateDashboard(d) {
 }
 
 startStatsStream();
+refreshGuardLine(true);   // 首屏就出结果，不等 30s 节流
 
 // ── 版本检查 ──
 let _versionChecked = false;

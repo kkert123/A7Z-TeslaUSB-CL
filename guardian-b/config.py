@@ -10,6 +10,7 @@ B 端（僚机）全部配置来自**环境变量 / .env**（不进镜像、不�
 命名前缀统一 `GUARD_`，避免与系统变量冲突。
 """
 
+import json
 import os
 
 try:
@@ -43,6 +44,25 @@ def _env_float(name: str, default: float) -> float:
         return float(raw.strip())
     except ValueError:
         return default
+
+
+def as_bool(value, default: bool = False) -> bool:
+    """把 runtime.json（手写/转发来的）里的值安全转成 bool。
+
+    `bool("false") == True` 是这类配置最经典的坑：用户写 `"false"` 以为关了，
+    实际打开了。这里只认明确的白名单，其余回落默认值。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v in ("0", "false", "no", "off", ""):
+            return False
+    return default
 
 
 class Config:
@@ -93,6 +113,29 @@ class Config:
         # ── 行为开关 ──────────────────────────────────────────
         self.judge_enable: bool = _env_str("GUARD_JUDGE_ENABLE", "1") in ("1", "true", "yes")
         self.public_status: bool = _env_str("GUARD_PUBLIC_STATUS", "0") in ("1", "true", "yes")
+
+        # ── 运行期覆盖（由 POST /guard/config 写入，0600）──────
+        self.runtime_path: str = _env_str("GUARD_RUNTIME_PATH", "/opt/guard-b/data/runtime.json")
+        self._apply_runtime()
+
+    def _apply_runtime(self) -> None:
+        """runtime.json 覆盖 env 中的「可在线修改项」。优先级：runtime > env > 默认。
+
+        为什么必须落盘覆盖：设置页保存后若只改内存，B 一重启就变回 env 的旧 key，
+        而 UI 上看起来还是"已配置"——两端不一致且没有任何提示，是最难查的一类。
+        """
+        try:
+            with open(self.runtime_path, "r", encoding="utf-8") as f:
+                rt = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(rt, dict):
+            return
+        key = rt.get("wecom_key")
+        if isinstance(key, str) and key.strip():
+            self.wecom_key = key.strip()
+        if "alert_dry_run" in rt:
+            self.alert_dry_run = as_bool(rt.get("alert_dry_run"), self.alert_dry_run)
 
     # 便捷派生值
     @property

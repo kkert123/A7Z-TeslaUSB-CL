@@ -33,6 +33,8 @@ B 端只做三件事：**收心跳 → 判死 → 发告警**。
 
 - A 侧每 60s 心跳；**首选 Tailscale 私网口**，失败则走公网 HTTPS。
 - 另每 **150s** 用 HTTPS 补发一发轻探针（dual-send），使 B 在正常态也能掌握 HTTPS 通道健康。
+  > **只配 https 通道时**：主心跳本身就每 60s 走一次 https，探针不额外发（`probe_every_s` 只作为
+  > 「TS + HTTPS 双通道」与「反向 ping」的节拍）。
   > ⚠️ **原设计写的是 10min，与 §4 的 `ALARM=5T=300s` 自相矛盾**（2026-11-07 复核发现）：
   > 探针 600s 一次意味着 `last_seen.https` 的年龄在 [0,600) 之间随机漂移，
   > TS 一断，`age_ts` 跨过 300s 时约有一半概率 `age_https` 也 ≥300 →
@@ -163,6 +165,12 @@ tick (every 30s):
 ---
 
 ## 6. 部署方案（腾讯云轻量 + 1Panel）
+
+> **实际部署（2026-11-07 起）与下文原计划不同，以本块为准**：
+> 机器是 **`vm-0-17-ubuntu-sh`（Tailscale `100.111.252.121`）**，
+> **只绑 TS 接口的 8899 端口**（`GUARD_BIND_HOST=100.111.252.121`），
+> **不开公网端口、不走 OpenResty、不用证书**——流量在 WireGuard 内。v1 阶段的 HTTPS 兜底推迟到 C 阶段。
+> （`8800` 已被该机一个反向代理占用，所以端口改 8899。）
 
 - **规格**：2C2G / 50GB / 4Mbps —— 心跳服务 CPU / 内存 / 流量都可忽略（300GB/月远超需求）。
 - **运行形态**：推荐 **Docker 容器**（1Panel 原生支持），或 systemd 直跑；镜像内单进程。
@@ -400,3 +408,26 @@ B 端骨架已产出，**不随 A7Z 升级包分发**（除非显式加入 `depl
 - `thumb.service` 发 bool，文档 §3.1 写的是字符串 `"active"`；`thumb.last_scan_age_s` 恒 `null`。
 - `vehicle.trigger` 未实现（需要 SEI 逐帧解析，成本与收益不匹配）；`vehicle` 多出 `age_s`/`source`。
 - 多出 `wechat.bots`、`gadget.cable`、`gadget.age_s`，均为诊断用。
+
+### 14.8 B 端 v1.0.2（2026-11-08）：配置下发 + 告警三态
+
+| 端点 | 语义 |
+|---|---|
+| `GET /guard/config` | 回 `alert.{configured,key_tail,dry_run}` + `warn_s/alarm_s/dedup_s/offline_default_s`；**只回末 4 位，不回明文 key** |
+| `POST /guard/config` | 只接受 `wecom_key` / `alert_dry_run`，其余字段一律 400（避免"两边都能改、谁生效说不清"）；原子写 `data/runtime.json`（0600）并内存热生效 |
+
+- **优先级 `runtime.json` > env > 默认**：UI 保存的 key 重启后不会回退到 env 旧值
+  （`config.py._apply_runtime()`）。`guard-b.env.example` 已加 `GUARD_RUNTIME_PATH`。
+- **告警三态**：`alerts.Alerter._post()` 由 `bool` 改 `"sent"|"dryrun"|"failed"`；
+  `judge` 事件同时给 `mode` 与 `delivered`（`mode in (sent,dryrun)`）。
+  修掉 2026-11-07 现场「`delivered: True` 却无法判断群里收到没有」的缺陷。
+- `bool()` 的坑：`runtime.json` 里写 `"false"` 会被 `bool("false")` 判成 True →
+  一律走 `config.as_bool()`（白名单 `1/true/yes/on`，其余 False）。
+- 公网反代配置（C 阶段用）已给 `/guard/config` 加 `return 403`：能改写告警 key 的接口
+  **只允许走 TS 隧道**。
+
+### 14.9 §14.7 的两条偏差已在 v0.3.1.77 修掉
+
+- `thumb.last_scan_age_s` 不再恒 `null`：`bg_preview_generator.scan()` 落盘 `data/preview_scan.json`，
+  A 侧读它算年龄（>600s 判 warn）。
+- `alerts` 的 bool 语义已换成三态（见 §14.8）。

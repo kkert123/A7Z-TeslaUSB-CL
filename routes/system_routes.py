@@ -661,7 +661,22 @@ def api_system_wecom_config():
 
         name = {b['bot_key']: b['name'] for b in WECOM_BOTS}.get(bot_key, bot_key)
         state = '已启用' if enabled else '已禁用'
-        return jsonify({'success': True, 'message': f'{name} 配置已保存（{state}）'})
+        resp = {'success': True, 'message': f'{name} 配置已保存（{state}）'}
+
+        # 守护机器人「保存即双写」：A 本地存一份（自检报告/B 失联直连用），
+        # 顺手同步给 B（设备失联告警由 B 发）。两件事分开报告结果——
+        # B 不通不能让本地保存失败，否则用户会反复点保存。
+        if bot_key == 'guard' and enabled:
+            try:
+                import guard_client
+                sync_ok, sync_err = guard_client.push_bot_to_b()
+                resp['b_sync'] = {'ok': sync_ok, 'error': sync_err}
+                resp['message'] += '；僚机已同步' if sync_ok else f'；僚机未同步（{sync_err}）'
+            except Exception as e:
+                resp['b_sync'] = {'ok': False, 'error': str(e)}
+                resp['message'] += f'；僚机同步异常（{e}）'
+
+        return jsonify(resp)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1418,9 +1433,171 @@ def api_guard_status():
         return jsonify({
             'success': True,
             'available': bool(data.get('available')),
+            'stale': bool(data.get('stale')),
             'enabled': bool(cfg.get('enabled')),
             'channels': {k: bool(v) for k, v in eps.items()},
+            'running': guard_client.is_running(),
+            # sender 单独提到顶层：仪表盘要显示「僚机」状态，而快照可能在
+            # 未启用/刚启动时为空 —— 那种情况下仍然要能显示发送器的计数。
+            'sender': data.get('sender') or guard_client.get_sender_stats(),
             'snapshot': data if data.get('available') else None,
         })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ── 自检守护配置（v0.3.1.77）────────────────────────────────────
+#   GET  : 只读；token 只回 set + 掩码，响应里不含明文
+#   POST : 归一化 → 原子落盘 → 热生效 → 回读归一化后的值
+GUARD_EDITABLE = {
+    'enabled', 'token', 'endpoints', 'ca_path',
+    'interval_s', 'ts_timeout_s', 'https_timeout_s', 'probe_every_s',
+    'states_interval_s', 'queue_max', 'offline_default_s',
+    'report_transition', 'report_daily_at', 'report_cooldown_s',
+    'ping_fail_threshold',
+}
+
+
+@system_bp.route('/api/guard/config', methods=['GET'])
+def api_guard_config():
+    """读守护配置（不含明文 token）。"""
+    try:
+        import guard_client
+        cfg = guard_client.load_config()
+        return jsonify({
+            'success': True,
+            'config': guard_client.public_config(cfg),
+            'running': guard_client.is_running(),
+            'limits': {
+                'interval_s': [15, 60],
+                'probe_every_s': [60, 150],
+                'states_interval_s': [120, 1800],
+                'queue_max': [1, 1000],
+                'offline_default_s': [60, 21600],
+                'report_cooldown_s': [300, 7200],
+                'ping_fail_threshold': [2, 6],
+                'ts_timeout_s': [2, 30],
+                'https_timeout_s': [2, 30],
+            },
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/config', methods=['POST'])
+def api_guard_config_save():
+    """保存守护配置。
+
+    归一化 / 原子写 / 热生效三件事缺一不可：
+      ① 归一化用与运行时**同一套**夹取，否则 UI 显示 600、实际跑 150；
+      ② config/guard.json 含 token，必须原子写 + 0600；
+      ③ 不调 apply_config 的话，用户改完必须手动重启 web 才生效（「配了没反应」）。
+    """
+    try:
+        import guard_client
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'success': False, 'error': '请求体必须是 JSON 对象'}), 400
+
+        cur = guard_client.load_config()
+        raw = dict(cur)
+        touched = [k for k in data if k in GUARD_EDITABLE]
+        if not touched:
+            return jsonify({'success': False, 'error': '没有可识别的字段'}), 400
+
+        for k in touched:
+            if k == 'endpoints':
+                eps = data.get('endpoints')
+                if not isinstance(eps, dict):
+                    return jsonify({'success': False, 'error': 'endpoints 必须是对象'}), 400
+                merged = dict(cur.get('endpoints') or {})
+                for ck in ('ts', 'https'):
+                    if ck in eps:
+                        merged[ck] = str(eps.get(ck) or '').strip()
+                raw['endpoints'] = merged
+            elif k == 'token':
+                tok = str(data.get('token') or '').strip()
+                if tok:          # 空 = 不改：前端回填的是掩码，清空会把 token 抹掉
+                    raw['token'] = tok
+            else:
+                raw[k] = data.get(k)
+
+        cfg = guard_client.normalize_config(raw)
+
+        # 启用前必须自洽，否则「保存成功但线程起不来」是最难排查的状态
+        if cfg.get('enabled'):
+            if not cfg.get('token'):
+                return jsonify({'success': False, 'error': '启用守护必须填写令牌'}), 400
+            eps = cfg.get('endpoints') or {}
+            if not ((eps.get('ts') or '').strip() or (eps.get('https') or '').strip()):
+                return jsonify({'success': False, 'error': '启用守护至少要配一个通道'}), 400
+            https_ep = (eps.get('https') or '').strip()
+            if https_ep and not https_ep.startswith('https://'):
+                return jsonify({
+                    'success': False,
+                    'error': 'HTTPS 通道必须 https:// 开头（否则令牌会明文过公网）',
+                }), 400
+            if https_ep:
+                ca = str(cfg.get('ca_path') or '').strip()
+                if not ca or not os.path.isfile(ca):
+                    # 这条不拦住的话：保存成功、线程启动，然后每次发送都撞 https_without_ca
+                    # → 全部入队 → B 端 5 分钟后判设备失联。等于用一次"成功提示"换一条假告警。
+                    return jsonify({
+                        'success': False,
+                        'error': '配了 HTTPS 通道就必须有可读的 ca_path（自签证书 pinning）',
+                    }), 400
+
+        ok_written = guard_client.atomic_write_json(guard_client.CONFIG_PATH, cfg, mode=0o600)
+        if not ok_written:
+            # 写失败还回"已保存"是最坏的体验：用户以为生效了，重启后配置又回退，
+            # 排查方向会跑到 B 端或权限之外的地方。
+            return jsonify({
+                'success': False,
+                'error': '配置写入失败（磁盘空间/权限），已拒绝热生效',
+            }), 500
+        applied = guard_client.apply_config(cfg)
+        return jsonify({
+            'success': True,
+            'message': '已保存并生效',
+            'config': guard_client.public_config(cfg),
+            'applied': applied,
+            'running': guard_client.is_running(),
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/test-report', methods=['POST'])
+def api_guard_test_report():
+    """让 A 自己推一条测试自检报告（验证「A → 企微」独立链路）。"""
+    try:
+        import guard_client
+        ok, err = guard_client.send_test_report()
+        if ok:
+            return jsonify({'success': True, 'message': '测试报告已发送到「A7Z 守护」群'})
+        hint = {
+            'no_guard_bot_key': '还没配置「A7Z 守护」机器人的 Key（上方机器人列表里填）',
+        }.get(err, err)
+        return jsonify({'success': False, 'error': hint}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/push-bot', methods=['POST'])
+def api_guard_push_bot():
+    """手动把 A 端的守护机器人 key 同步给 B（保存时自动做过一次，失败可重试）。"""
+    try:
+        import guard_client
+        ok, err = guard_client.push_bot_to_b()
+        if ok:
+            return jsonify({'success': True})
+        hint = {
+            'no_guard_bot_key': '还没配置「A7Z 守护」机器人的 Key',
+            'no_endpoint': '还没配守护通道（TS/HTTPS 地址为空）',
+        }
+        msg = hint.get(err)
+        if msg is None:
+            msg = ('僚机拒绝了令牌（两侧 token 不一致）' if 'http_401' in err else err)
+        return jsonify({'success': False, 'error': msg})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

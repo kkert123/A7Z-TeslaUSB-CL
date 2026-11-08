@@ -21,17 +21,20 @@ import hmac
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 
 from flask import Flask, jsonify, request
 
-from config import load_config
+from config import as_bool, load_config
 from state import StateStore
 from alerts import Alerter
 from judge import Judge
 
 logger = logging.getLogger("guard-b")
+
+VERSION = "1.0.2"
 
 
 # ── 日志 ────────────────────────────────────────────────────
@@ -112,12 +115,90 @@ def create_app(cfg=None):
         # 不把 token 之类敏感物带出（状态里本就没有）
         return jsonify({
             "ok": True,
+            "version": VERSION,
             "now": int(time.time()),
             "classify": judge.classify(),
             "warn_s": cfg.warn_s,
             "alarm_s": cfg.alarm_s,
+            "alert": alerter.status(),      # 只回 configured/key_tail/dry_run，不回明文
             "state": snap,
         })
+
+    # ── 配置（v1.0.2：供 A 端设置页下发机器人 key）───────────
+    @app.route("/guard/config", methods=["GET"])
+    def get_config():
+        if not _authorized():
+            return _deny()
+        return jsonify({
+            "ok": True,
+            "version": VERSION,
+            "alert": alerter.status(),
+            "warn_s": cfg.warn_s,
+            "alarm_s": cfg.alarm_s,
+            "dedup_s": cfg.dedup_s,
+            "offline_default_s": cfg.offline_default_s,
+        })
+
+    @app.route("/guard/config", methods=["POST"])
+    def set_config():
+        """只接受「可在线修改项」：wecom_key / alert_dry_run。
+
+        刻意不允许改 warn_s / alarm_s / 端口 / token —— 那些在 env 里。
+        两边都能改就会出现「谁生效说不清」，出问题只能靠猜。
+        """
+        if not _authorized():
+            return _deny()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "body_must_be_object"}), 400
+
+        rt = {}
+        if os.path.exists(cfg.runtime_path):
+            try:
+                with open(cfg.runtime_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    rt = loaded
+            except (OSError, ValueError):
+                rt = {}
+
+        changed = []
+        key = data.get("wecom_key")
+        if isinstance(key, str) and key.strip():
+            k = key.strip()
+            if len(k) < 20:
+                return jsonify({"ok": False, "error": "wecom_key_too_short"}), 400
+            rt["wecom_key"] = k
+            alerter.set_key(k)
+            changed.append("wecom_key")
+        if "alert_dry_run" in data:
+            v = as_bool(data.get("alert_dry_run"), alerter.dry_run)
+            rt["alert_dry_run"] = v
+            alerter.dry_run = v
+            changed.append("alert_dry_run")
+
+        if not changed:
+            return jsonify({"ok": False, "error": "no_editable_field"}), 400
+
+        # 原子写 + 0600：这个文件里有 webhook key
+        parent = os.path.dirname(cfg.runtime_path) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".rt-", suffix=".json", dir=parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(rt, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, cfg.runtime_path)
+            tmp = None
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+
+        logger.info("运行期配置已更新: %s", ",".join(changed))
+        return jsonify({"ok": True, "version": VERSION,
+                        "changed": changed, "alert": alerter.status()})
 
     # ── 后台线程：judge + dead-man ──────────────────────────
     if cfg.judge_enable:

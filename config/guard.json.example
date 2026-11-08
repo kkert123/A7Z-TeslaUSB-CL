@@ -1,9 +1,10 @@
 {
-  "_comment": "自检守护（A 端心跳）配置。改完需重启 teslausb-web 生效。enabled=false 时零行为变化。",
+  "_comment": "自检守护（A 端心跳）配置。可在设置页「健康与通知」里改（保存即热生效，无需重启）。enabled=false 时零行为变化。",
+  "_comment_bot": "A7Z 守护机器人的 key 不在本文件，而在 config/sentry.json 的 wecom_guard_webhook_key。",
   "enabled": false,
   "token": "",
   "endpoints": {
-    "ts": "",
+    "ts": "http://100.111.252.121:8899",
     "https": ""
   },
   "ca_path": "",
@@ -13,5 +14,9 @@
   "probe_every_s": 150,
   "states_interval_s": 300,
   "queue_max": 200,
-  "offline_default_s": 3600
+  "offline_default_s": 3600,
+  "report_transition": true,
+  "report_daily_at": "20:00",
+  "report_cooldown_s": 1800,
+  "ping_fail_threshold": 3
 }

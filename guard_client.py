@@ -38,11 +38,17 @@ logger = logging.getLogger("GuardClient")
 
 # ─── 路径（全部复用 config.py 常量，禁止再写死一份）───
 CONFIG_PATH = os.path.join(app_config.CONFIG_DIR, "guard.json")
+SENTRY_CONFIG = os.path.join(app_config.CONFIG_DIR, "sentry.json")
+# A7Z 守护机器人的 key 放在 sentry.json（与其它 3 个 bot 同机制），
+# 好处：直接复用现成的 GET/POST /api/system/wecom-config、WECOM_BOTS 校验、
+# `_disabled` 后缀的禁用语义，UI 只需多一个 bot 条目。
+GUARD_BOT_CONFIG_KEY = "wecom_guard_webhook_key"
 STATUS_PATH = os.path.join(app_config.DATA_DIR, "guard_status.json")
 QUEUE_PATH = os.path.join(app_config.DATA_DIR, "guard_queue.json")
 USB_GUARD_STATUS = os.path.join(app_config.DATA_DIR, "usb_guard_status.json")
 PREVIEW_QUEUE = os.path.join(app_config.DATA_DIR, "preview_queue.json")
 PREVIEW_BLOCKED = os.path.join(app_config.DATA_DIR, "preview_blocked.json")
+PREVIEW_SCAN = os.path.join(app_config.DATA_DIR, "preview_scan.json")
 MODE_FILE = "/tmp/teslausb_mode"
 WIFI_IFACE = "wlan0"
 
@@ -51,6 +57,9 @@ THUMB_PENDING_WARN = 50          # 待生成缩略图积压阈值
 WECHAT_OK_MAX_AGE = 24 * 3600    # 24h 内有过成功推送算健康
 WECHAT_FAIL_STREAK = 3           # 连续失败次数达此值判 fail
 GADGET_STALE_S = 300             # usb_guard_status.json 超过此年龄视为守护停摆
+THUMB_SCAN_STALE_S = 600         # preview_scan.json 超过此年龄视为扫描循环停摆
+                                 # 正常每 30s 扫一次；但一批缩略图的 ffmpeg 可能阻塞
+                                 # 扫描循环好几分钟，300s 会在"正在干活"时报假 warn
 
 DEFAULTS: Dict[str, Any] = {
     "enabled": False,            # 未配置即关闭：保证升级零行为变化
@@ -64,6 +73,11 @@ DEFAULTS: Dict[str, Any] = {
     "states_interval_s": 300,    # TeslaMate /states 轮询（配额克制）
     "queue_max": 200,
     "offline_default_s": 3600,   # going_offline 的默认窗口
+    # ── 报告（A 端直连企微，不依赖 B）──
+    "report_transition": True,   # 自检结果跨档/恢复时推送
+    "report_daily_at": "20:00",  # 每日摘要时刻（空串 = 关闭）
+    "report_cooldown_s": 1800,   # 同一档位的去重窗口
+    "ping_fail_threshold": 3,    # 连续 N 次 ping 不通判「B 侧失联」
 }
 
 # 模块级缓存（线程安全由调用方保证：仅在后台线程使用）
@@ -75,6 +89,9 @@ _SC_CACHE: Dict[str, tuple] = {}       # systemctl is-active 缓存 {unit: (bool
 _WIFI_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
 
 _started_lock = threading.Lock()
+# 队列文件的读-改-写必须串行：`apply_config` 换代会短暂出现新旧两个 sender，
+# 它们不是同一个对象、拿不到同一把实例锁，只能靠模块级锁保证「只有一个写者」。
+_QUEUE_LOCK = threading.Lock()
 _sender = None
 
 
@@ -250,8 +267,16 @@ def _systemctl_active(unit: str) -> Optional[bool]:
 
 def load_config() -> Dict[str, Any]:
     """读 config/guard.json；缺失或损坏 → 返回默认（enabled=False）。"""
+    return normalize_config(_read_json(CONFIG_PATH))
+
+
+def normalize_config(raw: Any) -> Dict[str, Any]:
+    """把任意 dict（文件内容或 POST 上来的表单）归一化成**可直接使用**的配置。
+
+    所有类型兜底与上下限夹取都在这里：POST 保存时走同一条路径，
+    保证「落盘的值」和「运行时的值」永远一致（否则 UI 显示 600 实际跑 150）。
+    """
     cfg = json.loads(json.dumps(DEFAULTS))  # 深拷贝
-    raw = _read_json(CONFIG_PATH)
     if not isinstance(raw, dict):
         return cfg
 
@@ -280,6 +305,8 @@ def load_config() -> Dict[str, Any]:
         "states_interval_s": (120, 1800),
         "queue_max":        (1, 1000),
         "offline_default_s": (60, 21600),
+        "report_cooldown_s": (300, 7200),
+        "ping_fail_threshold": (2, 6),
     }
     for key, (lo, hi) in _CLAMP.items():
         try:
@@ -293,9 +320,30 @@ def load_config() -> Dict[str, Any]:
         cfg[key] = val
 
     cfg["enabled"] = _as_bool(cfg.get("enabled"), default=False)
+    cfg["report_transition"] = _as_bool(cfg.get("report_transition"), default=True)
+    cfg["report_daily_at"] = _norm_hhmm(cfg.get("report_daily_at"))
     cfg["token"] = str(cfg.get("token") or "")
     cfg["ca_path"] = str(cfg.get("ca_path") or "")
     return cfg
+
+
+def _norm_hhmm(value: Any) -> str:
+    """`"HH:MM"` 归一化；空 → 关闭日报；非法 → 回落默认（并告警，不静默）。"""
+    if value is None or value == "":
+        return ""
+    s = str(value).strip()
+    try:
+        parts = s.split(":")
+        h, m = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        logger.warning("guard.json 的 report_daily_at=%r 不是 HH:MM，已回落到 %s",
+                       value, DEFAULTS["report_daily_at"])
+        return str(DEFAULTS["report_daily_at"])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        logger.warning("guard.json 的 report_daily_at=%r 时刻越界，已回落到 %s",
+                       value, DEFAULTS["report_daily_at"])
+        return str(DEFAULTS["report_daily_at"])
+    return "%02d:%02d" % (h, m)
 
 
 def _has_channel(cfg: Dict[str, Any]) -> bool:
@@ -425,7 +473,7 @@ def _gadget_snapshot() -> Dict[str, Any]:
 
 
 def _thumb_snapshot() -> Dict[str, Any]:
-    """缩略图链路：服务是否常驻 + 队列积压 + 被阻断数。"""
+    """缩略图链路：服务是否常驻 + 队列积压 + 被阻断数 + 上次扫描年龄。"""
     entries = _read_json(PREVIEW_QUEUE)
     pending = 0
     if isinstance(entries, list):
@@ -436,12 +484,23 @@ def _thumb_snapshot() -> Dict[str, Any]:
     blocked = _read_json(PREVIEW_BLOCKED)
     blocked_n = len(blocked) if isinstance(blocked, list) else 0
 
+    # 扫描心跳（bg_preview 每 30s 原子写一次）。同机两进程，墙钟可比——
+    # M51 禁的是「跨机」用墙钟比大小，不是禁用墙钟本身。
+    scan_age: Optional[float] = None
+    scan_at = None
+    scan = _read_json(PREVIEW_SCAN)
+    if isinstance(scan, dict):
+        ts = scan.get("ts")
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+            scan_age = max(0.0, time.time() - float(ts))
+            scan_at = int(ts)
+
     return {
         "service": _systemctl_active("teslausb-bgpreview"),
         "queue": pending,
         "blocked": blocked_n,
-        # v1 缺口：bgpreview 未落盘 last_scan 时间戳（不让读取方误以为有值）
-        "last_scan_age_s": None,
+        "last_scan_age_s": round(scan_age, 1) if scan_age is not None else None,
+        "last_scan_at": scan_at,
     }
 
 
@@ -600,6 +659,11 @@ def _selfcheck(net: Dict[str, Any], gadget: Dict[str, Any],
         items["thumb"] = "warn"           # systemctl/队列文件读不到 → 未知
     elif thumb["queue"] >= THUMB_PENDING_WARN:
         items["thumb"] = "warn"
+    elif (thumb.get("last_scan_age_s") is None
+          or thumb["last_scan_age_s"] > THUMB_SCAN_STALE_S):
+        # 扫描心跳缺失/过旧：服务 active 但扫描循环已卡住或刚升级完还没跑第一轮。
+        # 判 warn 而不是 fail —— 不能因为一个统计文件就报硬故障。
+        items["thumb"] = "warn"
     else:
         items["thumb"] = "pass"
 
@@ -661,14 +725,89 @@ def _queue_load() -> List[Dict[str, Any]]:
     return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
 
 
-def _queue_push(body: Dict[str, Any], limit: int) -> None:
+def _queue_push(body: Dict[str, Any], limit: int) -> int:
+    """入队，返回入队后的长度（-1 = 未写入，调用方保留旧计数）。"""
     if limit <= 0:                     # items[-0:] 等于全表 → 队列永不淘汰，会写满分区
-        return
-    items = _queue_load()
-    items.append(body)
-    if len(items) > limit:
-        items = items[-limit:]
-    atomic_write_json(QUEUE_PATH, items, mode=0o600)
+        return -1
+    with _QUEUE_LOCK:                  # 读-改-写必须串行（可能有两个 sender 短暂并存）
+        items = _queue_load()
+        items.append(body)
+        if len(items) > limit:
+            items = items[-limit:]
+        atomic_write_json(QUEUE_PATH, items, mode=0o600)
+        return len(items)
+
+
+# ═══════════════════════════════════════════════════════════
+# A 端直连企微（自检报告 / B 侧失联通知）
+#   为什么不复用 weixin_notifier：它的推送点全部绑定「系统通知」bot，
+#   而守护必须有独立机器人（混在系统通知里一眼看不出来），
+#   且「B 挂了」这条恰恰不能经由 B 转发——必须是 A 自己的直连能力。
+# ═══════════════════════════════════════════════════════════
+
+_REPORT_RANK = {"pass": 0, "warn": 1, "fail": 2}
+_TIER_CN = {"pass": "正常", "warn": "注意", "fail": "异常"}
+_ITEM_CN = {"net": "网络", "gadget": "USB链路", "thumb": "缩略图", "wechat": "企微推送"}
+_B_KIND_CN = {
+    "timeout": "连接超时",
+    "unreachable": "无法连接",
+    "auth": "令牌不匹配",
+    "b_5xx": "B 端服务异常",
+    "config": "通道配置错误",
+}
+
+
+def _guard_bot_key() -> str:
+    """读 A7Z 守护机器人的 webhook key。
+
+    只取主字段：key 被挪到 `_disabled` 说明用户主动禁用了该机器人，
+    此时应当真的不发（与 PushHealth 那套禁用语义保持一致）。
+    """
+    cfg = _read_json(SENTRY_CONFIG)
+    if not isinstance(cfg, dict):
+        return ""
+    return str(cfg.get(GUARD_BOT_CONFIG_KEY) or "").strip()
+
+
+def _scrub(text: str, key: str = "") -> str:
+    """把 key 从错误文本里抹掉——requests 的异常 message 会带完整 URL。
+
+    优先用调用方手里的那把 key：如果靠"重新读一次 sentry.json"，
+    配置刚改过就会拿到新 key，旧 key 反而原样留在字符串里。
+    """
+    if not key:
+        try:
+            key = _guard_bot_key()
+        except Exception:
+            return text
+    return text.replace(key, "***") if key else text
+
+
+def _push_wecom(text: str) -> tuple:
+    """A 端直连企微。返回 (ok, err)；key 不进日志、不进返回值。"""
+    key = _guard_bot_key()
+    if not key:
+        return False, "no_guard_bot_key"
+    try:
+        import requests
+        r = requests.post(
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + key,
+            json={"msgtype": "text", "text": {"content": text}},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return False, "http_%s" % r.status_code
+        try:
+            body = r.json()
+        except ValueError:
+            return True, ""            # 200 但非 JSON：按成功处理，避免重复轰炸
+        code = body.get("errcode") if isinstance(body, dict) else 0
+        if code not in (0, None):
+            return False, "errcode_%s" % code
+        return True, ""
+    except Exception as e:
+        # 先脱敏再截断：反过来的话 key 被切成两半，替换就失效了
+        return False, _scrub("%s: %s" % (type(e).__name__, str(e)), key)[:120]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -700,6 +839,23 @@ class GuardSender:
         self._last_attempt_at = 0.0
         self._queue_count = 0             # 缓存计数：状态轮询不该全量读队列文件
         self._ping_fail = 0
+        # ── 报告（跃迁 / 恢复 / 日报）──
+        self._last_result = ""                    # 上一拍的 selfcheck.result
+        self._report_at: Dict[str, float] = {}    # 各档位最近推送时刻（单调钟）
+        self._daily_done = ""                     # 已推日报的日期 YYYY-MM-DD
+        # 待重发的报告用**小列表**而不是单槽：单槽会让「B 侧失联」这类安全通知
+        # 被随后的一条自检报告覆盖掉（谁后写谁活），那是最不该丢的一条。
+        self._pending_reports: List[Dict[str, Any]] = []   # {text, critical, tries, at}
+        self._no_key_warned = False
+        self._report_ok = 0
+        self._report_fail = 0
+        # ── B 侧健康 ──
+        self._ping_kind = ""                      # 最近一次 ping 失败的类别
+        self._b_down_notified = False             # 已就「B 失联」通知过（去重）
+        # 开机/升级后前 5 分钟只跟踪状态、不推报告：这段时间 bgpreview 还没写扫描心跳、
+        # WiFi 还在连、systemctl 刚拉起，自检必然短暂 warn。不设这道闸，
+        # 每次升级都会收到一条「注意 → 正常」的噪音，把真正的异常淹掉。
+        self._warmup_until = time.monotonic() + 300
 
     # ── 生命周期 ──
     def start(self) -> None:
@@ -739,6 +895,11 @@ class GuardSender:
             self._stop.wait(max(1.0, interval - elapsed))
 
     def _tick(self) -> None:
+        if self._stop.is_set():
+            # 已被 apply_config 停用：绝不能再跑一轮。
+            # 否则旧线程可能在新 sender 起来之后还往同一个队列/状态文件写一次，
+            # 破坏「队列只有一个写者」的前提。
+            return
         now_mono = time.monotonic()
 
         # TeslaMate /states 独立节奏（300s），不进主节拍
@@ -781,8 +942,9 @@ class GuardSender:
                 logger.warning("心跳发送失败（第 %d 次，已入队）: %s",
                                self._fail_streak, err)
             self._last_error = err
-            _queue_push(snap, self.cfg["queue_max"])
-        self._queue_count = len(_queue_load()) if self._fail_streak else self._queue_count
+            queued = _queue_push(snap, self.cfg["queue_max"])
+            if queued >= 0:
+                self._queue_count = queued   # 用入队返回值，不再额外读一次盘
 
         # 低频 HTTPS 双发探针 + 反向 ping：让 B 在正常态也知道两条通道的健康
         eps = self.cfg["endpoints"]
@@ -793,6 +955,9 @@ class GuardSender:
                 probe["probe"] = True
                 self._post(eps["https"], probe, "https", self.cfg["https_timeout_s"])
             self._ping()
+
+        # 报告放在最后：它要发一个可能耗时 8s 的企微请求，绝不能挡在心跳前面
+        self._maybe_report(snap)
 
     def _ping(self) -> None:
         """反向心跳（设计 §3.2）：GET /guard/ping，确认 B 自己是活的。
@@ -814,30 +979,85 @@ class GuardSender:
         verify: Any = True
         if not use_ts and not url.startswith("https://"):
             # 与 _post 的 https_scheme_required 同一条防线：别让探活路径成为漏洞
-            self._ping_fail += 1
-            if self._ping_fail == 3:
-                logger.warning("B 端 ping 通道配置错误（https 端点不是 https://），已停止发送")
+            self._ping_failed("config")
             return
         if url.startswith("https://"):
             ca = (self.cfg.get("ca_path") or "").strip()
             if not ca or not os.path.isfile(ca):
-                self._ping_fail += 1
+                self._ping_failed("config")
                 return
             verify = ca
+
         try:
             import requests
             r = requests.get(url, headers={"Authorization": "Bearer " + self.cfg["token"]},
                              timeout=5, verify=verify)
-            if 200 <= r.status_code < 300:
-                if self._ping_fail:
-                    logger.info("B 端 ping 已恢复（此前失败 %d 次）", self._ping_fail)
-                self._ping_fail = 0
-            else:
-                self._ping_fail += 1
+        except Exception as e:
+            name = type(e).__name__.lower()
+            # **必须和 _send 一样做 failover**：TS 断了但 HTTPS 还通时，心跳能发出去，
+            # 若 ping 只走 TS 就会误报「B 侧失联」——这是最典型的假告警。
+            alt = (eps.get("https") or "").strip()
+            if use_ts and alt:
+                if self._ping_try(alt, self.cfg.get("ca_path") or ""):
+                    self._ping_ok()
+                    return
+            self._ping_failed("timeout" if "timeout" in name else "unreachable")
+            return
+
+        if 200 <= r.status_code < 300:
+            self._ping_ok()
+        elif r.status_code in (401, 403):
+            # 401 与超时必须分开：令牌错是「B 活着但不认我」，超时才是「B 没了」。
+            # 混成一句话会把排查方向指错（该改 token 却去查 VPS）。
+            self._ping_failed("auth")
+        elif r.status_code >= 500:
+            alt = (eps.get("https") or "").strip()
+            if use_ts and alt and self._ping_try(alt, self.cfg.get("ca_path") or ""):
+                self._ping_ok()
+                return
+            self._ping_failed("b_5xx")
+        else:
+            self._ping_failed("http_%s" % r.status_code)
+
+    def _ping_try(self, base: str, ca_path: str) -> bool:
+        """备用通道单发一次 ping。返回是否 2xx（任何异常都算失败）。"""
+        url = base.rstrip("/") + "/guard/ping"
+        verify: Any = True
+        if url.startswith("https://"):
+            if not ca_path or not os.path.isfile(ca_path):
+                return False
+            verify = ca_path
+        else:
+            # 备用通道只可能是 https（调用方传的就是 endpoints.https）。
+            # 一旦被手改成 http://，绝不能把 Bearer 明文发出去 ——
+            # 与 `_post` 的 https_scheme_required 同一条防线。
+            return False
+        try:
+            import requests
+            r = requests.get(url, headers={"Authorization": "Bearer " + self.cfg["token"]},
+                             timeout=5, verify=verify)
+            return 200 <= r.status_code < 300
         except Exception:
-            self._ping_fail += 1
-        if self._ping_fail == 3:
-            logger.warning("B 端连续 3 次 ping 不通：可能 B 侧服务挂了（非 A 断网）")
+            return False
+
+    def _ping_ok(self) -> None:
+        if self._b_down_notified:
+            logger.info("B 端 ping 已恢复（此前连续失败 %d 次）", self._ping_fail)
+            self._push_report(self._fmt_b_recovered(), critical=True)
+        self._b_down_notified = False
+        self._ping_fail = 0
+        self._ping_kind = ""
+
+    def _ping_failed(self, kind: str) -> None:
+        self._ping_fail += 1
+        self._ping_kind = kind
+        threshold = int(self.cfg.get("ping_fail_threshold") or 3)
+        if self._ping_fail < threshold or self._b_down_notified:
+            return                       # 去重：一次失联只通知一条，抖回去也不重复
+        self._b_down_notified = True
+        logger.warning("B 端连续 %d 次 ping 不通（%s）——守护链路半边不可用",
+                       self._ping_fail, _B_KIND_CN.get(kind, kind))
+        self._push_report(self._fmt_b_down(kind), critical=True)
 
     # ── 发送 ──
     def _post(self, base: str, body: Dict[str, Any], channel: str,
@@ -910,22 +1130,28 @@ class GuardSender:
         """
         items = _queue_load()
         if not items:
+            self._queue_count = 0          # 队列已空，状态页不该还显示旧值（P1-5）
             return
 
-        sent = 0
+        sent_items = []
         for body in items[:3]:
             payload = dict(body)
             payload["replay"] = True
             ok, _ = self._send(payload)
             if not ok:
                 break
-            sent += 1
+            sent_items.append(body)
 
-        if sent:
-            remaining = items[sent:]
-            atomic_write_json(QUEUE_PATH, remaining[-self.cfg["queue_max"]:], mode=0o600)
-            self._queue_count = len(remaining)     # 同步缓存计数，状态页不必再读盘
-            logger.info("补报 %d 条历史心跳（剩余 %d）", sent, len(remaining))
+        if sent_items:
+            # 发送在网络里耗时，**不能持锁**；落盘时重新读一次，只删确实发出去的那几条，
+            # 避免把这期间新入队的心跳一起覆盖掉（M114 的同一类问题）。
+            with _QUEUE_LOCK:
+                current = _queue_load()
+                remaining = [b for b in current if b not in sent_items]
+                capped = remaining[-self.cfg["queue_max"]:]
+                atomic_write_json(QUEUE_PATH, capped, mode=0o600)
+                self._queue_count = len(capped)
+            logger.info("补报 %d 条历史心跳（剩余 %d）", len(sent_items), self._queue_count)
 
     # ── 预期离线握手 ──
     _OFFLINE_WINDOW = {"driving": None, "unlocked": 900, "user_present": 600}
@@ -1019,6 +1245,250 @@ class GuardSender:
         if self._pending_offline and time.monotonic() - self._pending_last >= 30:
             self._try_send_offline()
 
+    # ── 报告（跃迁 / 恢复 / 日报 / B 失联）──
+    # 普通报告：30s / 120s / 600s 三档后丢弃；安全项：永不丢弃，间隔逐步拉长。
+    _REPORT_BACKOFF = (30, 120, 600)
+    _CRIT_BACKOFF = (30, 60, 300, 900)
+
+    def _device_line(self) -> str:
+        eps = self.cfg["endpoints"]
+        base = (eps.get("ts") or eps.get("https") or "").strip()
+        host = base.split("//")[-1].strip("/")
+        return "v%s → %s" % (app_config.APP_VERSION, host or "未配置")
+
+    def _fmt_evidence(self, key: str, net: Dict[str, Any], gad: Dict[str, Any],
+                      th: Dict[str, Any], wc: Dict[str, Any]) -> str:
+        """每项后面附一句「凭什么这么判」，否则报告只能说『异常』没法排查。"""
+        try:
+            if key == "net":
+                bits = []
+                if net.get("wifi_ssid"):
+                    bits.append(str(net["wifi_ssid"]))
+                if net.get("rssi") is not None:
+                    bits.append("%s%%" % net["rssi"])
+                bits.append("出网%s" % ("正常" if net.get("internet_ok") else "不通"))
+                if net.get("tailscale"):
+                    bits.append("TS %s" % net["tailscale"])
+                return "（%s）" % " · ".join(bits)
+            if key == "gadget":
+                bits = ["mode=%s" % (gad.get("mode") or "?")]
+                if gad.get("udc_connected"):
+                    bits.append("已连接")
+                elif gad.get("cable") is False:
+                    bits.append("线离位")
+                else:
+                    bits.append("state=%s" % (gad.get("state") or "?"))
+                age = gad.get("age_s")
+                if isinstance(age, (int, float)):
+                    bits.append("状态%d秒前" % int(age))
+                return "（%s）" % " · ".join(bits)
+            if key == "thumb":
+                bits = ["服务%s" % ("active" if th.get("service") else "非active")]
+                bits.append("积压%s" % (th.get("queue") if th.get("queue") is not None else "?"))
+                age = th.get("last_scan_age_s")
+                bits.append("扫描%s" % (("%d秒前" % int(age))
+                                        if isinstance(age, (int, float)) else "无记录"))
+                return "（%s）" % " · ".join(bits)
+            if key == "wechat":
+                age = wc.get("last_ok_age_s")
+                if isinstance(age, (int, float)):
+                    bits = ["最近成功%d小时前" % int(age // 3600)]
+                else:
+                    bits = ["最近无成功记录"]
+                if wc.get("consecutive_fail"):
+                    bits.append("连续失败%s" % wc["consecutive_fail"])
+                return "（%s）" % " · ".join(bits)
+        except Exception:
+            pass
+        return ""
+
+    def _fmt_items(self, snap: Dict[str, Any]) -> str:
+        sc = snap.get("selfcheck") or {}
+        items = sc.get("items") or {}
+        net = snap.get("net") or {}
+        gad = snap.get("gadget") or {}
+        th = snap.get("thumb") or {}
+        wc = snap.get("wechat") or {}
+        lines = []
+        for k in ("net", "gadget", "thumb", "wechat"):
+            st = str(items.get(k, "unknown"))
+            lines.append("· %s：%s%s" % (_ITEM_CN.get(k, k), _TIER_CN.get(st, st),
+                                        self._fmt_evidence(k, net, gad, th, wc)))
+        return "\n".join(lines)
+
+    def _fmt_transition(self, prev: str, cur: str, snap: Dict[str, Any]) -> str:
+        return "\n".join([
+            "【A7Z 自检】%s → %s" % (_TIER_CN.get(prev, prev), _TIER_CN.get(cur, cur)),
+            self._device_line(),
+            self._fmt_items(snap),
+        ])
+
+    def _fmt_recovery(self, prev: str, snap: Dict[str, Any]) -> str:
+        return "\n".join([
+            "【A7Z 自检恢复】%s → 正常" % _TIER_CN.get(prev, prev),
+            self._device_line(),
+            self._fmt_items(snap),
+        ])
+
+    def _fmt_daily(self, snap: Dict[str, Any]) -> str:
+        sc = snap.get("selfcheck") or {}
+        result = str(sc.get("result") or "unknown")
+        eps = self.cfg["endpoints"]
+        ch = [c for c in ("TS", "HTTPS") if eps.get("ts" if c == "TS" else "https")]
+        b_line = ("正常" if not self._b_down_notified
+                  else "失联（%s）" % _B_KIND_CN.get(self._ping_kind, self._ping_kind))
+        return "\n".join([
+            "【A7Z 自检日报】%s" % _TIER_CN.get(result, result),
+            self._device_line(),
+            self._fmt_items(snap),
+            "通道：%s · 成功 %d / 失败 %d · 队列 %d" % (
+                "+".join(ch) or "未配置", self._tx_ok, self._tx_fail, self._queue_count),
+            "僚机：%s" % b_line,
+        ])
+
+    def _fmt_b_down(self, kind: str) -> str:
+        if kind == "auth":
+            head = "【护卫告警】B 侧在线，但令牌不匹配"
+            tail = "→ B 端进程是活的，是两边 token 不一致。到设置页重新保存守护配置即可。"
+        elif kind == "config":
+            head = "【护卫告警】守护通道配置错误"
+            tail = "→ 检查 endpoints（HTTPS 通道必须是 https://，且 ca_path 存在）。"
+        else:
+            head = "【护卫告警】B 侧失联（%s）" % _B_KIND_CN.get(kind, kind)
+            tail = "→ 设备本身在线，是云端僚机连不上。设备若此刻掉线将无人告警。"
+        return "\n".join([
+            head,
+            self._device_line(),
+            "连续失败：%d 次（探针每 %ds 一次）" % (self._ping_fail, self.cfg["probe_every_s"]),
+            tail,
+        ])
+
+    def _fmt_b_recovered(self) -> str:
+        # 措辞按原因区分：令牌错/配置错从来没"失联"过，说"已恢复连通"会误导
+        kind = self._ping_kind
+        if kind == "auth":
+            head = "【护卫恢复】令牌已匹配，B 侧重新接受心跳"
+        elif kind == "config":
+            head = "【护卫恢复】守护通道配置已修正"
+        else:
+            head = "【护卫恢复】B 侧已恢复连通"
+        return "\n".join([
+            head,
+            self._device_line(),
+            "此前连续失败 %d 次（%s）" % (self._ping_fail,
+                                        _B_KIND_CN.get(kind, kind)),
+        ])
+
+    def _push_report(self, text: str, critical: bool = False) -> None:
+        """推一条报告。失败留待重试。
+
+        `critical=True` 用于「B 侧失联 / 已恢复」这类安全通知：它们**永不丢弃**，
+        也不会被随后的自检报告挤掉——这条消息本身就是告警体系的一部分。
+        """
+        ok, err = _push_wecom(text)
+        if ok:
+            self._report_ok += 1
+            logger.info("自检报告已推送（%d 字）", len(text))
+            return
+        self._report_fail += 1
+        if err == "no_guard_bot_key":
+            # 没配机器人是配置问题，重试一万次也不会成功——只提示一次，别刷日志
+            if not self._no_key_warned:
+                self._no_key_warned = True
+                logger.warning("自检报告未推送：未配置「A7Z 守护」机器人（设置页 → 健康与通知）")
+            return
+
+        self._pending_reports.append({
+            "text": text,
+            "critical": bool(critical),
+            "tries": 0,
+            "at": time.monotonic(),
+        })
+        # 只裁剪**普通**报告（保留最新 3 条），安全项一律保留
+        if len(self._pending_reports) > 8:
+            crit = [i for i in self._pending_reports if i.get("critical")]
+            normal = [i for i in self._pending_reports if not i.get("critical")]
+            self._pending_reports = crit + normal[-3:]
+        logger.warning("自检报告推送失败（留待重试，待发 %d 条）: %s",
+                       len(self._pending_reports), err)
+
+    def _retry_pending_report(self) -> None:
+        if not self._pending_reports:
+            return
+        # 安全项优先：B 失联不能排在自检报告后面，更不能被它挤掉
+        item = next((i for i in self._pending_reports if i.get("critical")),
+                    self._pending_reports[0])
+        tries = int(item.get("tries") or 0)
+        backoff = self._CRIT_BACKOFF if item.get("critical") else self._REPORT_BACKOFF
+        wait = backoff[min(tries, len(backoff) - 1)]
+        if time.monotonic() - float(item.get("at") or 0.0) < wait:
+            return
+
+        item["tries"] = tries + 1
+        item["at"] = time.monotonic()
+        ok, err = _push_wecom(item.get("text") or "")
+        if ok:
+            self._pending_reports.remove(item)
+            self._report_ok += 1
+            logger.info("自检报告补发成功（待发 %d 条）", len(self._pending_reports))
+            return
+
+        if not item.get("critical") and item["tries"] >= len(self._REPORT_BACKOFF):
+            self._pending_reports.remove(item)
+            logger.warning("自检报告重试耗尽，丢弃 1 条（待发 %d 条）",
+                           len(self._pending_reports))
+        else:
+            logger.warning("自检报告补发失败（第 %d 次，%s）: %s",
+                           item["tries"], "安全项" if item.get("critical") else "普通", err)
+
+    def _maybe_report(self, snap: Dict[str, Any]) -> None:
+        self._retry_pending_report()
+
+        sc = snap.get("selfcheck") or {}
+        result = str(sc.get("result") or "unknown")
+        prev = self._last_result
+        # 状态**永远**先更新：预热期只是不推送，不能连"上一拍是什么"都不记，
+        # 否则预热结束后第一次比较会拿不到基准（或拿到很旧的值）。
+        self._last_result = result
+
+        # 预热期内不出任何报告（含日报）：这段时间 bgpreview 还没写扫描心跳，
+        # 日报会把「注意」当成常态发出去，反而让人以为设备一直有问题。
+        if time.monotonic() < self._warmup_until:
+            return
+
+        self._maybe_daily_report(snap)
+
+        # 跃迁/恢复：只在两个**已知档位**之间判定。
+        # unknown（探针集体失效、刚开机）不参与，否则每次重启都会误报一次跃迁。
+        if (self.cfg.get("report_transition") and prev in _REPORT_RANK
+                and result in _REPORT_RANK and prev != result):
+            now_mono = time.monotonic()
+            if now_mono - self._report_at.get(result, 0.0) >= self.cfg["report_cooldown_s"]:
+                self._report_at[result] = now_mono
+                if result == "pass":
+                    self._push_report(self._fmt_recovery(prev, snap))
+                else:
+                    self._push_report(self._fmt_transition(prev, result, snap))
+
+    def _maybe_daily_report(self, snap: Dict[str, Any]) -> None:
+        at = str(self.cfg.get("report_daily_at") or "").strip()
+        if not at:
+            return
+        try:
+            hh, mm = at.split(":")
+            target = int(hh) * 60 + int(mm)
+        except (ValueError, IndexError):
+            return
+        lt = time.localtime()
+        today = time.strftime("%Y-%m-%d", lt)
+        if self._daily_done == today:
+            return
+        cur = lt.tm_hour * 60 + lt.tm_min
+        # 用取模而不是直接相减：target=00:05 时 23:59 → 1434 ≥10 会整天不触发
+        if (cur - target) % 1440 < 10:     # 10 分钟宽限：错过整分也能补上
+            self._daily_done = today
+            self._push_report(self._fmt_daily(snap))
+
     # ── 状态（供只读接口）──
     def stats(self) -> Dict[str, Any]:
         return {
@@ -1029,9 +1499,19 @@ class GuardSender:
             "fail_streak": self._fail_streak,
             "last_error": self._last_error,
             "last_ok_at": self._last_ok_at,       # 只记成功，超时不会伪装成「刚刚成功」
+            # 年龄在 A 端算好再给前端：浏览器用自己的墙钟减 A 的时间戳，
+            # 手机时钟差 10 分钟就会显示「10m前」，而实际刚发过。
+            "last_ok_age_s": (round(time.time() - self._last_ok_at)
+                              if self._last_ok_at else None),
             "last_attempt_at": self._last_attempt_at,
             "queue": self._queue_count,           # 缓存计数，避免每次轮询全量读盘
             "ping_fail": self._ping_fail,
+            "ping_kind": self._ping_kind,         # timeout/unreachable/auth/b_5xx/config
+            "b_down": self._b_down_notified,      # 已就「B 失联」通知过（去重标记）
+            "report_ok": self._report_ok,
+            "report_fail": self._report_fail,
+            "report_pending": len(self._pending_reports),
+            "last_result": self._last_result,
             "pending_offline": bool(self._pending_offline),
         }
 
@@ -1063,6 +1543,56 @@ def start_background(cfg: Optional[Dict[str, Any]] = None) -> bool:
     return True
 
 
+def apply_config(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """热更新：把新配置套到运行中的心跳线程上（**不重启 web**）。
+
+    「配了没反应」是这类功能最常见的投诉源：sender 是启动时创建的，
+    若不就地替换 `cfg`，用户改完设置必须手动重启服务才生效。
+    返回 {started, stopped, updated}，供接口回给前端。
+    """
+    global _sender
+    cfg = cfg or load_config()
+    out = {"started": False, "stopped": False, "updated": False}
+
+    runnable = bool(cfg.get("enabled") and cfg.get("token") and _has_channel(cfg))
+
+    with _started_lock:
+        if not runnable:
+            if _sender is not None:
+                old, _sender = _sender, None
+                old.stop()
+                # 必须等它真的退出再放开：否则就地新建 sender 会有**两个心跳线程并存**，
+                # 各自带一份 cfg 往同一个队列/计数/报告里写（T63 之前踩过同类竞态）。
+                try:
+                    if old._thread is not None:
+                        old._thread.join(timeout=2.0)
+                except RuntimeError:
+                    pass
+                out["stopped"] = True
+                logger.info("自检守护已停用（配置变更）")
+            return out
+        if _sender is None:
+            _sender = GuardSender(cfg)
+            _sender.start()
+            out["started"] = True
+            return out
+        # 就地换 cfg：线程每轮都从 self.cfg 读参数，下一轮即生效
+        _sender.cfg = cfg
+        out["updated"] = True
+    return out
+
+
+def public_config(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """给前端的配置视图：**绝不包含明文 token**。"""
+    cfg = cfg or load_config()
+    token = str(cfg.get("token") or "")
+    out = {k: v for k, v in cfg.items() if k != "token"}
+    out["token_set"] = bool(token)
+    out["token_tail"] = ("…" + token[-4:]) if len(token) >= 8 else ("…" if token else "")
+    out["bot_key_set"] = bool(_guard_bot_key())
+    return out
+
+
 def get_last_status() -> Dict[str, Any]:
     """读最近一次落盘的快照（供 GET /api/guard/status）。
 
@@ -1092,3 +1622,94 @@ def get_last_status() -> Dict[str, Any]:
 
 def get_sender_stats() -> Dict[str, Any]:
     return _sender.stats() if _sender is not None else {"running": False}
+
+
+def is_running() -> bool:
+    s = _sender            # 先取局部：另一个线程可能把 _sender 置 None
+    if s is None:
+        return False
+    t = s._thread
+    return bool(t and t.is_alive())
+
+
+def push_bot_to_b(timeout: int = 5) -> tuple:
+    """把 A 端的守护机器人 key 同步给 B（「保存即双写」的第二步）。
+
+    返回 (ok, err)。**B 不通不影响本地保存**：自检报告与「B 侧失联」都由 A 直连企微，
+    只有「设备失联」那条仍需要 B 自己持有 key —— 所以同步失败只提示，不回滚本地配置。
+    """
+    key = _guard_bot_key()
+    if not key:
+        return False, "no_guard_bot_key"
+
+    cfg = load_config()
+    eps = cfg.get("endpoints") or {}
+    candidates = []
+    if (eps.get("ts") or "").strip():
+        candidates.append(("ts", eps["ts"].strip()))
+    if (eps.get("https") or "").strip():
+        candidates.append(("https", eps["https"].strip()))
+    if not candidates:
+        return False, "no_endpoint"
+
+    headers = {"Authorization": "Bearer " + cfg["token"],
+               "Content-Type": "application/json"}
+    ca = (cfg.get("ca_path") or "").strip()
+    errors = []
+
+    # 与 _send 一样走 failover：TS 段断掉时仍能从 HTTPS 把 key 送达
+    for ch, base in candidates:
+        url = base.rstrip("/") + "/guard/config"
+        verify: Any = True
+        if ch == "https" and not url.startswith("https://"):
+            errors.append("https=https_scheme_required")   # 别把 key 明文送公网
+            continue
+        if url.startswith("https://"):
+            if not ca or not os.path.isfile(ca):
+                errors.append("%s=https_without_ca" % ch)
+                continue
+            verify = ca
+        try:
+            import requests
+            r = requests.post(url, json={"wecom_key": key}, headers=headers,
+                              timeout=timeout, verify=verify)
+            if 200 <= r.status_code < 300:
+                return True, ""
+            errors.append("%s=http_%s" % (ch, r.status_code))
+        except Exception as e:
+            errors.append("%s=%s" % (ch, _scrub("%s: %s" % (type(e).__name__, str(e)), key)[:80]))
+
+    return False, "; ".join(errors)
+
+
+def send_test_report() -> tuple:
+    """设置页「发送测试」：立刻用当前快照推一条自检报告。
+
+    刻意由 **A 自己**发（直连企微），不经 B —— 因为要验证的正是
+    「A → 企微」这条独立链路；若经 B 转发，B 挂了就永远测不出来。
+    """
+    cfg = load_config()
+    # 优先用落盘的新鲜快照：现场采集要走 systemctl/nmcli/tailscale，最坏十几秒，
+    # 而这是**用户在页面上点按钮**触发的 Web 请求，不能让它等十几秒。
+    snap = _read_json(STATUS_PATH)
+    fresh = False
+    if isinstance(snap, dict):
+        ts = snap.get("ts")
+        ttl = max(3 * int(cfg.get("interval_s") or 60), 180)
+        if isinstance(ts, (int, float)) and 0 <= time.time() - float(ts) <= ttl:
+            fresh = True
+    if not fresh:
+        snap = build_snapshot(cfg)
+    sc = snap.get("selfcheck") or {}
+    items = sc.get("items") or {}
+    eps = cfg.get("endpoints") or {}
+    lines = ["【A7Z 自检 · 测试消息】",
+             "版本 v%s" % app_config.APP_VERSION]
+    for k in ("net", "gadget", "thumb", "wechat"):
+        st = str(items.get(k, "unknown"))
+        lines.append("· %s：%s" % (_ITEM_CN.get(k, k), _TIER_CN.get(st, st)))
+    lines.append("通道：TS %s · HTTPS %s" % (
+        "已配" if (eps.get("ts") or "").strip() else "未配",
+        "已配" if (eps.get("https") or "").strip() else "未配"))
+    lines.append("心跳线程：%s" % ("运行中" if is_running() else "未运行"))
+    return _push_wecom("\n".join(lines))

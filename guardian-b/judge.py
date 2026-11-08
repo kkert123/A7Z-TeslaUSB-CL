@@ -26,9 +26,39 @@ FAULT_TS = "ts_channel_fault"     # Tailscale 通道故障（设备仍在线）
 FAULT_DEV = "device_offline"      # 设备失联（断电/崩溃/断网不可区分）
 
 FAULT_TITLE = {
-    FAULT_TS: "Tailscale 通道故障（设备在线）",
+    FAULT_TS: "Tailscale 通道故障",
     FAULT_DEV: "设备失联",
 }
+
+
+def _human_age(sec) -> str:
+    """把秒数换成人话。告警里出现 `1794124165s前` 这种数字等于没写。"""
+    try:
+        s = max(0.0, float(sec))
+    except (TypeError, ValueError):
+        return "未知"
+    if s < 90:
+        return "%.0f 秒前" % s
+    if s < 5400:
+        return "%.0f 分钟前" % (s / 60.0)
+    if s < 172800:
+        return "%.1f 小时前" % (s / 3600.0)
+    return "%.1f 天前" % (s / 86400.0)
+
+
+def _is_test_body(body) -> bool:
+    """识别手工/联调心跳。
+
+    这类 body 若走正常路径会做两件坏事：把 `last_seen` 刷成「刚刚」掩盖真实中断，
+    且把 `vehicle` 存成「该在线」→ ALARM 一到必报「设备失联」。
+    2026-11-08 现场就是被一条 `version=manual-test` 的 curl 弄出整夜误报。
+    """
+    if not isinstance(body, dict):
+        return False
+    if body.get("test") is True:
+        return True
+    return str(body.get("version") or "").strip().lower().startswith(
+        ("manual", "test", "curl", "selftest"))
 
 
 def _classify_vehicle(body):
@@ -64,6 +94,12 @@ class Judge:
     # ── 入口：收到心跳 ───────────────────────────────────────
     def on_heartbeat(self, channel: str, seq, body: dict, now: float = None) -> dict:
         now = self._now() if now is None else now
+        if _is_test_body(body):
+            # 测试心跳只记「收到过」，绝不参与在线判定
+            self.store.note_test(dict(body or {}, _recv_channel=channel), now=now)
+            logger.info("收到测试心跳（不计入在线判定）version=%s",
+                        (body or {}).get("version"))
+            return {"event": "test", "ignored": True}
         ev = body.get("event") if isinstance(body, dict) else None
         if ev == "going_offline":
             # 优先用相对量 offline_s（跨机安全）：A 的墙钟可能未同步（冷启动可慢 87 分钟），
@@ -169,11 +205,12 @@ class Judge:
             self.store.save()
             return {"type": "dedup", "fault": fault}
         msg = self._format_fault(fault, age_ts, age_https)
-        ok = self.alerter.send_text(msg)
+        mode = self.alerter.send_text(msg)      # "sent" / "dryrun" / "failed"
         rec["active"] = True
         rec["last_sent"] = now
         self.store.save()
-        return {"type": "alert", "fault": fault, "delivered": bool(ok)}
+        return {"type": "alert", "fault": fault, "mode": mode,
+                "delivered": mode in ("sent", "dryrun")}
 
     def _maybe_recover(self, now: float, age_ts: float, age_https: float) -> list:
         return (self._recover_one(FAULT_TS, now, age_ts, age_https)
@@ -187,27 +224,53 @@ class Judge:
             else (min(age_ts, age_https) < self.cfg.warn_s)
         if not cleared:
             return []
-        self.alerter.send_text("【恢复】%s —— 心跳已恢复" % FAULT_TITLE.get(fault, fault))
+        ls = self.store.data.get("last_seen") or {}
+        ts_seen = float(ls.get("ts") or 0) > 0
+        https_seen = float(ls.get("https") or 0) > 0
+        msg = "\n".join([
+            "【A7Z 自检·恢复】%s" % FAULT_TITLE.get(fault, fault),
+            "· Tailscale：%s" % (_human_age(age_ts) if ts_seen else "未启用"),
+            "· HTTPS：%s" % (_human_age(age_https) if https_seen else "未启用"),
+            "心跳已恢复正常，无需处理。",
+        ])
+        mode = self.alerter.send_text(msg)
         rec["active"] = False
         rec["last_sent"] = now
         self.store.save()
-        return [{"type": "recover", "fault": fault}]
+        return [{"type": "recover", "fault": fault, "mode": mode}]
 
     def _format_fault(self, fault: str, age_ts: float, age_https: float) -> str:
+        ls = self.store.data.get("last_seen") or {}
+        ts_seen = float(ls.get("ts") or 0) > 0
+        https_seen = float(ls.get("https") or 0) > 0
         body = self.store.data.get("last_body") or {}
-        last_ts = body.get("ts")
-        ver = body.get("version", "?")
-        tail = ""
+        ver = str(body.get("version") or "未知")
+
         if fault == FAULT_TS:
-            tail = "\n（设备仍在心跳，仅 Tailscale 通道不通；请检查 tailnet / A 的 TS key）"
-        else:
-            tail = "\n（无法区分断电/崩溃/断网——如实报失联）"
-        return (
-            "【停车自检·告警】%s\n"
-            "last_seen(ts)=%.0fs前  last_seen(https)=%.0fs前\n"
-            "A 版本=%s  A 上报 ts=%s%s"
-            % (FAULT_TITLE.get(fault, fault), age_ts, age_https, ver, last_ts, tail)
-        )
+            return "\n".join([
+                "【A7Z 自检】Tailscale 通道故障（设备本体在线）",
+                "· Tailscale：%s ← 这条断了" % _human_age(age_ts),
+                "· HTTPS：%s ← 仍在收心跳" % (_human_age(age_https) if https_seen else "未启用"),
+                "",
+                "结论：设备活着，只是走 Tailscale 的那条路不通。",
+                "建议检查：tailnet 状态 / A7Z 的 Tailscale key 是否过期",
+            ])
+
+        ages = []
+        if ts_seen:
+            ages.append(age_ts)
+        if https_seen:
+            ages.append(age_https)
+        lines = [
+            "【A7Z 自检】设备失联",
+            "最后心跳：%s（%s）" % (_human_age(min(ages)) if ages else "从未收到", ver),
+            "· Tailscale：%s" % (_human_age(age_ts) if ts_seen else "未启用"),
+            "· HTTPS：%s" % (_human_age(age_https) if https_seen else "未启用"),
+            "",
+            "可能原因：断电 / 系统崩溃 / 网络中断（云端无法区分）",
+            "建议：确认车还停着，再检查设备电源与网络指示灯",
+        ]
+        return "\n".join(lines)
 
     # ── 状态页用 ────────────────────────────────────────────
     def classify(self, now: float = None) -> str:

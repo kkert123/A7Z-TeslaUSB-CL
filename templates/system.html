@@ -272,6 +272,26 @@
       </div>
       <div id="push-health-list" style="margin-top:10px;font-size:0.75rem;padding-top:8px;border-top:0.5px solid var(--border)" data-page-node-id="GT1ALLN8pHlLkXicExuzNt"></div>
     </div>
+
+    <!-- A7Z 守护（僚机心跳 + 自检）v0.3.1.77 -->
+    <div style="margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <span style="font-size:0.8rem;font-weight:600">A7Z 守护（僚机心跳）</span>
+        <span id="guard-run-badge" style="font-size:0.7rem;color:var(--text-muted)">—</span>
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn btn-sm btn-outline" onclick="loadGuardConfig()">刷新</button>
+          <button class="btn btn-sm btn-outline" onclick="syncGuardBot()">🔗 同步到僚机</button>
+          <button class="btn btn-sm btn-outline" onclick="sendGuardTestReport()">🧪 发送测试报告</button>
+        </span>
+      </div>
+
+      <!-- 自检四项明细（只展示，不告警；异常另行以「报告」推送） -->
+      <div id="guard-status-body" style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px">加载中…</div>
+
+      <!-- 配置表单 -->
+      <div id="guard-cfg-body" style="font-size:0.75rem;color:var(--text-muted)">加载中…</div>
+      <div id="guard-msg" style="font-size:0.7rem;display:none;margin-top:6px"></div>
+    </div>
   </div>
 </div>
 
@@ -811,10 +831,242 @@ async function loadSummary() {
 }
 
 // ═══ 企业微信配置 ═══
-var WECOM_BOTS = [
-  { name: '哨兵事件', bot_key: 'sentry', config_key: 'wecom_sentry_webhook_key' },
-  { name: '系统通知', bot_key: 'status', config_key: 'wecom_status_webhook_key' }
+// 机器人清单**只以后端 WECOM_BOTS 为准**（/api/system/wecom-config 返回什么就渲染什么）。
+// 这里原来还有一份硬编码数组，只有 2 项、漏了「启动通知」，与后端长期不一致——
+// 谁也没用到它，却让人以为改这里就能加机器人。删掉，避免再漂移。
+
+// ═══ A7Z 守护配置（v0.3.1.77）═══
+// 上下限与后端 normalize_config 的 _CLAMP 一一对应；前端只是提示，
+// 真正的夹取永远在后端做（配置也可能被手工改 guard.json）。
+var GUARD_FIELDS = [
+  {k:'interval_s',         label:'心跳间隔',      unit:'秒', min:15,  max:60,   hint:'>60 会吃掉僚机 3T 余量'},
+  {k:'probe_every_s',      label:'探针/探活周期', unit:'秒', min:60,  max:150,  hint:'必须 ≤150s，否则通道抖动会被误判成设备失联'},
+  {k:'states_interval_s',  label:'车态拉取间隔',  unit:'秒', min:120, max:1800, hint:'TeslaMate /states，配额克制'},
+  {k:'queue_max',          label:'补报队列上限',  unit:'条', min:1,   max:1000, hint:''},
+  {k:'offline_default_s',  label:'出车静默窗口',  unit:'秒', min:60,  max:21600,hint:'车开走后僚机静默时长'},
+  {k:'report_cooldown_s',  label:'报告去重窗口',  unit:'秒', min:300, max:7200, hint:'同档位内不重复推送'},
+  {k:'ping_fail_threshold',label:'B 失联判据',    unit:'次', min:2,   max:6,    hint:'×探针周期 = 检测时延'},
+  {k:'ts_timeout_s',       label:'TS 超时',       unit:'秒', min:2,   max:30,   hint:''},
+  {k:'https_timeout_s',    label:'HTTPS 超时',    unit:'秒', min:2,   max:30,   hint:''}
 ];
+
+function guardNum(f, val) {
+  return '<div style="display:flex;flex-direction:column;gap:2px">' +
+    '<label style="font-size:0.7rem;color:var(--text-muted)">' + f.label + '（' + f.unit + '）</label>' +
+    '<input type="number" class="guard-num" data-key="' + f.k + '" value="' + escapeHtml(val == null ? '' : val) + '" ' +
+    'min="' + f.min + '" max="' + f.max + '" ' +
+    'style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.75rem">' +
+    (f.hint ? '<span style="font-size:0.62rem;color:var(--text-muted);line-height:1.3">' + f.hint + '</span>' : '') +
+    '</div>';
+}
+
+function renderGuardConfig(cfg) {
+  var el = document.getElementById('guard-cfg-body');
+  if (!el || !cfg) return;
+  var eps = cfg.endpoints || {};
+  var lbl = 'font-size:0.7rem;color:var(--text-muted)';
+  var inp = 'width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.72rem;font-family:monospace';
+
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">' +
+    '<label style="display:flex;align-items:center;gap:5px;font-size:0.75rem;cursor:pointer">' +
+    '<input type="checkbox" id="guard-enabled"' + (cfg.enabled ? ' checked' : '') + '> 启用守护</label>' +
+    '<span style="font-size:0.68rem;color:var(--text-muted)">关闭时零请求、零副作用（与未安装该功能等价）</span>' +
+    '</div>';
+
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+    '<div style="display:flex;flex-direction:column;gap:2px"><label style="' + lbl + '">TS 地址（首选，隧道内）</label>' +
+    '<input id="guard-ts" value="' + escapeHtml(eps.ts || '') + '" placeholder="http://100.x.x.x:8899" style="' + inp + '"></div>' +
+    '<div style="display:flex;flex-direction:column;gap:2px"><label style="' + lbl + '">HTTPS 地址（兜底，可空）</label>' +
+    '<input id="guard-https" value="' + escapeHtml(eps.https || '') + '" placeholder="https://…（必须 https://）" style="' + inp + '"></div>' +
+    '</div>';
+
+  html += '<div style="display:grid;grid-template-columns:1fr;gap:2px;margin-bottom:10px">' +
+    '<label style="' + lbl + '">令牌 token（留空 = 不修改）</label>' +
+    '<input id="guard-token" type="password" autocomplete="new-password" style="' + inp + '" placeholder="' +
+    (cfg.token_set ? '已配置 ' + escapeHtml(cfg.token_tail || '') + '，留空保持不变'
+                   : '尚未配置（A/B 两端必须一致）') + '"></div>';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">';
+  GUARD_FIELDS.forEach(function(f) { html += guardNum(f, cfg[f.k]); });
+  html += '</div>';
+
+  html += '<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:10px;padding-top:8px;border-top:0.5px solid var(--border)">' +
+    '<label style="display:flex;align-items:center;gap:5px;font-size:0.75rem;cursor:pointer">' +
+    '<input type="checkbox" id="guard-report-transition"' + (cfg.report_transition ? ' checked' : '') + '> 自检跃迁/恢复即时推送</label>' +
+    '<label style="display:flex;align-items:center;gap:5px;font-size:0.75rem">每日摘要' +
+    '<input type="time" id="guard-report-daily" value="' + escapeHtml(cfg.report_daily_at || '') + '" ' +
+    'style="padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.72rem">' +
+    '<span style="font-size:0.66rem;color:var(--text-muted)">留空 = 关闭</span></label>' +
+    '</div>';
+
+  html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
+    '<span style="font-size:0.68rem;color:' + (cfg.bot_key_set ? 'var(--success)' : 'var(--danger)') + '">' +
+    (cfg.bot_key_set ? '● 守护机器人已配置' : '✕ 守护机器人未配置（自检报告与 B 失联通知发不出去）') +
+    '</span></div>';
+
+  html += '<div style="display:flex;gap:8px;align-items:center">' +
+    '<button class="btn btn-primary btn-sm" onclick="saveGuardConfig()">保存守护配置</button>' +
+    '<span style="font-size:0.66rem;color:var(--text-muted)">保存即热生效（不用重启 web）；越界值会被后端夹取并提示</span>' +
+    '</div>';
+
+  el.innerHTML = html;
+}
+
+function guardEvidence(k, s) {
+  try {
+    if (k === 'net') {
+      var n = s.net || {};
+      return (n.wifi_ssid || '—') + ' · 出网' + (n.internet_ok ? '正常' : '不通') +
+             (n.tailscale ? ' · TS ' + n.tailscale : '');
+    }
+    if (k === 'gadget') {
+      var g = s.gadget || {};
+      return 'mode=' + (g.mode || '?') + (g.udc_connected ? ' · 已连接' : '') +
+             (g.age_s != null ? ' · ' + g.age_s + 's 前' : '');
+    }
+    if (k === 'thumb') {
+      var t = s.thumb || {};
+      return '积压 ' + (t.queue == null ? '?' : t.queue) + ' · 扫描 ' +
+             (t.last_scan_age_s == null ? '无记录' : Math.round(t.last_scan_age_s) + 's 前');
+    }
+    if (k === 'wechat') {
+      var w = s.wechat || {};
+      return w.last_ok_age_s == null ? '无成功记录'
+        : Math.round(w.last_ok_age_s / 3600) + 'h 前成功';
+    }
+  } catch (e) {}
+  return '';
+}
+
+async function loadGuardStatus() {
+  var badge = document.getElementById('guard-run-badge');
+  var body = document.getElementById('guard-status-body');
+  try {
+    const r = await fetch('/api/guard/status');
+    const d = await r.json();
+    if (badge) {
+      var txt = '—', color = 'var(--text-muted)';
+      if (!d.enabled) { txt = '未启用'; }
+      else if (!d.running) { txt = '已启用但线程未运行'; color = 'var(--danger)'; }
+      else if (d.available) { txt = '心跳正常'; color = 'var(--success)'; }
+      else { txt = '已启用但快照陈旧'; color = '#e6a23c'; }
+      badge.textContent = txt;
+      badge.style.color = color;
+    }
+    if (!body) return;
+    if (!d.available || !d.snapshot) {
+      body.innerHTML = '<span style="color:var(--text-muted)">暂无心跳快照（未启用或刚启动，首轮约 20s）</span>';
+      return;
+    }
+    var sc = d.snapshot.selfcheck || {};
+    var items = sc.items || {};
+    var names = {net:'网络', gadget:'USB链路', thumb:'缩略图', wechat:'企微推送'};
+    var rankCn = {pass:'正常', warn:'注意', fail:'异常', unknown:'未知'};
+    var colors = {pass:'var(--success)', warn:'#e6a23c', fail:'var(--danger)', unknown:'var(--text-muted)'};
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:0.72rem">';
+    ['net','gadget','thumb','wechat'].forEach(function(k) {
+      var st = items[k] || 'unknown';
+      html += '<tr><td style="padding:3px 0;width:76px">' + (names[k] || k) + '</td>' +
+        '<td style="color:' + (colors[st] || 'inherit') + ';font-weight:600;width:52px">' +
+        (rankCn[st] || st) + '</td>' +
+        '<td style="color:var(--text-muted)">' + guardEvidence(k, d.snapshot) + '</td></tr>';
+    });
+    html += '</table>';
+    var sd = d.sender || d.snapshot.sender || {};
+    html += '<div style="margin-top:6px;font-size:0.66rem;color:var(--text-muted)">' +
+      '快照 ' + (d.snapshot.age_s == null ? '?' : d.snapshot.age_s) + 's 前 · ' +
+      '队列 ' + (sd.queue || 0) + ' · ' +
+      '僚机 ' + (sd.b_down ? '失联（' + (sd.ping_kind || '') + '）' : '正常') +
+      (sd.report_ok ? ' · 报告已发 ' + sd.report_ok : '') + '</div>';
+    body.innerHTML = html;
+  } catch (e) {
+    if (body) body.innerHTML = '<span style="color:var(--danger)">状态读取失败</span>';
+  }
+}
+
+async function loadGuardConfig() {
+  var el = document.getElementById('guard-cfg-body');
+  try {
+    const r = await fetch('/api/guard/config');
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || '读取失败');
+    renderGuardConfig(d.config);
+    loadGuardStatus();
+  } catch (e) {
+    if (el) el.innerHTML = '<span style="color:var(--danger);font-size:0.72rem">读取失败：' + e.message + '</span>';
+  }
+}
+
+function showGuardMsg(text, ok) {
+  var el = document.getElementById('guard-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = ok ? 'var(--success)' : 'var(--danger)';
+  el.style.display = 'block';
+  setTimeout(function() { el.style.display = 'none'; }, 6000);
+}
+
+async function saveGuardConfig() {
+  var payload = {
+    enabled: !!(document.getElementById('guard-enabled') || {}).checked,
+    endpoints: {
+      ts: (document.getElementById('guard-ts') || {}).value || '',
+      https: (document.getElementById('guard-https') || {}).value || ''
+    },
+    report_transition: !!(document.getElementById('guard-report-transition') || {}).checked,
+    report_daily_at: (document.getElementById('guard-report-daily') || {}).value || ''
+  };
+  var tok = (document.getElementById('guard-token') || {}).value || '';
+  if (tok.trim()) payload.token = tok.trim();      // 空 = 保持原值，避免把掩码写回去
+  document.querySelectorAll('.guard-num').forEach(function(i) {
+    // 空值不发：Number('') = 0，会被后端夹到下限，等于"手滑清空就变成最小值"
+    if (i.value !== '' && !isNaN(Number(i.value))) payload[i.dataset.key] = Number(i.value);
+  });
+
+  showGuardMsg('保存中…', true);
+  try {
+    const r = await fetch('/api/guard/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (d.success) {
+      showGuardMsg('✅ ' + d.message + (d.applied && d.applied.started ? '（心跳线程已启动）' : ''), true);
+      renderGuardConfig(d.config);      // 用**落库后的值**回填，别让用户以为 600 生效了
+      loadGuardStatus();
+    } else {
+      showGuardMsg('❌ ' + (d.error || '保存失败'), false);
+    }
+  } catch (e) {
+    showGuardMsg('❌ ' + e.message, false);
+  }
+}
+
+async function sendGuardTestReport() {
+  showGuardMsg('发送中…', true);
+  try {
+    const r = await fetch('/api/guard/test-report', { method: 'POST' });
+    const d = await r.json();
+    if (d.success) showGuardMsg('✅ ' + d.message, true);
+    else showGuardMsg('❌ ' + (d.error || '发送失败'), false);
+  } catch (e) {
+    showGuardMsg('❌ ' + e.message, false);
+  }
+}
+
+async function syncGuardBot() {
+  showGuardMsg('同步中…', true);
+  try {
+    const r = await fetch('/api/guard/push-bot', { method: 'POST' });
+    const d = await r.json();
+    if (d.success) showGuardMsg('✅ 僚机已拿到同一个机器人 key', true);
+    else showGuardMsg('❌ 未同步：' + (d.error || '未知错误') +
+                      '（本地已完成，只影响「设备失联」那条由僚机发出的告警）', false);
+  } catch (e) {
+    showGuardMsg('❌ ' + e.message, false);
+  }
+}
 
 async function loadWecomConfig() {
   try {
@@ -1504,10 +1756,12 @@ function clearGithubToken() {
 // ═══ Init ═══
 loadSystemInfo(); loadModeDisplay(); loadAutoPresentConfig(); load挂载点Status(); loadSummary();
 loadWecomConfig(); loadPushHealth(); loadServices(); loadThumbResetConfig(); loadFanCurve(); loadGithubToken(); loadPreviewConfig();
+// 守护配置只在载入时渲染一次表单：每次都重渲染会把用户正在输入的值冲掉
+loadGuardConfig();
 loadPowerStatus();
 setTimeout(checkVersionNow, 1000); setTimeout(loadRollbackInfo, 1500); setTimeout(loadChangelogList, 2000);
 setInterval(loadPowerStatus, 60000);  // 每 60 秒刷新位置状态
-setInterval(function() { loadWecomConfig(); loadPushHealth(); loadSummary(); loadServices(); }, 30000);
+setInterval(function() { loadWecomConfig(); loadPushHealth(); loadSummary(); loadServices(); loadGuardStatus(); }, 30000);
 setInterval(function() { loadSummary(); }, 15000);
 
 // 从仪表盘徽章跳转过来时，展开版本组并滚动到锚点

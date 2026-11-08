@@ -118,6 +118,10 @@ WECOM_BOTS = [
      'desc': '系统状态变更、开机通知、异常告警'},
     {'bot_key': 'boot', 'name': '启动通知', 'config_key': 'wecom_boot_webhook_key',
      'desc': '设备启动时推送上线通知'},
+    # v0.3.1.77：守护必须有独立机器人。混在「系统通知」里，
+    # 设备失联与普通状态变更一眼分不出来；且它要能被 A 端直接调用（B 挂了也得能发）。
+    {'bot_key': 'guard', 'name': 'A7Z 守护', 'config_key': 'wecom_guard_webhook_key',
+     'desc': '自检报告 + B 侧僚机失联通知（A 端直连，不经僚机转发）'},
 ]
 
 def get_wecom_status():

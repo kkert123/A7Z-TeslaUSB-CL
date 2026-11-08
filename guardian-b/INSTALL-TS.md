@@ -208,3 +208,57 @@ sudo systemctl restart teslausb-web
 | A 端 `last_error` = `http_403` | B 端 `GUARD_PUBLIC_STATUS=0` 时 `/guard/status` 也要 token，属正常 |
 | 收到告警但文案是「设备失联」而 TS 只是抖动 | 探针周期被改回 >300s 了（见设计 §2 注） |
 | 企微收不到 | `GUARD_ALERT_DRY_RUN` 是否还是 1；`alerts.py` 日志里有没有 `errcode` |
+
+---
+
+## 9. 升级到 v1.0.2（从 v1.0.0 起）
+
+v1.0.2 新增 `GET/POST /guard/config`（A 端设置页下发机器人 key）、告警三态
+（`mode: sent|dryrun|failed`）、**测试心跳不计入在线判定**、告警文案重写。
+第 3 条是必须升级的原因：v1.0.0 会把手工联调心跳（`version=manual-test`）
+当成真实设备在线，5 分钟后开始报「设备失联」，并每 30 分钟重复一次。
+
+```bash
+# 1) 传包并校验
+scp guardian-b-v1.0.2.tar.gz root@100.111.252.121:/root/
+ssh root@100.111.252.121
+sha256sum /root/guardian-b-v1.0.2.tar.gz     # 必须等于发布说明里的值
+
+# 2) 解压到**新目录**（包里顶层有 guardian-b/，别再 -C 到同名目录）
+rm -rf /root/gb2 && mkdir -p /root/gb2
+tar xzf /root/guardian-b-v1.0.2.tar.gz -C /root/gb2
+ls /root/gb2/guardian-b                    # 应看到 app.py judge.py install.sh ...
+
+# 3) 装（幂等：不会覆盖已有的 guard-b.env，token/key 都不丢）
+cd /root/gb2/guardian-b && bash install.sh
+
+# 4) 清掉被污染的状态 —— 这一步不能省
+#    state.json 里存着那条 manual-test 的 last_seen / last_body，
+#    不清掉的话升级后仍会继续报「设备失联」。
+systemctl stop guard-b
+ts=$(date +%s)
+mv /opt/guard-b/data/state.json /opt/guard-b/data/state.json.bak-$ts 2>/dev/null || true
+systemctl start guard-b
+
+# 5) 自检
+curl -s http://100.111.252.121:8899/healthz; echo
+curl -s http://100.111.252.121:8899/guard/status \
+  -H "Authorization: Bearer $(grep -E '^GUARD_TOKEN=' /opt/guard-b/guard-b.env | cut -d= -f2-)"
+# 期望：{"ok":true,"version":"1.0.2",... "alert":{...,"configured":true,...},"state":{...}}
+#       state.last_seen 两项都是 0、last_body 为 null、classify = no_heartbeat_yet
+```
+
+> **升级后到 A 端真正发心跳之间，B 不会报任何失联**（`no_heartbeat_yet`）——
+> 这是预期，不是故障。A 端配好 `guard.json` 并发心跳后才开始判死。
+
+### 验证「测试心跳不会被误判」（可选，30 秒）
+
+```bash
+TOKEN=$(grep -E '^GUARD_TOKEN=' /opt/guard-b/guard-b.env | cut -d= -f2-)
+curl -s -X POST http://100.111.252.121:8899/guard/heartbeat \
+  -H "Authorization: Bearer $TOKEN" -H "X-Guard-Channel: ts" -H "X-Guard-Seq: 1" \
+  -H "Content-Type: application/json" \
+  -d '{"seq":1,"version":"manual-test","vehicle":{"locked":true,"sentry_mode":true,"user_present":false}}'
+# 期望：{"ok":true,"channel":"ts","result":{"event":"test","ignored":true}}
+# 再查 status：last_seen.ts 仍是 0，last_test.version = "manual-test"，且 5 分钟后不告警
+```

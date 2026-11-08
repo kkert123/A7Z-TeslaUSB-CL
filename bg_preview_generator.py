@@ -19,6 +19,7 @@ import os
 import glob
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,9 @@ except ImportError:
 BASE_CAM_PATH = Path('/mnt/teslacam/TeslaCam')
 QUEUE_FILE = Path('/opt/radxa_data/teslausb/data/preview_queue.json')
 BLOCKED_FILE = Path('/opt/radxa_data/teslausb/data/preview_blocked.json')
+# 扫描心跳（v0.3.1.77）：供 guard_client 计算「上次扫描距今多久」。
+# 放在 QUEUE_FILE 同目录（同一挂载点，且该目录已被证明可写）。
+SCAN_STATE_FILE = QUEUE_FILE.parent / 'preview_scan.json'
 THUMB_DIR = Path('/opt/radxa_data/teslausb/static/thumbnails')
 PREVIEW_DIR = Path('/opt/teslausb-web/data/previews')
 
@@ -85,6 +89,39 @@ MIN_THUMBNAIL_SIZE = 10240    # 有效缩略图最小字节数（<10KB 视为损
 
 logger = logging.getLogger("BgPreviewGenerator")
 logger.setLevel(logging.INFO)
+
+
+def write_scan_state(total: int, pending: int) -> None:
+    """原子写「上次扫描完成」的时间戳到 data/preview_scan.json。
+
+    为什么需要落盘：扫描时间原本只是主循环里的**局部变量**，守护进程（另一个服务）
+    无从判断「扫描循环是否还活着」。落成心跳文件后，guard_client 才能用
+    「距上次扫描多久」区分「最近没有新事件」和「生成器卡死/已退出」。
+
+    刻意不 import guard_client：守护模块不该成为其它服务的依赖。
+    失败只记 debug —— 一个统计文件不该影响主循环。
+    """
+    tmp = None
+    try:
+        SCAN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix='.scan-', suffix='.json',
+                                   dir=str(SCAN_STATE_FILE.parent))
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump({'ts': time.time(), 'total': int(total),
+                       'pending': int(pending)}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)     # mkstemp 默认 0600，其它进程读不到
+        os.replace(tmp, str(SCAN_STATE_FILE))
+        tmp = None
+    except Exception as e:
+        logger.debug(f"写扫描心跳失败: {e}")
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -283,6 +320,8 @@ class ThumbnailQueue:
 
         self._save()
         pending = sum(1 for e in self.entries if e['status'] == 'pending')
+        # 扫描心跳：pending 用 pending+paused 口径（与 count_pending / 守护侧一致）
+        write_scan_state(len(self.entries), self.count_pending())
         logger.info(f"队列扫描完成: {len(self.entries)} 总计, {pending} 待处理")
 
     def get_next(self) -> Optional[Dict]:

@@ -99,6 +99,8 @@ gc.QUEUE_PATH = os.path.join(TMP, "guard_queue.json")
 gc.USB_GUARD_STATUS = os.path.join(TMP, "usb_guard_status.json")
 gc.PREVIEW_QUEUE = os.path.join(TMP, "preview_queue.json")
 gc.PREVIEW_BLOCKED = os.path.join(TMP, "preview_blocked.json")
+gc.PREVIEW_SCAN = os.path.join(TMP, "preview_scan.json")
+gc.SENTRY_CONFIG = os.path.join(TMP, "sentry.json")
 
 import config as app_config  # noqa: E402
 app_config.PUSH_HEALTH_FILE = os.path.join(TMP, "push_health.json")
@@ -344,7 +346,8 @@ print("\n[E] 自检判据")
 base_net = {"connected": True, "internet_ok": True}
 sc = gc._selfcheck(base_net, {"mode": "present", "udc_connected": True, "cable": True,
                               "age_s": 10},
-                   {"service": True, "queue": 0}, {"last_ok_age_s": 60, "consecutive_fail": 0})
+                   {"service": True, "queue": 0, "last_scan_age_s": 10},
+                   {"last_ok_age_s": 60, "consecutive_fail": 0})
 ok("E1 全正常 → pass", sc["result"] == "pass", sc["result"])
 
 sc = gc._selfcheck(base_net, {"mode": "edit", "udc_connected": False, "cable": True},
@@ -399,7 +402,7 @@ ok("F3c interval 300 → 60", c["interval_s"] == 60, str(c["interval_s"]))
 ok("F3d timeout 0 → 2", c["ts_timeout_s"] == 2, str(c["ts_timeout_s"]))
 ok("F3e states 0 → 120", c["states_interval_s"] == 120, str(c["states_interval_s"]))
 ok("F3f queue_max<=0 时不写入（不无限增长）",
-   (gc._queue_push({"x": 1}, 0) or True) and len(gc._queue_load()) == 0)
+   gc._queue_push({"x": 1}, 0) == -1 and len(gc._queue_load()) == 0)
 
 # F4 HTTPS 通道配成 http:// → 拒绝发送（P0-2，token 不得明文过公网）
 REC.reset()
@@ -515,6 +518,186 @@ ok("F13a states_interval=1800 时 2000s 不算 stale", v.get("source") == "tesla
    str(v.get("source")))
 v = gc._vehicle_snapshot(fresh_cfg(endpoints={"ts": base, "https": ""}, states_interval_s=300))
 ok("F13b 300s 配置下 2000s 判 stale", v.get("source") == "stale", str(v.get("source")))
+
+
+# ═══════════════════════════════════════════════════════════
+print("\n[G] 配置归一化 / 自检报告 / 僚机失联（v0.3.1.77）")
+# ═══════════════════════════════════════════════════════════
+
+# ── G1~G3 新参数 ──
+c = gc.normalize_config({"report_cooldown_s": 10, "ping_fail_threshold": 99})
+ok("G1a report_cooldown_s 夹到下限 300", c["report_cooldown_s"] == 300, c["report_cooldown_s"])
+ok("G1b ping_fail_threshold 夹到上限 6", c["ping_fail_threshold"] == 6, c["ping_fail_threshold"])
+c = gc.normalize_config({"report_transition": "false"})
+ok("G2 字符串 'false' 判成关闭", c["report_transition"] is False, c["report_transition"])
+ok("G3a '8:5' → '08:05'", gc._norm_hhmm("8:5") == "08:05", gc._norm_hhmm("8:5"))
+ok("G3b 空串 = 关闭日报", gc._norm_hhmm("") == "")
+ok("G3c 越界时刻回落默认", gc._norm_hhmm("25:99") == gc.DEFAULTS["report_daily_at"])
+ok("G3d 非法格式回落默认", gc._norm_hhmm("abc") == gc.DEFAULTS["report_daily_at"])
+
+# ── G4 配置视图不含明文 token ──
+pub = gc.public_config(fresh_cfg(token="SECRET-TOKEN-1234567890"))
+ok("G4a 视图不含明文 token", "SECRET-TOKEN" not in json.dumps(pub))
+ok("G4b 有 token_set + 末 4 位", pub.get("token_set") is True and pub.get("token_tail") == "…7890",
+   str(pub.get("token_tail")))
+
+# ── G5~G6 自检报告：跃迁 / 恢复 / 去重 ──
+PUSHED = []
+gc._guard_bot_key = lambda: "fake-key-for-test"
+gc._push_wecom = lambda text: (PUSHED.append(text), (True, ""))[1]
+
+snap_pass = {"selfcheck": {"result": "pass", "items": {"net": "pass", "gadget": "pass",
+                                                       "thumb": "pass", "wechat": "pass"}},
+             "net": {"connected": True, "internet_ok": True, "wifi_ssid": "C12345"},
+             "gadget": {"mode": "present", "udc_connected": True, "age_s": 3},
+             "thumb": {"service": True, "queue": 0, "last_scan_age_s": 12.0},
+             "wechat": {"last_ok_age_s": 60, "consecutive_fail": 0}}
+snap_fail = {"selfcheck": {"result": "fail", "items": {"net": "fail", "gadget": "pass",
+                                                       "thumb": "pass", "wechat": "pass"}},
+             "net": {"connected": False, "internet_ok": False},
+             "gadget": {"mode": "present", "udc_connected": True, "age_s": 3},
+             "thumb": {"service": True, "queue": 0, "last_scan_age_s": 12.0},
+             "wechat": {"last_ok_age_s": 60, "consecutive_fail": 0}}
+
+s = gc.GuardSender(fresh_cfg(endpoints={"ts": base, "https": ""},
+                             report_cooldown_s=300, report_daily_at=""))
+s._warmup_until = 0          # 关掉预热闸门，否则前 5 分钟一律不推
+PUSHED.clear()
+s._maybe_report(snap_pass)
+ok("G5a 首轮（无历史）不推跃迁", len(PUSHED) == 0, str(len(PUSHED)))
+s._maybe_report(snap_fail)
+ok("G5b pass→fail 推一条", len(PUSHED) == 1, "实际 %d" % len(PUSHED))
+ok("G5c 文案含「异常」", bool(PUSHED) and "异常" in PUSHED[0], PUSHED[0][:24] if PUSHED else "")
+s._maybe_report(snap_pass)
+ok("G6a fail→pass 推恢复", len(PUSHED) == 2 and "恢复" in PUSHED[1],
+   str(len(PUSHED)) + " " + (PUSHED[1][:20] if len(PUSHED) > 1 else ""))
+s._maybe_report(snap_fail)
+ok("G6b 冷却窗口内不重复（同档 300s）", len(PUSHED) == 2, "实际 %d" % len(PUSHED))
+
+# G6c~G6e 预热期（升级/重启后 300s）只跟踪不推送
+s_w = gc.GuardSender(fresh_cfg(endpoints={"ts": base, "https": ""}, report_daily_at=""))
+PUSHED.clear()
+s_w._maybe_report(snap_pass)
+s_w._maybe_report(snap_fail)
+ok("G6c 预热期内不推跃迁", len(PUSHED) == 0, "实际 %d" % len(PUSHED))
+ok("G6d 预热期仍跟踪状态", s_w._last_result == "fail", s_w._last_result)
+s_w._warmup_until = 0
+s_w._maybe_report(snap_pass)
+ok("G6e 预热结束后正常推送", len(PUSHED) == 1 and "恢复" in PUSHED[0], str(len(PUSHED)))
+
+# ── G7 日报（用假时钟把「现在」拨到 20:03）──
+class _FakeTime:
+    def localtime(self, *a):
+        return time.struct_time((2026, 11, 8, 20, 3, 0, 6, 312, -1))
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+s2 = gc.GuardSender(fresh_cfg(endpoints={"ts": base, "https": ""}, report_daily_at="20:00"))
+s2._warmup_until = 0
+PUSHED.clear()
+_real_time = gc.time
+gc.time = _FakeTime()
+try:
+    s2._maybe_report(snap_pass)
+    ok("G7a 20:03 触发日报", len(PUSHED) == 1 and "日报" in PUSHED[0],
+       str(len(PUSHED)) + " " + (PUSHED[0][:18] if PUSHED else ""))
+    s2._maybe_report(snap_pass)
+    ok("G7b 同一天不重复日报", len(PUSHED) == 1, "实际 %d" % len(PUSHED))
+finally:
+    gc.time = _real_time
+
+# ── G8 僚机失联：阈值 / 去重 / 恢复 ──
+PUSHED.clear()
+s3 = gc.GuardSender(fresh_cfg(endpoints={"ts": base, "https": ""}, ping_fail_threshold=3))
+s3._ping_failed("timeout")
+s3._ping_failed("timeout")
+ok("G8a 未达阈值不推", len(PUSHED) == 0, str(len(PUSHED)))
+s3._ping_failed("timeout")
+ok("G8b 达阈值推一条", len(PUSHED) == 1, str(len(PUSHED)))
+ok("G8c 文案是「B 侧失联」", bool(PUSHED) and "B 侧" in PUSHED[0] and "失联" in PUSHED[0],
+   PUSHED[0][:26] if PUSHED else "")
+s3._ping_failed("timeout")
+s3._ping_failed("timeout")
+ok("G8d 持续失联不重复推", len(PUSHED) == 1, "实际 %d" % len(PUSHED))
+s3._ping_ok()
+ok("G8e 恢复推一条", len(PUSHED) == 2 and "恢复" in PUSHED[1], "实际 %d" % len(PUSHED))
+ok("G8f 计数归零 + 解除标记", s3._ping_fail == 0 and s3._b_down_notified is False,
+   "%d %s" % (s3._ping_fail, s3._b_down_notified))
+
+# ── G9 401 不能报成「失联」 ──
+PUSHED.clear()
+s4 = gc.GuardSender(fresh_cfg(endpoints={"ts": base, "https": ""}, ping_fail_threshold=2))
+s4._ping_failed("auth")
+s4._ping_failed("auth")
+ok("G9 令牌错 → 文案是「令牌不匹配」且不说失联",
+   bool(PUSHED) and "令牌" in PUSHED[0] and "失联" not in PUSHED[0],
+   PUSHED[0][:30] if PUSHED else "")
+st = s4.stats()
+ok("G10 stats 含 b_down/ping_kind/report_ok",
+   all(k in st for k in ("b_down", "ping_kind", "last_result", "report_ok", "report_pending")))
+
+# ── G11 缩略图扫描年龄落盘读取 ──
+gc.atomic_write_json(gc.PREVIEW_SCAN, {"ts": time.time() - 42, "total": 5, "pending": 2},
+                     mode=0o644)
+th = gc._thumb_snapshot()
+ok("G11a last_scan_age_s 有值", isinstance(th.get("last_scan_age_s"), float),
+   str(th.get("last_scan_age_s")))
+ok("G11b 年龄≈42s", abs(float(th.get("last_scan_age_s") or 0) - 42) < 3,
+   str(th.get("last_scan_age_s")))
+ok("G11c 队列积压值来自队列文件", th.get("queue") == 0, str(th.get("queue")))
+
+sc = gc._selfcheck({"connected": True, "internet_ok": True},
+                   {"mode": "present", "udc_connected": True, "cable": True, "age_s": 5},
+                   {"service": True, "queue": 0, "last_scan_age_s": 999},
+                   {"last_ok_age_s": 60, "consecutive_fail": 0})
+ok("G11d 扫描陈旧(999s) → thumb warn", sc["items"]["thumb"] == "warn", sc["items"]["thumb"])
+sc = gc._selfcheck({"connected": True, "internet_ok": True},
+                   {"mode": "present", "udc_connected": True, "cable": True, "age_s": 5},
+                   {"service": True, "queue": 0, "last_scan_age_s": None},
+                   {"last_ok_age_s": 60, "consecutive_fail": 0})
+ok("G11e 无扫描记录 → thumb warn（不假绿）", sc["items"]["thumb"] == "warn", sc["items"]["thumb"])
+
+# ── G13 待发报告：安全项不得被覆盖、不得被丢弃 ──
+gc._push_wecom = lambda text: (PUSHED.append(text), (False, "http_500"))[1]
+s5 = gc.GuardSender(fresh_cfg(endpoints={"ts": base, "https": ""}, ping_fail_threshold=2))
+s5._warmup_until = 0
+s5._last_result = "pass"
+s5._ping_failed("timeout")
+s5._ping_failed("timeout")          # → B 失联入队
+s5._maybe_report(snap_fail)         # → 自检异常再入一条
+ok("G13a 两条都留在待发队列", len(s5._pending_reports) == 2, str(len(s5._pending_reports)))
+ok("G13b 队头是 B 失联（未被覆盖）",
+   bool(s5._pending_reports) and "失联" in s5._pending_reports[0]["text"],
+   str(s5._pending_reports[:1]))
+ok("G13c B 失联被标为安全项", bool(s5._pending_reports)
+   and s5._pending_reports[0]["critical"] is True)
+
+for _ in range(8):                              # 安全项重试很多次也不丢
+    if s5._pending_reports:
+        s5._pending_reports[0]["at"] = 0
+        s5._retry_pending_report()
+ok("G13d 安全项重试 8 次后仍在", len(s5._pending_reports) == 2, str(len(s5._pending_reports)))
+
+s5._pending_reports = [i for i in s5._pending_reports if not i.get("critical")]
+for _ in range(4):                              # 普通项 3 档后丢弃
+    if s5._pending_reports:
+        s5._pending_reports[0]["at"] = 0
+        s5._retry_pending_report()
+ok("G13e 普通项重试耗尽后丢弃", len(s5._pending_reports) == 0, str(len(s5._pending_reports)))
+
+gc._push_wecom = lambda text: (PUSHED.append(text), (True, ""))[1]
+s5._pending_reports = [
+    {"text": "critical-1", "critical": True, "tries": 0, "at": 0},
+    {"text": "normal-1", "critical": False, "tries": 0, "at": 0},
+]
+s5._retry_pending_report()
+ok("G13f 补发优先安全项", len(s5._pending_reports) == 1
+   and s5._pending_reports[0]["text"] == "normal-1", str(s5._pending_reports))
+s5._pending_reports[0]["at"] = 0
+s5._retry_pending_report()
+ok("G13g 全部补发完", len(s5._pending_reports) == 0, str(len(s5._pending_reports)))
 
 
 # ═══════════════════════════════════════════════════════════

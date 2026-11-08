@@ -1183,3 +1183,24 @@ body.mode-edit .mode-btn .icon-edit {
   /* GPU/NPU 行字号 */
   .spotlight-card .dash-resource-item ~ div[style] { font-size:0.75rem; }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   状态圆点（v0.3.1.77 补齐）
+   仪表盘模板里一直写着 <span class="status-dot green">，但这个类在本项目
+   从来没有被定义过 —— 圆点实际是零尺寸、用户根本看不见。这里补上，
+   同时供新的「僚机 / 自检」两行使用。
+   ═══════════════════════════════════════════════════════════════ */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  margin-right: 4px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.status-dot.green  { background: var(--success); }
+.status-dot.yellow { background: var(--warning); }
+.status-dot.red    { background: var(--danger); }
+.status-dot.muted  { background: var(--text-muted); }

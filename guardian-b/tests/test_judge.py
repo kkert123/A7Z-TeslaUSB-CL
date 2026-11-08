@@ -33,11 +33,11 @@ class FakeAlerter:
 
     def send_text(self, text):
         self.sent.append(text)
-        return True
+        return "sent"          # v1.0.2 起是三态字符串，不再是 bool
 
     def send_markdown(self, content):
         self.sent.append(content)
-        return True
+        return "sent"
 
 
 def make_cfg(**over):
@@ -335,6 +335,73 @@ def t_classify_matrix():
     assert j.classify(now=1400) == "ts_channel_fault"
     # 双死
     assert j.classify(now=1400 + ALARM + 5) == "device_offline"
+
+
+@case
+def t_test_heartbeat_does_not_pollute():
+    """手工/联调心跳不得计入在线判定（2026-11-08 现场：manual-test 造成整夜误报）"""
+    cfg, store, al, j = make_judge()
+    body = {"seq": 1, "version": "manual-test", "vehicle": dict(PARKED)}  # 故意带「该在线」
+    res = j.on_heartbeat("ts", 1, body, now=1000)
+    assert res.get("ignored") is True, res
+    assert store.data["last_seen"]["ts"] == 0.0, store.data["last_seen"]
+    assert store.data["last_body"] is None, store.data["last_body"]
+    assert store.data["last_test"]["version"] == "manual-test", store.data.get("last_test")
+    ev = j.tick(now=1000 + ALARM + 60)
+    assert all(e["type"] != "alert" for e in ev), ev
+    assert al.sent == [], al.sent
+
+
+@case
+def t_test_flag_true_also_ignored():
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, {"seq": 1, "test": True, "version": "0.3.1.77"}, now=1000)
+    assert store.data["last_seen"]["ts"] == 0.0, store.data["last_seen"]
+    assert j.tick(now=1000 + ALARM + 60)[0]["type"] == "ok"
+
+
+@case
+def t_normal_version_still_counts():
+    """别把正常的 0.3.1.77 误判成测试心跳"""
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(), now=1000)
+    assert store.data["last_seen"]["ts"] == 1000.0, store.data["last_seen"]
+    assert store.data["last_body"]["version"] == "0.3.1.6x"
+
+
+@case
+def t_alert_text_is_human_readable():
+    """告警文案：人话时长、未启用通道不印 epoch、带版本、带建议"""
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(), now=1000)
+    j.tick(now=1000 + 16 * 3600)
+    assert al.sent, "没有发出告警"
+    txt = al.sent[0]
+    assert "1794124" not in txt, "把 epoch 当年龄印出来了：%s" % txt
+    assert "小时前" in txt, txt
+    assert "未启用" in txt, txt
+    assert "0.3.1.6x" in txt, txt
+    assert "建议" in txt, txt
+
+
+@case
+def t_ts_fault_text_says_device_alive():
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(), now=1000)
+    j.on_heartbeat("https", 1, hb_body(), now=1300)
+    j.tick(now=1330)                    # ts 330s 老，https 30s 新 → TS 通道故障
+    assert al.sent, "没有发出告警"
+    assert "Tailscale" in al.sent[0] and "设备本体在线" in al.sent[0], al.sent[0]
+
+
+@case
+def t_human_age_units():
+    from judge import _human_age
+    assert _human_age(30) == "30 秒前", _human_age(30)
+    assert _human_age(600) == "10 分钟前", _human_age(600)
+    assert "小时前" in _human_age(58118), _human_age(58118)
+    assert "天前" in _human_age(3 * 86400), _human_age(3 * 86400)
+    assert _human_age(None) == "未知", _human_age(None)
 
 
 def main():

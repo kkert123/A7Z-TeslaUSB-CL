@@ -30,6 +30,7 @@ def _empty_state() -> dict:
         "offline_reason": "",
         "alerts": {},
         "boot": 0.0,
+        "last_test": {},
         "updated": 0.0,
     }
 
@@ -49,9 +50,12 @@ class StateStore:
             # 浅合并，容忍旧版本缺字段
             for k, v in data.items():
                 base[k] = v
-            for k in ("last_seen", "last_seq", "alerts"):
+            for k in ("last_seen", "last_seq", "alerts", "last_test"):
                 if not isinstance(base.get(k), dict):
                     base[k] = _empty_state()[k]
+            for k in ("offline_until", "boot", "updated"):
+                if not isinstance(base.get(k), (int, float)):
+                    base[k] = 0.0
             base["last_seen"].setdefault("ts", 0.0)
             base["last_seen"].setdefault("https", 0.0)
             base["last_seq"].setdefault("ts", 0)
@@ -101,6 +105,24 @@ class StateStore:
                 self.data["last_body"] = body
                 self.data["last_body"]["_recv_channel"] = channel
                 self.data["last_body"]["_recv_at"] = now
+            self.save()
+
+    def note_test(self, body: dict, now: float = None) -> None:
+        """只记录「收到过测试心跳」，**不动 last_seen / last_body**。
+
+        测试心跳若走 `touch()` 会做两件坏事：
+          ① 把 last_seen 刷成「刚刚」，掩盖真正的心跳中断；
+          ② 把 body 里的 vehicle 存成「该在线」，于是 ALARM 一到必然报「设备失联」。
+        2026-11-08 现场就是这样被一条 `version=manual-test` 的 curl 弄出整夜误报。
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            body = body if isinstance(body, dict) else {}
+            self.data["last_test"] = {
+                "at": now,
+                "version": str(body.get("version") or ""),
+                "channel": str(body.get("_recv_channel") or ""),
+            }
             self.save()
 
     def set_offline(self, expected_until: float, reason: str) -> None:
