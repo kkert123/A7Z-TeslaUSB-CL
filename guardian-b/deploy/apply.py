@@ -90,7 +90,15 @@ def read_json(path):
         return {}
 
 
-def write_json(path, data, mode=0o600):
+def write_json(path, data, mode=0o600, owner=None):
+    """写 JSON。`owner` 指定属主：本脚本以 **root** 运行，用 mkstemp 写出来的
+    文件天然是 root:root 0600 —— 而 `journal.json` 是给 **guardb** 读的。
+
+    v1.1.4 之前没做这一步，后果是：升级成功后 apply 把 journal 写成
+    `root:root 0600` → guardb 的 `Journal._load` 打不开 → 静默返回 {} →
+    `public_status` 报 `idle`。A 端于是永远等不到 `healthy`，
+    卡片停在「正在切换 / 切换中…（idle）」（2026-11-10 实证 M138）。
+    """
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=parent)
@@ -100,6 +108,13 @@ def write_json(path, data, mode=0o600):
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, mode)
+        if owner:
+            try:
+                import pwd
+                ent = pwd.getpwnam(owner)
+                os.chown(tmp, ent.pw_uid, ent.pw_gid)
+            except (KeyError, OSError, ImportError):
+                log("journal 属主切换失败（%s），guardb 可能读不到", owner)
         os.replace(tmp, path)
         tmp = None
     finally:
@@ -379,7 +394,7 @@ def resolve_staged(version, job):
 
 def fail(journal_path, j, code):
     j.update(state="failed", error=code, updated_at=int(time.time()))
-    write_json(journal_path, j)
+    write_json(journal_path, j, mode=0o640, owner="guardb")
     log("标记失败：%s", code)
     return 1
 
@@ -482,7 +497,7 @@ def _run():
         ok, why = health_check(version, host, port, token)
         if ok:
             j.update(state="healthy", error="", updated_at=int(time.time()))
-            write_json(journal_path, j)
+            write_json(journal_path, j, mode=0o640, owner="guardb")
             floor = os.path.join(TRUSTED, "floor")
             try:
                 os.makedirs(TRUSTED, exist_ok=True)
@@ -503,7 +518,7 @@ def _run():
         if not os.path.isdir(old):
             j.update(state="failed", error="rollback_target_missing: " + why,
                      updated_at=int(time.time()))
-            write_json(journal_path, j)
+            write_json(journal_path, j, mode=0o640, owner="guardb")
             log("回滚目标不存在：%s（需人工介入）", old)
             return 4
         swap_symlink(cur, old)
@@ -514,14 +529,14 @@ def _run():
                  rollback_ok=bool(ok2 and okr2),
                  rollback_note="" if (ok2 and okr2) else ("restart=%s health=%s" % (whyr2, why2)),
                  updated_at=int(time.time()))
-        write_json(journal_path, j)
+        write_json(journal_path, j, mode=0o640, owner="guardb")
         log("已回滚到 %s（健康检查 %s：%s）", from_version,
             "通过" if (ok2 and okr2) else "仍失败", why2)
         return 0 if (ok2 and okr2) else 5
     except Exception as exc:                            # noqa: BLE001
         log("升级异常：%r", exc)
         j.update(state="failed", error=repr(exc)[:200], updated_at=int(time.time()))
-        write_json(journal_path, j)
+        write_json(journal_path, j, mode=0o640, owner="guardb")
         return 6
 
 

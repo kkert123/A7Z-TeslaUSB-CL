@@ -45,7 +45,7 @@ _ERR_STATUS = {
     "verifier_missing": 503,
 }
 
-VERSION = "1.1.2"
+VERSION = "1.1.4"
 
 
 def _notify_code(alerter, cfg, job, code, version, ttl, src_ip):
@@ -183,6 +183,27 @@ def create_app(cfg=None):
     @app.route("/healthz", methods=["GET"])
     def healthz():
         return jsonify({"ok": True, "ts": int(time.time())})
+
+    # ── 告警链路自证 ────────────────────────────────────────
+    @app.route("/guard/alert/test", methods=["POST"])
+    def alert_test():
+        """直接发一条测试告警，绕开判死逻辑。
+
+        「为什么没收到告警」里有一半是「根本没走到发送」，另一半是「发了但企微没收到」，
+        这两者从用户视角一模一样。这个端点把后一半单独证掉：
+        它返回 `mode=sent` 就说明 B → 企微 这条路是通的，问题一定在前半段（判死/静默）。
+        """
+        if not _authorized():
+            return _deny()
+        txt = "\n".join([
+            "【A7Z 自检·链路测试】",
+            "这条是手工触发的测试告警，不代表设备状态。",
+            "收到即证明 B 端 → 企微 投递正常。",
+        ])
+        mode = alerter.send_text(txt)
+        logger.info("告警链路测试 投递结果=%s", mode)
+        return jsonify({"ok": mode in ("sent", "dryrun"), "mode": mode,
+                        "alert": alerter.status()})
 
     # ── 状态页 ──────────────────────────────────────────────
     @app.route("/guard/status", methods=["GET"])
@@ -514,10 +535,45 @@ def create_app(cfg=None):
     # ── 后台线程：judge + dead-man ──────────────────────────
     if cfg.judge_enable:
         _start_judge_thread(cfg, judge)
+    if getattr(cfg, "board_enable", False):
+        _start_board_thread(cfg, judge)
     if cfg.deadman_url:
         _start_deadman_thread(cfg)
 
     return app
+
+
+def _start_board_thread(cfg, judge) -> None:
+    """每 N 秒抓一次 TeslaMate 首页，把车态喂给 judge（v1.1.4）。
+
+    为什么用网页而不是 API：TeslaMate 的 `/api/*` 全要 token，token 缓存在 A7Z 上；
+    而首页是 LiveView 服务端渲染的，**免鉴权**且直接带 locked/sentry/status。
+    """
+    try:
+        import board as board_lib
+    except Exception:                      # pragma: no cover - 包不完整时别拖垮启动
+        logger.error("车态板模块加载失败：代发功能不可用（其余功能正常）")
+        return
+
+    def loop():
+        logger.info("车态板线程启动 url=%s interval=%ss", cfg.board_url,
+                    cfg.board_interval)
+        warned = ""
+        while True:
+            try:
+                sample = board_lib.fetch_board(cfg.board_url)
+                judge.on_board(sample)
+                err = sample.get("err") or ""
+                if err and err != warned:
+                    warned = err          # 同一个错误只吼一次，别每 60s 刷一行
+                    logger.warning("车态板抓取/解析失败: %s", err)
+                elif not err:
+                    warned = ""
+            except Exception:
+                logger.exception("车态板线程异常（已吞，继续）")
+            time.sleep(max(15, int(cfg.board_interval)))
+
+    threading.Thread(target=loop, name="guard-board", daemon=True).start()
 
 
 def _start_judge_thread(cfg, judge) -> None:

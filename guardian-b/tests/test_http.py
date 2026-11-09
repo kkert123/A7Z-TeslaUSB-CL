@@ -37,6 +37,7 @@ def build_app():
     cfg.state_path = os.path.join(tempfile.mkdtemp(prefix="guardb-http-"), "state.json")
     cfg.log_path = os.path.join(os.path.dirname(cfg.state_path), "guard-b.log")
     cfg.judge_enable = False          # 冒烟不跑后台线程
+    cfg.board_enable = False          # 车态板线程同理：别在测试里去抓 4000
     cfg.deadman_url = ""
     cfg.public_status = False
     cfg.wecom_key = ""
@@ -152,6 +153,27 @@ def t_invalid_json_body_tolerated():
                headers={**AUTH, "Content-Type": "application/json",
                         "X-Guard-Channel": "https"})
     assert r.status_code == 200, r.data
+
+
+@case
+def t_alert_test_requires_auth():
+    """链路自证端点不得裸奔：能发企微就必须带 token。"""
+    app, cfg = build_app()
+    c = app.test_client()
+    r = c.post("/guard/alert/test")
+    assert r.status_code == 401, r.data
+
+
+@case
+def t_alert_test_reports_delivery():
+    """`mode` 必须是三态之一，让「没收到」能区分「没发」和「发了没到」。"""
+    app, cfg = build_app()
+    c = app.test_client()
+    r = c.post("/guard/alert/test", headers=AUTH)
+    d = r.get_json()
+    assert r.status_code == 200 and d["ok"] is True, d
+    assert d["mode"] in ("sent", "dryrun", "failed"), d
+    assert d["mode"] == "dryrun", "测试环境应是 dry_run，实际 %r" % (d["mode"],)
 
 
 def main():

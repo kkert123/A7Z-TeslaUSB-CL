@@ -44,13 +44,16 @@ class Alerter:
         既可能是真发出去了，也可能只是打了行日志。2026-11-07 现场排查时
         就因为这一点无法确认企微群到底收到没有，只能去翻有没有 `[DRY-RUN]` 行。
         """
+        # dry_run 必须排在「有没有配通道」之前：它的语义是「什么都不发、只回显」，
+        # 与通道是否配置无关。排在后面会让「DRY_RUN=1 且没配 key」返回 `failed`，
+        # 看起来像投递失败，其实一次都没尝试（排查时会被这条误导）。
+        if self.dry_run:
+            logger.info("[DRY-RUN] 告警内容: %s", payload)
+            return "dryrun"
         ep = self._endpoint()
         if not ep:
             logger.warning("告警未投递：未配置 webhook key/url")
             return "failed"
-        if self.dry_run:
-            logger.info("[DRY-RUN] 告警内容: %s", payload)
-            return "dryrun"
         last_err = ""
         for i in range(tries):
             try:

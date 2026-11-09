@@ -404,6 +404,90 @@ def t_human_age_units():
     assert _human_age(None) == "未知", _human_age(None)
 
 
+DRIVING_STATE = {"locked": True, "user_present": True, "sentry_mode": False,
+                 "state": "driving", "speed": 43.0, "shift_state": "D"}
+SLEEPING = {"locked": True, "user_present": False, "sentry_mode": False,
+            "state": "asleep", "shift_state": "P"}
+
+
+@case
+def t_driving_evidence_expires_to_alert():
+    """M135 · 2026-11-09 现场：A 在 43km/h 上断掉，B 必须最终判死。
+
+    旧实现把「A 死前最后一帧：车在开」当永久现状 → 无限期静默，
+    1h38m 后 `alerts.device_offline.last_sent` 仍是 0.0。
+    """
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
+    # 证据还新鲜（< offline_default_s）→ 仍静默，别把短时网络抖动报成失联
+    ev = j.tick(now=1000 + ALARM + 5)
+    assert ev[0]["type"] == "silent" and ev[0]["why"] == "driving", ev
+    assert al.sent == []
+    # 超过证据保质期 → 必须告警
+    ev = j.tick(now=1000 + cfg.offline_default_s + 10)
+    assert ev[0]["type"] == "alert" and ev[0]["fault"] == "device_offline", ev
+    assert len(al.sent) == 1
+
+
+@case
+def t_driving_why_beats_user_present():
+    """车在开时 `why` 必须是 driving（不能是 user_present），否则 TTL 永远不生效。"""
+    from judge import _classify_vehicle
+    assert _classify_vehicle({"vehicle": DRIVING_STATE}) == (False, "driving")
+    # 速度够大、state 缺失也算在开
+    assert _classify_vehicle({"vehicle": {"speed": 20.0}}) == (False, "driving")
+    # 停着人不走 → 仍是 user_present（长期静默是合法的）
+    assert _classify_vehicle(
+        {"vehicle": {"locked": False, "user_present": True,
+                     "sentry_mode": False}}) == (False, "user_present")
+
+
+@case
+def t_sleeping_car_stays_silent_forever():
+    """车睡了、A 随车机断电 → 正常现象，不得因加了保质期就每晚误报。"""
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(SLEEPING), now=1000)
+    for now in (1000 + ALARM + 5,
+                1000 + cfg.offline_default_s + 10,
+                1000 + 20 * 3600):
+        ev = j.tick(now=now)
+        assert ev[0]["type"] == "silent", (now, ev)
+    assert al.sent == []
+
+
+@case
+def t_classify_driving_expired_is_device_offline():
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
+    assert j.classify(now=1000 + ALARM + 5) == "not_expected_online"
+    assert j.classify(now=1000 + cfg.offline_default_s + 10) == "device_offline"
+
+
+@case
+def t_alert_backoff_escalates():
+    """重复告警间隔递增：30min → 2h → 6h，恢复后归零。"""
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(), now=1000)
+    t0 = 1000 + ALARM + 5
+    assert j.tick(now=t0)[0]["type"] == "alert"
+    assert j.tick(now=t0 + 30)[0]["type"] == "dedup"
+    assert j.tick(now=t0 + 1801)[0]["type"] == "alert"      # 第 2 条：+30min
+    ev = j.tick(now=t0 + 1801 + 1801)                        # 第 2 条之后 30min 还不够
+    assert ev[0]["type"] == "dedup", ev
+    assert j.tick(now=t0 + 1801 + 7201)[0]["type"] == "alert"  # 第 3 条：再 +2h
+    assert len(al.sent) == 3
+
+
+@case
+def t_alert_text_shows_last_vehicle():
+    """告警要回答「车到底锁了没」——只写设备失联等于没说。"""
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
+    j.tick(now=1000 + cfg.offline_default_s + 10)
+    txt = al.sent[0]
+    assert "最后车态" in txt and "在开 43km/h" in txt and "已锁" in txt, txt
+
+
 def main():
     passed = 0
     total = len(RESULTS)

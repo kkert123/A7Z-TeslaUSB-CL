@@ -73,6 +73,13 @@ def _classify_vehicle(body):
     locked = v.get("locked")
     present = v.get("user_present")
     sentry = v.get("sentry_mode")
+    # 「车在动」**必须最先判**：它在语义上覆盖 user_present（司机就在车上），
+    # 而 `why` 决定这条静默证据有没有保质期（见 Judge._evidence_fresh）——
+    # 若让 user_present 先命中，出车途中失联会被当成「人在车边、不必告警」（M135）。
+    st = str(v.get("state") or "").strip().lower()
+    sp = v.get("speed")
+    if st == "driving" or (isinstance(sp, (int, float)) and sp > 3):
+        return False, "driving"
     if locked is True and present is False and sentry is True:
         return True, "sentry_on_parked_locked"
     if present is True:
@@ -82,6 +89,37 @@ def _classify_vehicle(body):
     if locked is False:
         return False, "unlocked"
     return None, "partial"
+
+
+def _vehicle_line(v) -> str:
+    """把最后一次车态说成人话。
+
+    用户点开告警第一反应是「车到底锁了没」——只写「设备失联」等于没说。
+    这些字段全是 A 最后一帧的**快照**，可能已过期，所以文案里带「最后」。
+    """
+    if not isinstance(v, dict) or not v:
+        return "未知"
+    bits = []
+    st = str(v.get("state") or "").strip().lower()
+    if st == "driving":
+        sp = v.get("speed")
+        bits.append("在开 %gkm/h" % sp if isinstance(sp, (int, float)) else "在开")
+    elif st:
+        bits.append({"online": "车在线", "asleep": "车休眠", "offline": "车离线"}
+                    .get(st, "状态=%s" % st))
+    lk = v.get("locked")
+    if lk is True:
+        bits.append("已锁")
+    elif lk is False:
+        bits.append("未锁")
+    if v.get("sentry_mode") is True:
+        bits.append("哨兵开")
+    if v.get("user_present") is True and st != "driving":
+        bits.append("人在车上")
+    sh = str(v.get("shift_state") or "").strip().upper()
+    if sh:
+        bits.append("%s 档" % sh)
+    return " · ".join(bits) or "未知"
 
 
 class Judge:
@@ -134,6 +172,9 @@ class Judge:
         """返回本次 tick 产生的事件列表（供测试断言 / 日志）。"""
         now = self._now() if now is None else now
         data = self.store.data
+        # 0) 锁车代发：独立事件通道，**不受下面任何静默闸影响**——
+        #    它要解决的正是「A 已经哑了，静默闸会把告警吞掉」那种场景。
+        self._maybe_relay_lock(now)
         ls = data.get("last_seen", {})
         age_ts = now - float(ls.get("ts", 0.0))
         age_https = now - float(ls.get("https", 0.0))
@@ -144,7 +185,7 @@ class Judge:
 
         # 2) 车在开 / 已知离线 → 静默（防误报核心）
         online_expected, why = _classify_vehicle(data.get("last_body"))
-        if online_expected is False:
+        if online_expected is False and self._could_be_silent(why, now):
             return [{"type": "silent", "reason": "not_expected_online", "why": why}]
         if online_expected is None and self.cfg.unknown_vehicle == "silent":
             return [{"type": "silent", "reason": "unknown_vehicle", "why": why}]
@@ -193,24 +234,156 @@ class Judge:
         events.extend(self._recover_one(other, now, age_ts, age_https))
         return events
 
+    def _could_be_silent(self, why: str, now: float) -> bool:
+        """车态证据能不能作为「现在不必告警」的理由。
+
+        分两类，**不能一刀切**：
+          · `driving`：车在动 → A7Z 一定带电、一定该在线。它不说话只有两种解释
+            「网络断了」或「设备死了」，两种都该告警 → 只给有限保质期。
+          · `sentry_off` / `unlocked` / `user_present`：车停着、人可能就在旁边，
+            A7Z 随车机 USB 断电是**正常现象**（每晚都发生）→ 长期静默是对的，
+            给它们加保质期会让每次锁车都误报。
+
+        2026-11-09 实证：15:36:57 A 在 43km/h 上断掉，B 的出车窗口 16:29:55 一过期，
+        这一帧「车在开」被当成永久现状 → 一路静默 1h38m，`last_sent` 始终 0.0。
+        """
+        if why != "driving":
+            return True
+        return self._evidence_fresh(now)
+
+    def _evidence_fresh(self, now: float) -> bool:
+        """`last_body` 是「A 死前最后一句话」，只能替它顶 `offline_default_s`（默认 1h）。
+
+        超过这个时长仍无新心跳，就说明 A 已经不说话了，再拿这帧判「车在开、
+        不必告警」= 无限期静默。时长与出车静默窗口同源，运维只需理解一个旋钮。
+        """
+        lb = self.store.data.get("last_body") or {}
+        try:
+            recv_at = float(lb.get("_recv_at") or 0.0)
+        except (TypeError, ValueError):
+            recv_at = 0.0
+        if recv_at <= 0.0:
+            # 老状态文件没有 `_recv_at`：退回「最后一次收到心跳的时刻」，
+            # 绝不能用 0.0 直接比 now（那会让升级后第一拍立刻误报）。
+            ls = self.store.data.get("last_seen") or {}
+            try:
+                recv_at = max(float(ls.get("ts") or 0.0), float(ls.get("https") or 0.0))
+            except (TypeError, ValueError):
+                recv_at = 0.0
+        return recv_at > 0.0 and (now - recv_at) < float(self.cfg.offline_default_s)
+
+    # ── 锁车代发（v1.1.4）────────────────────────────────────
+    def on_board(self, sample: dict, now: float = None) -> dict:
+        """接收一次车态板采样（TeslaMate 首页 SSR），维护锁车闩锁。
+
+        锁车是**事件**，必须存进持久状态：重启后仍要知道「上一拍是未锁」，
+        否则重启第一拍会被当成「刚锁车」，代发一条重复自检。
+        """
+        now = self._now() if now is None else now
+        prev = self.store.set_board(sample, now=now)
+        locked = (sample or {}).get("locked")
+        if locked is False:
+            self.store.clear_lock_check()
+            return prev
+        if locked is True and prev.get("locked") is not True:
+            self.store.arm_lock_check(now)
+            logger.info("观测到锁车（TeslaMate 车态板）：%ds 后判定是否代发",
+                        self.cfg.lock_grace_s)
+        return prev
+
+    def _device_alive(self, now: float) -> bool:
+        """设备最近一次心跳是否还在健康区（= A 自己能推）。"""
+        ls = self.store.data.get("last_seen") or {}
+        seen = [float(ls.get(k) or 0.0) for k in ("ts", "https")]
+        seen = [t for t in seen if t > 0]
+        return bool(seen) and (now - max(seen)) <= self.cfg.warn_s
+
+    def _maybe_relay_lock(self, now: float) -> None:
+        lc = self.store.data.get("lock_check") or {}
+        if not lc.get("at") or lc.get("done"):
+            return
+        if (now - float(lc["at"])) < self.cfg.lock_grace_s:
+            return
+        b = self.store.data.get("board") or {}
+        # 车态板本身必须新鲜：拿一小时前的「已锁」去代发，等于编造
+        if (now - float(b.get("at") or 0.0)) > 900:
+            self.store.mark_lock_check_done("board_stale")
+            logger.info("锁车代发跳过：车态板已过期")
+            return
+        if self._device_alive(now):
+            self.store.mark_lock_check_done("device_alive")
+            logger.info("锁车代发跳过：设备在线，A 端会自己推自检")
+            return
+        mode = self.alerter.send_text(self._fmt_lock_relay(now))
+        self.store.mark_lock_check_done("sent:%s" % mode)
+        # 这条代发本身就是一次「设备失联」告知，把通用失联槽一并记账，
+        # 否则同一拍还会再推一条「设备失联」，两条消息说同一件事。
+        rec = self.store.alert_slot(FAULT_DEV)
+        rec["active"] = True
+        rec["last_sent"] = now
+        self.store.save()
+        logger.warning("锁车代发已发送（设备失联中）mode=%s", mode)
+
+    def _fmt_lock_relay(self, now: float) -> str:
+        b = self.store.data.get("board") or {}
+        ls = self.store.data.get("last_seen") or {}
+        body = self.store.data.get("last_body") or {}
+        ages = [now - float(ls[k]) for k in ("ts", "https") if float(ls.get(k) or 0.0) > 0]
+        car = []
+        if b.get("locked") is True:
+            car.append("已锁")
+        if b.get("sentry") is True:
+            car.append("哨兵开")
+        if b.get("state"):
+            car.append("车辆状态 %s" % b["state"])
+        return "\n".join([
+            "【停车自检·僚机代发】车辆已锁车 · 设备失联",
+            "· 车态（TeslaMate）：%s" % (" · ".join(car) or "未知"),
+            "· A7Z：最后心跳 %s（%s）" % (_human_age(min(ages)) if ages else "从未收到",
+                                         str(body.get("version") or "未知")),
+            "",
+            "本条由 B 端代发：设备此刻没有心跳，它自己的停车自检（USB/网络/存储）生成不了。",
+            "建议：确认设备指示灯，以及它当时连的热点（车载 MIFI / 家宽）是否可用。",
+        ])
+
     # ── 告警 / 恢复 内部 ────────────────────────────────────
     def _raise(self, fault: str, now: float, age_ts: float, age_https: float) -> dict:
         rec = self.store.alert_slot(fault)
         last_sent = float(rec.get("last_sent", 0.0))
-        # 去重：同故障 GUARD_DEDUP_S 内只推一次（**不依赖 active**——恢复后
-        # 紧接的复发同样应被抑制，避免「恢复+告警」抖成两条）。
+        n = int(rec.get("n", 0) or 0)
+        gap = self._backoff_gap(n)
+        # 去重：同故障按**递增间隔**推送（**不依赖 active**——恢复后紧接的复发
+        # 同样应被抑制，避免「恢复+告警」抖成两条）。
         # 注意 last_sent>0 的前提：从未推送过（=0）绝不能判成重复。
-        if last_sent > 0.0 and (now - last_sent) < self.cfg.dedup_s:
+        if last_sent > 0.0 and (now - last_sent) < gap:
             rec["active"] = True          # 故障持续存在，仅抑制重复推送
             self.store.save()
-            return {"type": "dedup", "fault": fault}
+            return {"type": "dedup", "fault": fault,
+                    "next_in_s": int(gap - (now - last_sent))}
         msg = self._format_fault(fault, age_ts, age_https)
         mode = self.alerter.send_text(msg)      # "sent" / "dryrun" / "failed"
         rec["active"] = True
         rec["last_sent"] = now
+        rec["n"] = n + 1
         self.store.save()
         return {"type": "alert", "fault": fault, "mode": mode,
-                "delivered": mode in ("sent", "dryrun")}
+                "delivered": mode in ("sent", "dryrun"), "seq": n + 1}
+
+    def _backoff_gap(self, n: int) -> float:
+        """同一故障重复推送的间隔递增：30min → 2h → 6h → 24h 封顶，恢复后归零。
+
+        旧实现固定 `dedup_s`(30min)：设备离线一整晚 = 20 条企微消息，用户会给整个群
+        静音，等于把告警废掉（M89「限流限频率」的同一个反面）。
+        """
+        try:
+            seq = tuple(int(x) for x in (self.cfg.alert_backoff or ()))
+        except (AttributeError, TypeError, ValueError):
+            seq = ()
+        if not seq:
+            return float(self.cfg.dedup_s)
+        # n = 已推送条数。第 1 条之后的**第一次重推**用 seq[0]，
+        # 也就是说间隔序列是按「第几条重推」排的，不是按「第几条推送」。
+        return float(seq[min(max(n - 1, 0), len(seq) - 1)])
 
     def _maybe_recover(self, now: float, age_ts: float, age_https: float) -> list:
         return (self._recover_one(FAULT_TS, now, age_ts, age_https)
@@ -236,6 +409,7 @@ class Judge:
         mode = self.alerter.send_text(msg)
         rec["active"] = False
         rec["last_sent"] = now
+        rec["n"] = 0            # 恢复即归零：下一次故障重新从 30min 开始
         self.store.save()
         return [{"type": "recover", "fault": fault, "mode": mode}]
 
@@ -261,14 +435,22 @@ class Judge:
             ages.append(age_ts)
         if https_seen:
             ages.append(age_https)
+        v = body.get("vehicle") if isinstance(body.get("vehicle"), dict) else {}
+        was_driving = str(v.get("state") or "").strip().lower() == "driving"
         lines = [
             "【A7Z 自检】设备失联",
             "最后心跳：%s（%s）" % (_human_age(min(ages)) if ages else "从未收到", ver),
             "· Tailscale：%s" % (_human_age(age_ts) if ts_seen else "未启用"),
             "· HTTPS：%s" % (_human_age(age_https) if https_seen else "未启用"),
+            "· 最后车态：%s" % _vehicle_line(v),
             "",
             "可能原因：断电 / 系统崩溃 / 网络中断（云端无法区分）",
-            "建议：确认车还停着，再检查设备电源与网络指示灯",
+            # 行驶中失联 ≠ 停车后失联：前者最常见的是「离开家宽/车载热点后没网」，
+            # 让用户去「确认车还停着」等于答非所问（2026-11-09 现场就是这种）。
+            ("建议：车最后一次上报是在行驶中。若车已停妥，先看设备指示灯，"
+             "再确认它当时连的热点（车载 MIFI / 家宽）是否可用"
+             if was_driving else
+             "建议：确认车还停着，再检查设备电源与网络指示灯"),
         ]
         return "\n".join(lines)
 
@@ -278,8 +460,8 @@ class Judge:
         data = self.store.data
         if now < float(data.get("offline_until", 0.0)):
             return "expected_offline"
-        online_expected, _ = _classify_vehicle(data.get("last_body"))
-        if online_expected is False:
+        online_expected, why = _classify_vehicle(data.get("last_body"))
+        if online_expected is False and self._could_be_silent(why, now):
             return "not_expected_online"
         ls = data.get("last_seen", {})
         age_ts = now - float(ls.get("ts", 0.0))

@@ -372,7 +372,9 @@ def a13_prepare成功后触发推送():
     # 签名：(alerter, cfg, job, code, version, ttl, src_ip)
     args = calls[0]
     ok(str(args[2]) and len(str(args[2])) >= 8, "推送必须带 job")
-    ok(len(str(args[3])) == 6 and str(args[3]).isdigit(), "推送必须带 6 位数字码：%r" % (args[3],))
+    ok(len(str(args[3])) == 6 and all(c in "0123456789ABCDEF" for c in str(args[3]).upper()),
+       "推送必须带 6 位确认码（make_code = HMAC hexdigest[:6].upper()，含 A-F 是设计如此）：%r"
+       % (args[3],))
     ok(args[4] == "1.2.1", "推送必须带目标版本：%r" % (args[4],))
     ok(int(args[5]) == up.CONFIRM_TTL_S, "推送必须带有效期：%r" % (args[5],))
 

@@ -44,7 +44,7 @@ NAMESPACE = "a7z-guard-pkg"
 KIND = "guardian-b"
 
 # 只打这些模块（新增模块要显式加进来——这也是一道"别把杂项打进包"的闸）
-APP_MODULES = ["app.py", "config.py", "state.py", "judge.py", "alerts.py"]
+APP_MODULES = ["app.py", "config.py", "state.py", "judge.py", "alerts.py", "board.py"]
 
 # 永不进包
 NEVER = {"upgrade.py", "apply.py", "manifest.json", "manifest.json.sig"}

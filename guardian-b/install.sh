@@ -89,7 +89,7 @@ fi
 # ── 3) 装新版本 ─────────────────────────────────────────────
 echo "==> 安装 releases/$SRC_VER"
 mkdir -p "$DEST/releases/$SRC_VER"
-for f in app.py config.py state.py judge.py alerts.py requirements.txt README.md INSTALL-TS.md; do
+for f in app.py config.py state.py judge.py alerts.py board.py requirements.txt README.md INSTALL-TS.md; do
     [ -f "$SRC/$f" ] && cp -f "$SRC/$f" "$DEST/releases/$SRC_VER/$f"
 done
 

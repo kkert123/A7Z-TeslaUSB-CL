@@ -52,6 +52,13 @@ STATUS_PATH = os.path.join(app_config.DATA_DIR, "guard_status.json")
 # 「明明收到了推送，自检却说 172 天没成功过」——M127：先验后用必须同一份数据。
 PUSH_HEALTH_OWN = os.path.join(app_config.DATA_DIR, "guard_push_health.json")
 _PUSH_HEALTH_LOCK = threading.Lock()
+# 报告补发队列**落盘**（v0.3.1.83 / M136）。
+# 原来只在内存：A 离家无网时锁车，报告重试 3 档（30/120/600s）后丢弃；
+# 车一睡断电（或 web 重启）队列直接消失 → 那条「停车自检」永久丢失。
+# 落盘后回网/下次开机补发，并在正文里标注「补发 + 原生成时刻」。
+REPORT_QUEUE_PATH = os.path.join(app_config.DATA_DIR, "guard_report_queue.json")
+REPORT_QUEUE_MAX = 8              # 与 _push_report 的裁剪口径一致
+REPORT_QUEUE_TTL_S = 7 * 86400    # 一周前的补发只会让人困惑，不如不补
 QUEUE_PATH = os.path.join(app_config.DATA_DIR, "guard_queue.json")
 USB_GUARD_STATUS = os.path.join(app_config.DATA_DIR, "usb_guard_status.json")
 PREVIEW_QUEUE = os.path.join(app_config.DATA_DIR, "preview_queue.json")
@@ -212,6 +219,72 @@ def atomic_write_json(path: str, obj: Any, mode: int = 0o600) -> bool:
             except OSError:
                 pass
         return False
+
+
+def _load_report_queue() -> List[Dict[str, Any]]:
+    """读补发队列。坏文件一律当空处理（读侧必须假设内容坏了，M114/M122）。
+
+    单调钟 `at` 不跨重启，故一律重置为 `None`（=立刻允许补发一次）。
+    `wall` 是给用户看的「原生成时刻」，必须落盘。
+    """
+    raw = _read_json(REPORT_QUEUE_PATH)
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        raw = raw.get("items")
+    if not isinstance(raw, list):
+        logger.warning("补发队列格式异常（非 list），忽略并按空处理")
+        return []
+    now = time.time()
+    out: List[Dict[str, Any]] = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "")
+        if not text:
+            continue
+        try:
+            wall = float(it.get("wall") or 0.0)
+        except (TypeError, ValueError):
+            wall = 0.0
+        if wall and (now - wall) > REPORT_QUEUE_TTL_S:
+            continue                      # 一周前的补发没有意义
+        out.append({
+            "text": text,
+            "critical": bool(it.get("critical")),
+            "tries": int(it.get("tries") or 0),
+            "at": None,                   # 立即允许重试（见上方注释）
+            "wall": wall,
+        })
+    return out[:REPORT_QUEUE_MAX]
+
+
+def _save_report_queue(items: List[Dict[str, Any]]) -> None:
+    """落盘补发队列；空队列直接删文件（别留一个空壳）。"""
+    if not items:
+        try:
+            os.unlink(REPORT_QUEUE_PATH)
+        except OSError:
+            pass
+        return
+    atomic_write_json(REPORT_QUEUE_PATH, {"ver": 1, "items": items}, mode=0o644)
+
+
+def _report_text(item: Dict[str, Any]) -> str:
+    """补发时的正文：标注「补发 + 原生成时刻」。
+
+    不标注的话，用户在几小时后收到一条「停车自检」会以为是刚刚发生的事，
+    进而怀疑车态判断错乱——比不补发更糟。
+    """
+    text = str(item.get("text") or "")
+    try:
+        wall = float(item.get("wall") or 0.0)
+    except (TypeError, ValueError):
+        wall = 0.0
+    if wall <= 0:
+        return text
+    return text + "\n\n（补发：本条生成于 %s，当时无网络；现已补发）" % time.strftime(
+        "%m-%d %H:%M", time.localtime(wall))
 
 
 def _tri(value: Any) -> Optional[bool]:
@@ -1215,7 +1288,9 @@ class GuardSender:
         self._offline_at: Dict[str, float] = {}   # reason → 上次握手时刻
         # 待重发的报告用**小列表**而不是单槽：单槽会让「B 侧失联」这类安全通知
         # 被随后的一条自检报告覆盖掉（谁后写谁活），那是最不该丢的一条。
-        self._pending_reports: List[Dict[str, Any]] = []   # {text, critical, tries, at}
+        # v0.3.1.83：队列**落盘**——只在内存时，离家无网锁车那条「停车自检」
+        # 重试 3 档后就被丢弃，车一睡断电/进程重启更是直接消失（M136）。
+        self._pending_reports: List[Dict[str, Any]] = _load_report_queue()
         self._no_key_warned = False
         self._report_ok = 0
         self._report_fail = 0
@@ -1842,19 +1917,30 @@ class GuardSender:
             return          # 配置缺失不算通道故障，不记入推送健康
 
         _note_push(False)   # 真正的投递失败才计入连续失败
+        # `wall` 必须落盘：补发时要在正文里告诉用户「这条是什么时候的事」
         self._pending_reports.append({
             "text": text,
             "critical": bool(critical),
             "tries": 0,
             "at": time.monotonic(),
+            "wall": time.time(),
         })
-        # 只裁剪**普通**报告（保留最新 3 条），安全项一律保留
-        if len(self._pending_reports) > 8:
-            crit = [i for i in self._pending_reports if i.get("critical")]
-            normal = [i for i in self._pending_reports if not i.get("critical")]
-            self._pending_reports = crit + normal[-3:]
+        self._trim_report_queue()
+        _save_report_queue(self._pending_reports)
         logger.warning("自检报告推送失败（留待重试，待发 %d 条）: %s",
                        len(self._pending_reports), err)
+
+    def _trim_report_queue(self) -> None:
+        """只裁剪**普通**报告（保留最新 3 条），安全项一律保留。
+
+        安全项（critical）是告警体系的一部分：B 侧失联/停车自检被丢一条，
+        用户就完全不知道发生过什么。
+        """
+        if len(self._pending_reports) <= REPORT_QUEUE_MAX:
+            return
+        crit = [i for i in self._pending_reports if i.get("critical")]
+        normal = [i for i in self._pending_reports if not i.get("critical")]
+        self._pending_reports = crit + normal[-3:]
 
     def _retry_pending_report(self) -> None:
         if not self._pending_reports:
@@ -1865,14 +1951,19 @@ class GuardSender:
         tries = int(item.get("tries") or 0)
         backoff = self._CRIT_BACKOFF if item.get("critical") else self._REPORT_BACKOFF
         wait = backoff[min(tries, len(backoff) - 1)]
-        if time.monotonic() - float(item.get("at") or 0.0) < wait:
+        # `at` 用 None 表示「刚从磁盘读出来」：单调钟跨重启无意义，
+        # 重启后必须**立刻**补发一次，而不是等满一个退避窗（M134 的 0.0 陷阱）
+        at = item.get("at")
+        if at is not None and (time.monotonic() - float(at)) < wait:
             return
 
         item["tries"] = tries + 1
         item["at"] = time.monotonic()
-        ok, err = _push_wecom(item.get("text") or "")
+        _save_report_queue(self._pending_reports)   # 「第几次」也要跨重启可续
+        ok, err = _push_wecom(_report_text(item))
         if ok:
             self._pending_reports.remove(item)
+            _save_report_queue(self._pending_reports)
             self._report_ok += 1
             _note_push(True)
             logger.info("自检报告补发成功（待发 %d 条）", len(self._pending_reports))
@@ -1881,6 +1972,7 @@ class GuardSender:
         _note_push(False, count=False)   # 同一份报告的重试不重复累加 streak
         if not item.get("critical") and item["tries"] >= len(self._REPORT_BACKOFF):
             self._pending_reports.remove(item)
+            _save_report_queue(self._pending_reports)
             logger.warning("自检报告重试耗尽，丢弃 1 条（待发 %d 条）",
                            len(self._pending_reports))
         else:
@@ -1991,7 +2083,9 @@ class GuardSender:
         self._lock_report_at = now_mono
         self._lock_reported = True
         self._lock_pending_report = False
-        self._push_report(self._fmt_locked(snap, restarted=pending))
+        # critical=True：这条是用户点名要的「锁车后无论正常与否都要推」，
+        # 不能因为当时没网就被丢弃/挤出队列（普通报告 3 档后退避耗尽即丢）。
+        self._push_report(self._fmt_locked(snap, restarted=pending), critical=True)
         logger.info("停车自检已发出（车态来源=%s, 档位=%s, 补报=%s）",
                     v.get("detect") or "none", gear or "-", pending)
         return True

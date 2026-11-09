@@ -145,7 +145,7 @@
         <span style="display:flex;gap:6px;align-items:center">
           <span class="status-dot" id="peer-dot"></span>
           <span id="peer-state" style="font-size:0.72rem;color:var(--text-muted);transition:color .2s">读取中…</span>
-          <button class="btn btn-sm btn-outline" onclick="loadPeer(true)">刷新</button>
+          <button class="btn btn-sm btn-outline" onclick="peerRefreshNow()">刷新</button>
         </span>
       </div>
       <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.8">
@@ -1674,13 +1674,18 @@ function savePreviewConfig() {
 // ═══ 僚机（B 端）版本同步 ═══
 var _peer = { job: '', version: '', busy: false, pending: false,
               confirming: false, timer: null, tries: 0,
-              lastState: '', watchTimer: null, expAt: 0, expTimer: null };
+              lastState: '', watchTimer: null, expAt: 0, expTimer: null,
+              holdMsg: false };
 
 function peerMsg(html, tone) {
   var el = document.getElementById('peer-msg');
   if (!el) return;
+  // 收尾文案由调用方负责时（holdMsg），loadPeer 内部的任何提示都不许覆盖它
+  if (_peer.holdMsg) return;
   el.innerHTML = html || '';
-  el.style.color = tone === 'err' ? '#e74c3c' : (tone === 'ok' ? '#34c759' : 'var(--text-muted)');
+  el.style.color = tone === 'err' ? '#e74c3c'
+    : (tone === 'ok' ? '#34c759'
+    : (tone === 'warn' ? '#e6a23c' : 'var(--text-muted)'));
 }
 
 function peerDot(cls) {
@@ -1745,6 +1750,19 @@ function peerStopWatch() {
   if (_peer.watchTimer) { clearInterval(_peer.watchTimer); _peer.watchTimer = null; }
 }
 
+function stopPeerPoll() {
+  if (_peer.timer) { clearInterval(_peer.timer); _peer.timer = null; }
+}
+
+// 手动刷新：**先停掉后台轮询**再拉一次。
+// 不停的话 3 秒后轮询会把提示改回「切换中…（idle）」，看起来像刷新没生效——
+// 这也是「卡片里的刷新按钮点了没用」的直接原因（M138）。
+function peerRefreshNow() {
+  peerStopWatch();
+  stopPeerPoll();
+  loadPeer(true);
+}
+
 function peerWatchState(want, maxTries) {
   peerStopWatch();
   var tries = 0;
@@ -1775,7 +1793,7 @@ function peerVerCmp(a, b) {
   return 0;
 }
 
-async function loadPeer(manual) {
+async function loadPeer(manual, holdMsg) {
   // busy 时不能直接丢弃这次刷新：peerUpgrade 的 finally 里会调 loadPeer，
   // 丢掉就等于"操作完页面不更新"。记一个 pending，当前这轮结束后补跑一次。
   // busy 时只置标志，由正在跑的那一轮 finally 消费。
@@ -1783,6 +1801,7 @@ async function loadPeer(manual) {
   // 检查是连续两句，中间不可能插入事件；兜底只会空转，连点还会堆一串定时器。
   if (_peer.busy) { _peer.pending = true; return; }
   _peer.busy = true;
+  if (holdMsg) _peer.holdMsg = true;      // 收尾文案由调用方写，别被这里覆盖
   try {
     // 12s 超时：TCP 黑洞时 fetch 永不 resolve → busy 永久为真，
     // 之后每次刷新都只置 pending 然后 return，页面彻底失去自愈能力。
@@ -1839,7 +1858,10 @@ async function loadPeer(manual) {
     // 按语义着色：待确认=橙、切换中=蓝、完成=绿、失败/回滚=红
     var stTone = { idle: 'muted', verified: 'warn', committed: 'info',
                    healthy: 'ok', rolled_back: 'err', failed: 'err' };
-    peerUpgState(stTone[st] || 'muted', stText[st] || ('· ' + st));
+    // 不能用 `stText[st] || ('· ' + st)`：idle 对应空串（falsy），会被兜底成
+    // 「· idle」这种既无意义又像故障的灰字（现场截图里就有）。
+    var hasStText = Object.prototype.hasOwnProperty.call(stText, st);
+    peerUpgState(stTone[st] || 'muted', hasStText ? stText[st] : ('· ' + st));
 
     // 待确认 → 亮出确认码输入框
     var box = document.getElementById('peer-job-box');
@@ -1922,8 +1944,14 @@ async function loadPeer(manual) {
     _peer.lastState = '';
     peerMsg(escapeHtml(e.message || String(e)), 'err');
   } finally {
+    var _wasHold = _peer.holdMsg;
     _peer.busy = false;
-    if (_peer.pending) { _peer.pending = false; setTimeout(loadPeer, 80); }
+    _peer.holdMsg = false;
+    // 收尾文案已由调用方写过 → 不再跑 pending 那次刷新，否则它会把文案清掉
+    if (_peer.pending) {
+      _peer.pending = false;
+      if (!_wasHold) setTimeout(loadPeer, 80);
+    }
   }
 }
 
@@ -2024,6 +2052,20 @@ async function peerConfirm() {
   }
 }
 
+// 轮询终态判定（纯函数）。抽出来是为了能被 node 单测钉死：
+// 这个判定错一次，卡片就会永远停在「切换中」，只能整页刷新才恢复（M138）。
+//   done   → healthy，升级完成
+//   failed → rolled_back / failed
+//   gone   → idle / verified / 空：任务已经不在了，必须收尾
+//   running→ committed 等真正的进行中状态
+function peerPollKind(st) {
+  st = String(st || '');
+  if (st === 'healthy') return 'done';
+  if (st === 'rolled_back' || st === 'failed') return 'failed';
+  if (st === 'idle' || st === 'verified' || st === '') return 'gone';
+  return 'running';
+}
+
 // 轮询任务状态：3 秒一次，最多 ~3 分钟。
 // 注意用**跨轮询的标记位**（_peer.timer），不能靠按钮 disabled ——
 // 它会被 30 秒的全局刷新重置掉，导致重复下发（M122）。
@@ -2032,24 +2074,49 @@ function startPeerPoll() {
   _peer.tries = 0;
   _peer.timer = setInterval(async function () {
     _peer.tries++;
-    if (_peer.tries > 60) { clearInterval(_peer.timer); _peer.timer = null; return; }
+    if (_peer.tries > 60) {
+      stopPeerPoll();
+      // 超时不等于失败：B 可能重启得更慢。提示必须收尾，不能停在「切换中」。
+      peerMsg('轮询超时（3 分钟仍未拿到结果）。请点「刷新」确认僚机当前状态。', 'warn');
+      loadPeer(true, true);
+      return;
+    }
     try {
       var r = await fetch('/api/guard/peer/job?job=' + encodeURIComponent(_peer.job || ''));
       var d = await r.json();
-      if (!d.success) return;
+      if (!d.success) return;                 // B 正在重启，下一轮再试
       var u = d.upgrade || {};
-      if (u.state === 'healthy') {
-        clearInterval(_peer.timer); _peer.timer = null;
+      var st = u.state || '';
+      var kind = peerPollKind(st);
+      if (kind === 'done') {
+        stopPeerPoll();
         peerMsg('🎉 僚机已升级到 v' + escapeHtml(u.version || _peer.version) + '，健康检查通过。', 'ok');
         document.getElementById('peer-job-box').style.display = 'none';
-        loadPeer();
-      } else if (u.state === 'rolled_back' || u.state === 'failed') {
-        clearInterval(_peer.timer); _peer.timer = null;
-        peerMsg('⚠ 升级未成功，僚机已回滚：' + escapeHtml(u.error || ''), 'err');
-        loadPeer();
-      } else {
-        peerMsg('切换中…（' + escapeHtml(u.state || 'committed') + '）');
+        loadPeer(true, true);
+        return;
       }
+      if (kind === 'failed') {
+        stopPeerPoll();
+        peerMsg('⚠ 升级未成功，僚机已回滚：' + escapeHtml(u.error || ''), 'err');
+        loadPeer(true, true);
+        return;
+      }
+      if (kind === 'gone') {
+        // 任务已经不在了（journal 被重置/被 root 写成 0600 读不到）：
+        // 再等 healthy 永远等不到，必须在这里收尾并刷新卡片（M138）
+        stopPeerPoll();
+        var pv = String(d.peer_version || '');
+        var reached = !!(pv && peerVerCmp(pv, String(_peer.version || '')) >= 0);
+        if (reached) {
+          peerMsg('🎉 僚机已升级到 v' + escapeHtml(pv) + '（无 healthy 记录，已按版本号确认）。', 'ok');
+        } else {
+          peerMsg('任务已结束，但没拿到 healthy。请点「刷新」确认僚机当前版本。', 'warn');
+        }
+        document.getElementById('peer-job-box').style.display = 'none';
+        loadPeer(true, true);
+        return;
+      }
+      peerMsg('切换中…（' + escapeHtml(st) + '）');
     } catch (e) { /* 网络抖动，下一轮再试 */ }
   }, 3000);
 }

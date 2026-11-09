@@ -88,8 +88,25 @@ class Config:
         # going_offline 缺省窗口长度（秒），A 未带 expected_until 时兜底。
         self.offline_default_s: int = _env_int("GUARD_OFFLINE_DEFAULT_S", 3600)
 
-        # ── 告警去重（§4：同 (fault,channel) 30min 内只推一次）──
+        # ── 告警去重（§4：同 (fault,channel) 只推一次，间隔递增）──
+        # 第一档必须等于旧的 dedup_s（30min），保证行为可预期；
+        # 之后 2h / 6h / 24h 封顶——设备离线一整晚不该推 20 条（M135）。
         self.dedup_s: int = _env_int("GUARD_DEDUP_S", 1800)
+        self.alert_backoff_raw: str = _env_str(
+            "GUARD_ALERT_BACKOFF", "1800,7200,21600,86400")
+
+        # ── TeslaMate 车态板（v1.1.4）──────────────────────────
+        # 抓 TeslaMate 首页 HTML（LiveView SSR，**不需要 token**）读 locked/sentry/state。
+        # 为什么不走 /api/*：全要 token，而 token 缓存在 A7Z 上；
+        # 为什么不让 B 登录：会与 TeslaMate 自己的会话抢 token（M115 实证）。
+        # 关闭方式：GUARD_TM_BOARD_ENABLE=0
+        self.board_enable: bool = _env_str("GUARD_TM_BOARD_ENABLE", "1") in (
+            "1", "true", "yes")
+        self.board_url: str = _env_str("GUARD_TM_BOARD_URL",
+                                       "http://127.0.0.1:4000/")
+        self.board_interval: int = _env_int("GUARD_TM_BOARD_INTERVAL", 60)
+        # 观测到「已锁」后等多久才判定要不要代发：给 A 端留出自己推自检的时间
+        self.lock_grace_s: int = _env_int("GUARD_LOCK_GRACE_S", 300)
 
         # ── 未知车态策略 ──────────────────────────────────────
         # 最后一次心跳里 vehicle 不足以判定「该在线」时：
@@ -178,6 +195,22 @@ class Config:
     @property
     def alarm_s(self) -> int:
         return self.alarm_mult * self.heartbeat_interval
+
+    @property
+    def alert_backoff(self) -> tuple:
+        """同一故障重复推送的间隔序列（秒，递增）。解析失败一律退回 (dedup_s,)。"""
+        out = []
+        for part in str(getattr(self, "alert_backoff_raw", "") or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                v = int(float(part))
+            except ValueError:
+                continue
+            if v > 0:
+                out.append(v)
+        return tuple(out) or (self.dedup_s,)
 
     def validate(self) -> list:
         """返回致命配置问题列表（空 = 通过）。"""

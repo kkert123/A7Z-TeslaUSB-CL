@@ -29,6 +29,9 @@ def _empty_state() -> dict:
         "offline_until": 0.0,
         "offline_reason": "",
         "alerts": {},
+        # v1.1.4：TeslaMate 车态板（免 token 抓首页 SSR）+ 锁车代发闩锁
+        "board": None,
+        "lock_check": {},
         "boot": 0.0,
         "last_test": {},
         "updated": 0.0,
@@ -129,6 +132,47 @@ class StateStore:
         with self._lock:
             self.data["offline_until"] = float(expected_until or 0)
             self.data["offline_reason"] = reason or ""
+            self.save()
+
+    def set_board(self, sample: dict, now: float = None) -> dict:
+        """存一次车态板采样，返回**上一次**采样（调用方据此判「未锁→已锁」边沿）。
+
+        边沿判定必须落在持久状态里：进程重启后还能知道上一拍是未锁，
+        否则重启后的第一拍会被当成「刚锁车」，代发一条重复的自检。
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            prev = self.data.get("board")
+            prev = dict(prev) if isinstance(prev, dict) else {}
+            cur = {"at": now}
+            for k in ("locked", "sentry", "state", "err"):
+                cur[k] = (sample or {}).get(k)
+            self.data["board"] = cur
+            self.save()
+            return prev
+
+    def arm_lock_check(self, now: float = None) -> None:
+        """记一次锁车事件，等宽限期过后由 tick 判定要不要代发。"""
+        now = time.time() if now is None else now
+        with self._lock:
+            self.data["lock_check"] = {"at": now, "done": False, "why": ""}
+            self.save()
+
+    def clear_lock_check(self) -> None:
+        """开锁 → 闩锁复位（下一把锁还要再报一次）。"""
+        with self._lock:
+            if self.data.get("lock_check"):
+                self.data["lock_check"] = {}
+                self.save()
+
+    def mark_lock_check_done(self, why: str = "") -> None:
+        with self._lock:
+            lc = self.data.get("lock_check")
+            if not isinstance(lc, dict):
+                lc = {}
+            lc["done"] = True
+            lc["why"] = why
+            self.data["lock_check"] = lc
             self.save()
 
     def alert_slot(self, key: str) -> dict:

@@ -23,6 +23,7 @@ guardian-b · 升级包校验与应用
 import hashlib
 import hmac
 import json
+import logging
 import os
 import posixpath
 import re
@@ -365,8 +366,17 @@ class Journal(object):
                 d = json.load(f)
             if isinstance(d, dict):
                 return d
-        except (OSError, ValueError):
-            pass
+        except FileNotFoundError:
+            return {}
+        except PermissionError:
+            # 静默吞掉会让「读不到」伪装成「没有任务」（state=idle），
+            # 现场表现就是 A 端永远等不到 healthy、卡片停在「正在切换」（M138）
+            logging.getLogger("guard-b.upgrade").warning(
+                "journal 无读权限（%s）：多半是 root helper 写成了 0600，"
+                "状态将显示为 idle；执行 chown guardb:guardb 该文件即可恢复", self.path)
+        except (OSError, ValueError) as exc:
+            logging.getLogger("guard-b.upgrade").warning(
+                "journal 读取失败（%s）: %r", self.path, exc)
         return {}
 
     def save(self):

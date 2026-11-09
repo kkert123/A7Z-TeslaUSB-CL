@@ -120,7 +120,10 @@ on heartbeat(req, channel):
 tick (every 30s):
     if now < status.offline_until:              # 预期离线窗口 → 静默
         return "silent"
-    if not should_be_online(status.last_body):  # 车在开 / 未知 → 静默
+    why = classify_vehicle(status.last_body)    # driving 最先判
+    if why in (sentry_off, unlocked, user_present):   # 合法断电 → 长期静默
+        return "silent"
+    if why == driving and evidence_fresh():     # 车在动 → 只静默 offline_default_s
         return "silent"
     age_ts    = now - status.last_seen.ts
     age_https = now - status.last_seen.https
@@ -144,7 +147,81 @@ tick (every 30s):
 
 `should_be_online(last_body)`：依据最后一次心跳里的 `vehicle`（`sentry_mode && locked && !user_present`），或向 TeslaMate 反查泊车态。**车在开 = 不该在线 = 静默**——这是防误报的核心（M90 无网恢复路径不冷却的对应面：这里是"预期离线不告警"）。
 
+> ⚠️ **实现修正（2026-11-09，M135）**：上面的「车在开 = 静默」**没有保质期**，
+> 而 `last_body` 只是「A 死前最后一句话」。11-09 实证：A 在 43km/h 上断掉，
+> 出车窗口（1h）到期后这一帧仍说「在开 + 人在车上」→ 每拍都判静默，
+> **1h38m 零告警，`alerts.device_offline.last_sent` 始终 0.0**（一次都没尝试发）。
+> 现在的口径：
+> ① `classify_vehicle` 让 `state=driving`（或 `speed>3`）**最先命中**——否则
+>    `user_present` 会先把「在开车」遮成「人在车边」；
+> ② 静默分**两类**：`driving` 只静默 `offline_default_s`（默认 1h，与出车窗口同源），
+>    过期即判死；`sentry_off` / `unlocked` / `user_present` 保持**长期静默**
+>    （车锁了 → 车睡了 → 车机 USB 断电是正常现象，加 TTL 会每晚误报）；
+> ③ 重复告警改**递增退避** `GUARD_ALERT_BACKOFF`（默认 `1800,7200,21600,86400`），
+>    恢复归零；`GUARD_DEDUP_S` 退化为「第一档间隔」的兜底；
+> ④ 失联文案带「最后车态」，行驶中失联不再建议「确认车还停着」。
+
 告警去重 / 限频：同一 `(fault_type, channel)` 30min 内只推一次（M86 标记去重 + M89 限频率）；恢复时推一条"已恢复"。
+
+---
+
+## 4.1 车态板：B 端怎么在「A 没网」时仍然知道车锁了（v1.1.4 / M137）
+
+**问题**：A7Z 离家后没网（车载 MIFI / 热点掉线），B 端拿不到任何车态；
+而「锁车后必推一条自检」的前提是**知道车锁了**。
+
+**三条路都试过，只有第三条可行**：
+
+| 方案 | 结论 |
+|---|---|
+| 读 TeslaMate 的 Postgres | ✗ `5432` 只在容器网络里（没 publish），且 `positions` 表**不存** `locked`/`sentry_mode`/`shift_state`，只有 `speed` |
+| 调 TeslaMate 的 `/api/*` | ✗ 全部要 token，token 缓存在 A7Z 上；让 B 也 `/login` 会与 TeslaMate 抢 token（M115：40 分钟 77 次登录） |
+| **抓首页 HTML（LiveView SSR）** | ✓ **免鉴权、只读、零副作用**，`http://127.0.0.1:4000/` 直接带 locked / sentry / status |
+
+实测（9.4 KB）：
+
+```html
+<span data-tooltip="Sentry Mode"><span class="mdi mdi-shield-check"></span></span>
+<span data-tooltip="Locked"><span class="mdi mdi-lock"></span></span>
+<td>Status</td><td> online for 13 h, 26 min </td>
+```
+
+解析规则（`guardian-b/board.py`）：
+
+- **只认图标 class**：`mdi-lock` = 已锁，`mdi-lock-open-variant` = 未锁；
+  `mdi-shield-check` / `mdi-shield-off` = 哨兵开/关。文案会随语言变，class 不会。
+- **解析不出就是 `None`，绝不猜**——猜错直接变成一条假告警。
+- 抓取/HTTP/解析任一失败 → `err` 字段，**不触发任何告警**（fail-open）。
+
+代发状态机（`judge.on_board` / `_maybe_relay_lock`）：
+
+```
+每 60s 采样 → 未锁→已锁 的**边沿** → arm（记 at，持久化）
+              → 开锁 → clear（下一把锁重新计）
+宽限期 GUARD_LOCK_GRACE_S（默认 300s）后判定：
+  · 车态板本身 >900s 过期      → done(board_stale)，不代发
+  · 设备心跳仍在 WARN 内        → done(device_alive)，A 会自己推
+  · 否则                        → 代发一条「停车自检·僚机代发」+ 把 device_offline 槽一并记账
+```
+
+**为什么闩锁要落盘**：重启后若不知道「上一拍是未锁」，第一拍就会被当成刚锁车 →
+重复代发一条自检。同一把锁只代发一次，开锁才复位。
+
+代发文案示例：
+
+```
+【停车自检·僚机代发】车辆已锁车 · 设备失联
+· 车态（TeslaMate）：已锁 · 哨兵开 · 车辆状态 online
+· A7Z：最后心跳 1.6 小时前（0.3.1.83）
+
+本条由 B 端代发：设备此刻没有心跳，它自己的停车自检（USB/网络/存储）生成不了。
+```
+
+> ⚠️ 已知边界：这个页面是 TeslaMate 的模板输出，**换主题/换 i18n 可能让解析失效**。
+> 失效时行为是「读不到车态 → 不代发」，即退化成 v1.1.3（只报设备失联），不会误报。
+> `/guard/status` 的 `state.board` 里能看到 `{locked, sentry, state, err}` 与采样时刻。
+> 另：`4000` 目前 publish 在 `0.0.0.0`（公网可达且无鉴权），B 自己只用 `127.0.0.1:4000`，
+> 建议把端口绑定收窄到回环或加防火墙。
 
 ---
 
