@@ -60,8 +60,18 @@ def make_sender(gc):
     s.cfg = dict(gc.DEFAULTS)
     s._prev_locked = None
     s._locked_primed = False
-    s._lock_report_at = 0.0
+    # 冷却初值必须是 None（=从未报过）。0.0 在 monotonic（开机秒数）下
+    # 会让「开机不足 gap 秒」被误判成冷却中（审查 P0）
+    s._lock_report_at = None
     s._lock_reported = False
+    s._lock_pending_report = False
+    s._offline_at = {}
+    # _maybe_report 的依赖字段：留空才能在不启动线程的情况下测接线（审查 P1-2）
+    s._warmup_until = 0.0
+    s._last_result = ""
+    s._daily_done = "1970-01-01"
+    s._pending_reports = []
+    s._report_at = {}
     s._seq = 0
     s._pending_offline = None
     s._pending_tries = 0
@@ -238,15 +248,19 @@ def main():
         s._maybe_lock_report(sn)
         ok("C17 标注来源", "据行车记录仪" in s.pushed[0], s.pushed[0][:50])
 
-        # C18：True→None→True（车休眠 /msg 返回 nil）不能重复推
+        # C18：**已报过之后** True→None→True（车休眠 /msg 返回 nil）不能重复推。
+        # 注意 v0.3.1.82 起「首拍时车已锁」不再视为已报（那是被推翻的旧语义，
+        # 它会把重启前的锁车事件永久吞掉），所以这里先走一次正常的未锁→已锁边沿。
         s = make_sender(gc)
-        s._maybe_lock_report(snap(True))          # 首拍建基准（已锁 → 视为已报）
+        s._maybe_lock_report(snap(False))         # 基准：未锁
+        s._maybe_lock_report(snap(True))          # 正常边沿 → 推 1 条
         s._lock_report_at = time.monotonic() - 9999
         s._maybe_lock_report(snap(None))
-        ok("C18 True→None→True 不重复", s._maybe_lock_report(snap(True)) is False)
-        eq("C19 无推送", len(s.pushed), 0)
+        ok("C18 已报后再抖动不重复", s._maybe_lock_report(snap(True)) is False)
+        eq("C19 仍只有 1 条", len(s.pushed), 1)
 
         # C20：真实解锁后重新上膛，能再推一次
+        s._lock_report_at = time.monotonic() - 9999
         s._maybe_lock_report(snap(False))
         ok("C20 解锁后重新上膛", s._maybe_lock_report(snap(True)) is True)
 
@@ -279,6 +293,179 @@ def main():
         s._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
                                            "user_present": False, "detect": "teslamate"}})
         eq("E2 teslamate 的未锁 → 正常握手", len(sent), 1)
+
+        # ══ F. 车态矛盾：哨兵开着就一定是已锁（M134）══
+        # 实测：车已锁定 + 哨兵开启，TeslaMate 却返回 locked="false"
+        reset_vehicle({"locked": "false", "sentry_mode": "true", "state": "online",
+                       "shift_state": "P", "speed": "0"})
+        v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
+        eq("F1 locked=false + 哨兵=true → 按已锁", v["locked"], True)
+        eq("F2 标注矛盾来源", v.get("locked_note"), "sentry_conflict")
+
+        reset_vehicle({"locked": "false", "sentry_mode": "false", "state": "online"})
+        v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
+        eq("F3 哨兵也关 → 保持未锁", v["locked"], False)
+        eq("F4 无矛盾标记", v.get("locked_note"), None)
+
+        reset_vehicle({"locked": "true", "sentry_mode": "true", "state": "online"})
+        v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
+        eq("F5 两者一致 → 已锁", v["locked"], True)
+
+        # ══ G. 重启时车已锁 → 预热后补报一条（用户要求「每次重启都补」）══
+        def snapv(locked=True, gear="P", speed=0.0):
+            return {
+                "selfcheck": {"result": "pass",
+                              "items": {"net": "pass", "gadget": "pass",
+                                        "thumb": "pass", "wechat": "pass"}},
+                "vehicle": {"locked": locked, "shift_state": gear,
+                            "speed": speed, "detect": "teslamate"},
+            }
+
+        s = make_sender(gc)
+        ok("G1 首拍车已锁：不立即推", s._maybe_lock_report(snapv(True)) is False)
+        eq("G2 但标记挂起", s._lock_pending_report, True)
+
+        ok("G3 预热期内仍不推",
+           s._maybe_lock_report(snapv(True), dry_run=True) is False)
+        eq("G4 仍只有 0 条", len(s.pushed), 0)
+
+        ok("G5 预热结束后补推", s._maybe_lock_report(snapv(True)) is True)
+        eq("G6 共 1 条", len(s.pushed), 1)
+        ok("G7 文案标注重启后补报", "重启后补报" in s.pushed[0], s.pushed[0][:50])
+        ok("G8 补报后不重复", s._maybe_lock_report(snapv(True)) is False)
+
+        # G9：首拍已锁但随后解锁 → 补报作废（事件已过期）
+        s = make_sender(gc)
+        s._maybe_lock_report(snapv(True))
+        s._maybe_lock_report(snapv(False))
+        eq("G9 解锁后清挂起", s._lock_pending_report, False)
+        eq("G10 无推送", len(s.pushed), 0)
+
+        # G11：首拍未锁 → 不挂起
+        s = make_sender(gc)
+        s._maybe_lock_report(snapv(False))
+        eq("G11 首拍未锁不挂起", s._lock_pending_report, False)
+
+        # ══ H. 握手：哨兵开着不能判解锁 + 同类冷却（M134）══
+        sent[:] = []
+        s = make_sender(gc)
+        s._send = lambda body, channel=None: (sent.append(body), (True, ""))[1]
+        s._prev_vehicle = {"locked": True, "state": "online",
+                           "user_present": False, "sentry_mode": True}
+        s._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
+                                           "user_present": False,
+                                           "sentry_mode": True,
+                                           "detect": "teslamate"}})
+        eq("H1 哨兵仍开启 → 不判解锁", len(sent), 0)
+
+        s._prev_vehicle = {"locked": True, "state": "online",
+                           "user_present": False, "sentry_mode": True}
+        s._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
+                                           "user_present": False,
+                                           "sentry_mode": False,
+                                           "detect": "teslamate"}})
+        eq("H2 哨兵关闭 + 未锁 → 真解锁握手", len(sent), 1)
+
+        s._prev_vehicle = {"locked": True, "state": "online",
+                           "user_present": False, "sentry_mode": False}
+        s._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
+                                           "user_present": False,
+                                           "sentry_mode": False,
+                                           "detect": "teslamate"}})
+        eq("H3 30 分钟内同类跃迁 → 冷却", len(sent), 1)
+
+        s._offline_at["unlocked"] = time.monotonic() - 9999
+        s._prev_vehicle = {"locked": True, "state": "online",
+                           "user_present": False, "sentry_mode": False}
+        s._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
+                                           "user_present": False,
+                                           "sentry_mode": False,
+                                           "detect": "teslamate"}})
+        eq("H4 冷却过后可再握手", len(sent), 2)
+
+        # ══ I. _maybe_report 接线：预热期不推、预热后补推（审查 P1-2）══
+        s = make_sender(gc)
+        s.cfg["report_daily_at"] = ""
+        s._maybe_lock_report(snapv(True))          # 首拍：挂起
+        s._warmup_until = time.monotonic() + 999
+        s._maybe_report(snapv(True))
+        eq("I1 预热期内 _maybe_report 不推", len(s.pushed), 0)
+        eq("I2 预热期挂起仍在", s._lock_pending_report, True)
+        s._warmup_until = time.monotonic() - 1
+        s._maybe_report(snapv(True))
+        eq("I3 预热结束后补推 1 条", len(s.pushed), 1)
+        ok("I4 标注重启后补报", "重启后补报" in s.pushed[0], s.pushed[0][:60])
+
+        # ══ J. 冷却基准不能是 0.0（monotonic 是开机秒数，审查 P0）══
+        sent[:] = []
+        s = make_sender(gc)
+        s._send = lambda body, channel=None: (sent.append(body), (True, ""))[1]
+        s._offline_at = {}
+        s._prev_vehicle = {"locked": True, "state": "online",
+                           "user_present": False, "sentry_mode": False}
+        s._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
+                                           "user_present": False,
+                                           "sentry_mode": False,
+                                           "detect": "teslamate"}})
+        eq("J1 从未握手时首次必发（不受开机秒数影响）", len(sent), 1)
+        eq("J2 送达后才记录冷却", "unlocked" in s._offline_at, True)
+
+        # J3：发送失败不占用冷却
+        sent[:] = []
+        s2 = make_sender(gc)
+        s2._send = lambda body, channel=None: (False, "timeout")
+        s2._prev_vehicle = {"locked": True, "state": "online",
+                            "user_present": False, "sentry_mode": False}
+        s2._maybe_going_offline({"vehicle": {"locked": False, "state": "online",
+                                            "user_present": False,
+                                            "sentry_mode": False,
+                                            "detect": "teslamate"}})
+        eq("J3 发送失败不占冷却", "unlocked" in s2._offline_at, False)
+
+        # ══ K. driving 是真实可重复事件，不冷却（审查 P1-2）══
+        sent[:] = []
+        s = make_sender(gc)
+        s._send = lambda body, channel=None: (sent.append(body), (True, ""))[1]
+        s._offline_at = {"driving": time.monotonic()}      # 刚出过一趟车
+        s._prev_vehicle = {"locked": False, "state": "asleep",
+                           "user_present": False, "sentry_mode": False}
+        s._maybe_going_offline({"vehicle": {"locked": False, "state": "driving",
+                                           "user_present": False,
+                                           "sentry_mode": False,
+                                           "detect": "teslamate"}})
+        eq("K1 driving 不冷却（第二趟仍握手）", len(sent), 1)
+
+        # ══ L. 关闭开关：挂起作废且不补推（审查 P1-1）══
+        s = make_sender(gc)
+        s._maybe_lock_report(snapv(True))                  # 首拍挂起
+        s.cfg["report_on_lock"] = False
+        s._maybe_lock_report(snapv(True))
+        eq("L1 关开关后挂起作废", s._lock_pending_report, False)
+        s.cfg["report_on_lock"] = True
+        ok("L2 重开不补推旧事件", s._maybe_lock_report(snapv(True)) is False)
+        eq("L3 无推送", len(s.pushed), 0)
+
+        # ══ M. 挂起期间车辆在动 → 作废（审查 P2-4）══
+        s = make_sender(gc)
+        s._maybe_lock_report(snapv(True))
+        s._maybe_lock_report(snapv(True, gear="D"))
+        eq("M1 挂 D 档后挂起作废", s._lock_pending_report, False)
+
+        # ══ N. speed 是字符串（实测 /msg 返回 '0'）══
+        reset_vehicle({"locked": "true", "speed": "0", "state": "online",
+                       "shift_state": "P", "sentry_mode": "false"})
+        v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
+        eq("N1 speed='0' → 0.0", v["speed"], 0.0)
+        reset_vehicle({"locked": "true", "speed": "", "state": "online"})
+        eq("N2 speed='' → None",
+           gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))["speed"], None)
+
+        # ══ O. 行驶中不做哨兵归一（审查 P1-4）══
+        reset_vehicle({"locked": "false", "sentry_mode": "true", "state": "driving",
+                       "shift_state": "D", "speed": "30"})
+        v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
+        eq("O1 行驶中不归一（保持未锁）", v["locked"], False)
+        eq("O2 无矛盾标记", v.get("locked_note"), None)
 
     finally:
         gc._TESLA_CLIP_DIRS = saved_dirs

@@ -234,6 +234,23 @@ def _tri(value: Any) -> Optional[bool]:
     return None
 
 
+_LOCK_CONFLICT_WARN_AT = 0.0
+
+
+def _warn_lock_conflict() -> None:
+    """车态矛盾告警限流（30 分钟一条）。
+
+    每拍都会走到这里，不限流就是每 60s 一条 warning，把日志刷满。
+    """
+    global _LOCK_CONFLICT_WARN_AT
+    now = time.monotonic()
+    if now - _LOCK_CONFLICT_WARN_AT < 1800:
+        return
+    _LOCK_CONFLICT_WARN_AT = now
+    logger.warning("车态矛盾：sentry_mode=true 但 locked=false，按「已锁」处理"
+                   "（TeslaMate 的 locked 陈旧/漂移，M134）")
+
+
 def _as_bool(value: Any, default: bool = False) -> bool:
     """严格布尔：**绝不**用 bool(value)——`bool("false") is True`。
 
@@ -903,10 +920,30 @@ def _vehicle_snapshot(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ss = data.get("shift_state")
         out["shift_state"] = (str(ss).upper()
                               if isinstance(ss, str) and ss.strip() else None)
+        # /msg 里的 speed 是**字符串**（实测 '0'）。只认 int/float 会让它恒为 None，
+        # 于是「还在开就别报」的车速闸形同虚设（M134）
         sp = data.get("speed")
-        out["speed"] = float(sp) if isinstance(sp, (int, float)) else None
+        try:
+            out["speed"] = float(sp) if sp is not None and str(sp).strip() else None
+        except (TypeError, ValueError):
+            out["speed"] = None
         if out["locked"] is not None:
             out["detect"] = "teslamate"
+        # TeslaMate 的 locked 会陈旧/漂移：实测「车已锁定 + 哨兵开启」时它返回
+        # locked="false"（2026-11-09 实证）。特斯拉语义里**哨兵只在锁车后开启**，
+        # 所以这个组合必然是 locked 错。以哨兵为准，否则：
+        #   ① 锁车推送永远触发不了（看不到 true）
+        #   ② 错误的 false 还会被当成「解锁」，反复给 B 开静默窗口（M134）
+        # 归一化必须加「确定停着」这个前提：行驶中/刚解锁时 TeslaMate 的字段
+        # 可能不同步（正是 M134 的成因），强行判「已锁」会让 _lock_reported
+        # 闩锁一直卡在 True，反而把**真正锁车**那条推送吞掉（审查 P1-4）
+        parked = (out["state"] != "driving"
+                  and out["shift_state"] not in ("D", "R")
+                  and (out["speed"] is None or out["speed"] <= 3))
+        if out["sentry_mode"] is True and out["locked"] is False and parked:
+            out["locked"] = True
+            out["locked_note"] = "sentry_conflict"
+            _warn_lock_conflict()
     elif isinstance(data, dict):
         out["source"] = "stale"
 
@@ -1170,8 +1207,12 @@ class GuardSender:
         # ── 锁车事件报告（与档位跃迁是两条独立通道）──
         self._prev_locked: Optional[bool] = None  # 上一拍的 locked（边沿判定）
         self._locked_primed = False               # 首拍只建基准，不补推
-        self._lock_report_at = 0.0                # 上次锁车报告时刻（冷却）
+        self._lock_report_at: Optional[float] = None   # 上次锁车报告时刻（None=从未）
         self._lock_reported = False               # 这一把锁已经报过（等真实解锁才复位）
+        # 「每次重启都补一条」的挂起标记：首拍时车已锁 → 先挂起，
+        # 等预热结束再发（预热期自检是半成品，报出去容易看到假 warn）
+        self._lock_pending_report = False
+        self._offline_at: Dict[str, float] = {}   # reason → 上次握手时刻
         # 待重发的报告用**小列表**而不是单槽：单槽会让「B 侧失联」这类安全通知
         # 被随后的一条自检报告覆盖掉（谁后写谁活），那是最不该丢的一条。
         self._pending_reports: List[Dict[str, Any]] = []   # {text, critical, tries, at}
@@ -1499,6 +1540,10 @@ class GuardSender:
 
     # ── 预期离线握手 ──
     _OFFLINE_WINDOW = {"driving": None, "unlocked": 900, "user_present": 600}
+    # 同类跃迁的握手冷却（秒）。driving 为 0 = **不冷却**：一天多次出车是正常
+    # 事件，冷却会把第二趟的静默窗口吞掉，B 在锁车断电后照样误报（审查 P1-2）。
+    # unlocked / user_present 才是 TeslaMate 数据漂移的重灾区。
+    _OFFLINE_COOLDOWN = {"driving": 0, "unlocked": 1800, "user_present": 1800}
     _OFFLINE_MAX_TRIES = 3
 
     def _offline_window(self, reason: str) -> int:
@@ -1525,6 +1570,7 @@ class GuardSender:
             "locked": v.get("locked") if trusted else None,
             "state": v.get("state"),
             "user_present": v.get("user_present"),
+            "sentry_mode": v.get("sentry_mode") if trusted else None,
         }
         prev = self._prev_vehicle
 
@@ -1532,7 +1578,10 @@ class GuardSender:
         if prev:
             if prev.get("state") != "driving" and cur.get("state") == "driving":
                 reason = "driving"
-            elif prev.get("locked") is True and cur.get("locked") is False:
+            elif (prev.get("locked") is True and cur.get("locked") is False
+                  and cur.get("sentry_mode") is not True):
+                # 哨兵还开着就不可能是真解锁。TeslaMate 的 locked 会漂移，
+                # 单看它会给 B 反复开 900s 静默窗口，恰好把真失联告警关掉（M134）
                 reason = "unlocked"
             elif prev.get("user_present") is False and cur.get("user_present") is True:
                 reason = "user_present"
@@ -1550,6 +1599,20 @@ class GuardSender:
 
         if not reason:
             return
+
+        # 同类跃迁冷却：数据漂移会让同一事件反复触发，每次都给 B 开静默窗口
+        # = 反复关掉真正的失联告警（M134）。
+        # ★ 默认值必须是 None 而不是 0.0：time.monotonic() 返回的是**开机秒数**，
+        #   开机不足 1800s 时 `now - 0.0` 会被判成「冷却中」，把首次握手直接吞掉
+        #   ——那正好是「每次用车」和「刚升级重启」这两个最关键的时刻（审查 P0）。
+        #   冷却时刻在**送达成功**时才记账（见 _try_send_offline），失败不占用。
+        last = self._offline_at.get(reason)
+        if last is not None:
+            cooldown = self._OFFLINE_COOLDOWN.get(reason, 0)
+            if cooldown > 0 and time.monotonic() - last < cooldown:
+                logger.info("预期离线握手冷却中 reason=%s 剩余 %ds",
+                            reason, int(cooldown - (time.monotonic() - last)))
+                return
 
         window = self._offline_window(reason)
         body = {
@@ -1586,6 +1649,11 @@ class GuardSender:
         if ok:
             logger.info("预期离线握手已送达 reason=%s window=%ss",
                         body.get("reason"), body.get("offline_s"))
+            # 冷却只在送达后记账：握手最容易失败的时刻正是「车刚启动、网络在重连」，
+            # 失败就占冷却会让这次跃迁在重试期内被永久吞掉（审查 P1-3）
+            rs = str(body.get("reason") or "")
+            if rs:
+                self._offline_at[rs] = time.monotonic()
             self._pending_offline = None
         else:
             logger.warning("预期离线握手失败（第 %d/%d 次），下轮重试: %s",
@@ -1696,17 +1764,28 @@ class GuardSender:
             "僚机：%s" % b_line,
         ])
 
-    def _fmt_locked(self, snap: Dict[str, Any]) -> str:
+    def _fmt_locked(self, snap: Dict[str, Any], restarted: bool = False) -> str:
         sc = snap.get("selfcheck") or {}
         result = str(sc.get("result") or "unknown")
         v = snap.get("vehicle") or {}
-        how = {"clips": "（据行车记录仪）", "sei": "（据视频遥测）"}.get(
+        # 来源与补报合并进**一个**括号：拆成两个会出现
+        # 「（据行车记录仪）（重启后补报）」这种背靠背括号，微信里像两条修饰语打架
+        bits = []
+        src_cn = {"clips": "据行车记录仪", "sei": "据视频遥测"}.get(
             str(v.get("detect") or ""), "")
+        if src_cn:
+            bits.append(src_cn)
+        if str(v.get("locked_note") or "") == "sentry_conflict":
+            bits.append("据哨兵推断")
+        if restarted:
+            bits.append("重启后补报")
+        suffix = ("（%s）" % "·".join(bits)) if bits else ""
+        tier = _TIER_CN.get(result, "未知")
         if v.get("locked") is True:
-            head = "【停车自检】车辆已锁车%s · %s" % (how, _TIER_CN.get(result, result))
+            head = "【停车自检】车辆已锁车%s · %s" % (suffix, tier)
         else:
-            # 只有 L2（SEI 读到 P 档）能到这一步：确实停了，但锁没锁不知道
-            head = "【停车自检】车辆已停止（锁车状态未知）· %s" % _TIER_CN.get(result, result)
+            # 当前不可达（调用方已保证 locked is True）；保留给将来 L2 停车判定启用时
+            head = "【停车自检】车辆已停止（锁车状态未知）%s · %s" % (suffix, tier)
         return "\n".join([head, self._device_line(), self._fmt_items(snap)])
 
     def _fmt_b_down(self, kind: str) -> str:
@@ -1858,10 +1937,17 @@ class GuardSender:
         v = snap.get("vehicle") or {}
         cur = v.get("locked")
 
-        # 首拍只建立基准：服务重启后不能因为「没有上一拍」就立刻补推一条
+        # 首拍：重启时车已锁**不等于**这条锁车事件已经报过。
+        # 旧实现写 `_lock_reported = (cur is True)`，等于把「重启那一刻车锁着」
+        # 判成「这一把锁已通知」——10:37 锁车、10:48 重启，那条事件就被永久吞掉，
+        # 之后除非再解锁一次永远不会推（2026-11-09 实证，M134）。
+        # 现在按用户要求「每次重启都补一条」：先挂起，预热结束后补发。
         if not self._locked_primed:
             self._locked_primed = True
-            self._lock_reported = (cur is True)
+            self._lock_reported = False
+            self._lock_pending_report = (cur is True)
+            if self._lock_pending_report:
+                logger.info("重启时车已锁 → 挂起一条停车自检，待预热结束后补发")
             return False
 
         # 基准只在拿到已知值时更新：None 不得覆盖已知状态，否则抖动会重新「上膛」
@@ -1870,32 +1956,44 @@ class GuardSender:
 
         if cur is False:
             self._lock_reported = False          # 只有真实解锁才复位
+            self._lock_pending_report = False    # 已解锁，补报没有意义
         if cur is not True:
             return False
-        if self._lock_reported:
+        if self._lock_reported and not self._lock_pending_report:
             return False
         if dry_run:
             return False                         # 预热期：只跟踪，不推送
 
         if not cfg.get("report_on_lock", True):
+            # 用户明确不想收 → 这条锁车事件直接视为「已处理」，挂起作废。
+            # 只清 pending 不够：首拍时 _lock_reported 是 False，重开开关后
+            # 立刻会补推一条标着「重启后补报」的旧事件（审查 P1-1）
+            self._lock_pending_report = False
+            self._lock_reported = True
             return False
 
         # 还在开就别报：等红灯挂 P 也会让 locked 抖动，加一道车速/档位闸
         gear = str(v.get("shift_state") or "").upper()
-        if gear in ("D", "R"):
-            return False
         sp = v.get("speed")
-        if isinstance(sp, (int, float)) and sp > 3:
+        if gear in ("D", "R") or (isinstance(sp, (int, float)) and sp > 3):
+            # 车在动就不该补一条「停车自检」；挂起标记一并作废，
+            # 否则它会一直挂着，等几小时后挂 P 档时突然报一条（审查 P2-4）
+            self._lock_pending_report = False
             return False
 
+        # 同 P0：0.0 当哨兵在 monotonic（开机秒数）下会误判成「冷却中」，
+        # 冷启动 10 分钟内锁车时补报会被拖住。None = 从未报过
         now_mono = time.monotonic()
-        if now_mono - self._lock_report_at < cfg.get("lock_report_min_gap_s", 600):
+        gap = cfg.get("lock_report_min_gap_s", 600)
+        if self._lock_report_at is not None and now_mono - self._lock_report_at < gap:
             return False                    # 下车拿东西又锁一次，不重复打扰
+        pending = self._lock_pending_report
         self._lock_report_at = now_mono
         self._lock_reported = True
-        self._push_report(self._fmt_locked(snap))
-        logger.info("停车自检已发出（车态来源=%s, 档位=%s）",
-                    v.get("detect") or "none", gear or "-")
+        self._lock_pending_report = False
+        self._push_report(self._fmt_locked(snap, restarted=pending))
+        logger.info("停车自检已发出（车态来源=%s, 档位=%s, 补报=%s）",
+                    v.get("detect") or "none", gear or "-", pending)
         return True
 
     def _maybe_daily_report(self, snap: Dict[str, Any]) -> None:
@@ -1941,6 +2039,9 @@ class GuardSender:
             "report_pending": len(self._pending_reports),
             "last_result": self._last_result,
             "pending_offline": bool(self._pending_offline),
+            # 锁车报告挂起中（重启时车已锁、等预热结束）：用户说「又没收到」时
+            # 能一眼区分「挂起中」和「根本没触发」
+            "lock_pending": self._lock_pending_report,
             # 升级窗口剩余秒数：不显示出来的话，用户看到"心跳正常但没告警"
             # 会以为是守护坏了（其实是我们主动压着）
             "upgrade_window": in_upgrade_window(),

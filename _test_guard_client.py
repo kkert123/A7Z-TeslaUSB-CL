@@ -246,12 +246,31 @@ cfg3 = fresh_cfg(endpoints={"ts": base, "https": ""})
 s3 = gc.GuardSender(cfg3)
 s3._prev_vehicle = {"locked": True, "state": "asleep", "user_present": False}
 _orig_vehicle = gc._vehicle_snapshot
-gc._vehicle_snapshot = lambda cfg=None: {"locked": False, "sentry_mode": True,
+# 注意：sentry_mode 必须为 False。v0.3.1.82 起「哨兵还开着」时 locked=False
+# 不算真解锁（哨兵只在锁车后开启，TeslaMate 的 locked 会漂移），
+# 那条 false 会反复给 B 开静默窗口、把真失联告警关掉（M134）。
+gc._vehicle_snapshot = lambda cfg=None: {"locked": False, "sentry_mode": False,
                                          "user_present": False, "state": "online",
                                          "park_time": None, "source": "test"}
 s3._tick()
 evs = [r for r in REC.requests if (r["body"] or {}).get("event") == "going_offline"]
 ok("C1 locked True→False 触发握手", len(evs) == 1, "实际 %d" % len(evs))
+ok("C1b 原因是 unlocked", evs and evs[0]["body"].get("reason") == "unlocked")
+
+# C1c：哨兵仍开启时，locked 漂移成 False 不能握手（否则反复关掉失联告警）
+REC.reset()
+s3b = gc.GuardSender(cfg3)
+s3b._prev_vehicle = {"locked": True, "state": "asleep", "user_present": False,
+                     "sentry_mode": True}
+gc._vehicle_snapshot = lambda cfg=None: {"locked": False, "sentry_mode": True,
+                                         "user_present": False, "state": "online",
+                                         "park_time": None, "source": "test"}
+s3b._tick()
+evs = [r for r in REC.requests if (r["body"] or {}).get("event") == "going_offline"]
+ok("C1c 哨兵开启时不判解锁", len(evs) == 0, "实际 %d" % len(evs))
+# 控制组：证明这一拍真的发过请求。否则在缺 requests / 无网环境下
+# C1c 会「平凡通过」——它只是没跑起来，而不是闸门生效（审查 P2-6）
+ok("C1c-ctl 心跳仍发出", len(REC.requests) >= 1, "实际 %d" % len(REC.requests))
 if evs:
     b = evs[0]["body"]
     ok("C2 握手带相对量 offline_s（跨机安全）", isinstance(b.get("offline_s"), int), str(b.get("offline_s")))

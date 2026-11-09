@@ -44,6 +44,15 @@
 > 正确的车态在 **`/msg` 的 `raw_data`** 里，且是**扁平**结构 —— 没有 Tesla 官方
 > `vehicle_state` / `climate_state` 那一层。下表字段全部取自 `raw_data` 顶层。
 
+> **⚠️ `locked` 会陈旧/漂移（M134，2026-11-09 实证）**：车已锁定且哨兵开启时，
+> `/msg` 实测返回 `locked="false"`、`sentry_mode="true"`、`state="online"`。
+> 哨兵模式只在锁车后开启，所以这个组合必然是 `locked` 错。
+> **消费方必须交叉校验**：`sentry_mode=true` 且车辆确定停着（`state != driving`、
+> `shift_state not in (D,R)`、`speed <= 3`）时，按「已锁」处理。
+> 只信 `locked` 会导致锁车事件判不出来，而且这个错误的 `false` 会被当成「解锁」
+> 去给远端见证者开静默窗口，反过来关掉真正的失联告警。
+> 另外 `speed` 在该接口里是**字符串**（`"0"`），不是数字。
+
 ### 3.1 车辆状态 / 判断类（自检守护最关心）
 
 | 字段 | 类型 | 说明 |
