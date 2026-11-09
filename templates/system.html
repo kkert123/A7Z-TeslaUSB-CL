@@ -1100,27 +1100,47 @@ async function syncGuardBot() {
   }
 }
 
-async function loadWecomConfig() {
+var wecomBusy = 0;   // 变更请求在飞计数（切换/保存），轮询遇到它就跳过
+
+async function loadWecomConfig(force) {
+  var el = document.getElementById('wecom-bots-cfg');
+  if (!el) return;     // 永不 reject：调用方用 .then 串提示，reject 会让提示静默丢失
+  if (!force) {
+    // 30 秒轮询会整段 innerHTML 重建。若用户正在输入 key、或刚发起切换请求，
+    // 重建会清空输入、把「已启用」刷回旧状态 —— 那正是要修的症状本身（M132）
+    var ae = document.activeElement;
+    if (ae && ae.classList && ae.classList.contains('wecom-key-input')) return;
+    if ([].some.call(el.querySelectorAll('.wecom-key-input'),
+                     function(i) { return i.value.trim(); })) return;
+    if (wecomBusy > 0) return;
+  }
   try {
     // 获取当前配置
     const r = await fetch('/api/system/wecom-config');
     const d = await r.json();
     const bots = (d.success && d.bots) ? d.bots : [];
-    const el = document.getElementById('wecom-bots-cfg');
     let html = '';
     bots.forEach(function(bot) {
       var hasKey = bot.has_key;
       var enabled = bot.enabled;
       var keyPreview = bot.key_preview || '';
+      // 三态：已启用 / 已禁用（有 key 但关了）/ 未配置（从没填过 key）。
+      // 「未配置」时勾选框必须禁用：后端要求 effective_key 非空，它一定存不下来，
+      // 让它可点只会制造「点了就弹回去」的假象（M132）。
+      var stateText = enabled ? '已启用' : (hasKey ? '已禁用' : '未配置');
+      var stateColor = enabled ? 'var(--success)' : 'var(--text-muted)';
       html += '<div style="padding:8px 0;border-bottom:0.5px solid var(--border)">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
         '<span style="font-weight:500;font-size:0.8rem;min-width:70px">' + bot.name + '</span>' +
         '<label style="display:flex;align-items:center;gap:4px;font-size:0.75rem;cursor:pointer">' +
-        '<input type="checkbox" class="wecom-toggle" data-bot="' + bot.bot_key + '" ' + (enabled ? 'checked' : '') + ' onchange="onWecomToggle(this)">' +
-        '<span style="color:' + (enabled ? 'var(--success)' : 'var(--text-muted)') + '">' + (enabled ? '已启用' : '已禁用') + '</span></label>' +
+        '<input type="checkbox" class="wecom-toggle" data-bot="' + bot.bot_key + '" data-has-key="' + (hasKey ? '1' : '0') + '" ' + (enabled ? 'checked' : '') + (hasKey ? '' : ' disabled title="请先填入 Webhook Key 并点保存"') + ' onchange="onWecomToggle(this)">' +
+        '<span style="color:' + stateColor + '">' + stateText + '</span></label>' +
         '<span style="font-size:0.7rem;color:var(--text-muted);margin-left:auto">' +
         (hasKey ? 'KEY: ' + keyPreview : '未配置') + '</span>' +
         '</div>' +
+        // title 在触屏/车机上不触发（无 hover），唯一的操作指引必须写成可见文字
+        (hasKey ? '' : '<div style="font-size:0.68rem;color:var(--warning);margin:0 0 6px">' +
+          '还没有 KEY：请在下方粘贴 webhook key 并点「保存」（保存即启用）</div>') +
         '<div style="display:flex;gap:6px">' +
         '<input type="text" class="wecom-key-input" data-bot="' + bot.bot_key + '" placeholder="输入 Webhook Key" ' +
         'style="flex:1;padding:4px 8px;font-size:0.72rem;font-family:monospace;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)">' +
@@ -1133,7 +1153,7 @@ async function loadWecomConfig() {
     el.innerHTML = html || '<div style="color:var(--text-muted);font-size:0.75rem">无机器人配置</div>';
     // 同时加载推送统计
     loadPushHealth();
-  } catch (e) { document.getElementById('wecom-bots-cfg').innerHTML = '<span style="color:var(--danger);font-size:0.75rem">加载失败</span>'; }
+  } catch (e) { el.innerHTML = '<span style="color:var(--danger);font-size:0.75rem">加载失败</span>'; }
 }
 
 function showWecomMsg(botKey, text, ok) {
@@ -1149,33 +1169,60 @@ async function saveWecomKey(botKey) {
   var input = document.querySelector('.wecom-key-input[data-bot="' + botKey + '"]');
   if (!input || !input.value.trim()) { showWecomMsg(botKey, '请输入 Key', false); return; }
   var toggle = document.querySelector('.wecom-toggle[data-bot="' + botKey + '"]');
-  var enabled = toggle ? toggle.checked : true;
+  // 首次配置默认启用：这一栏的语义就是「配置并启用」。否则用户填完 key 点保存，
+  // 会因勾选框还没勾（它本来 disabled）而存成 _disabled，随后勾选又被回滚 → 死锁（M132）
+  // 只认明确的 '0'（后端说从没配过）。属性缺失时降级为「跟随勾选框」——
+  // 若降级成 true，会把用户明确关掉的机器人悄悄打开并真的发消息（M132）
+  var firstTime = !!(toggle && toggle.dataset.hasKey === '0');
+  var enabled = toggle ? (toggle.checked || firstTime) : true;
   showWecomMsg(botKey, '保存中...', true);
+  wecomBusy++;
   try {
     const r = await fetch('/api/system/wecom-config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bot: botKey, key: input.value.trim(), enabled: enabled })
     });
     const d = await r.json();
-    if (d.success) { showWecomMsg(botKey, d.message, true); input.value = ''; loadWecomConfig(); }
-    else showWecomMsg(botKey, d.error || '保存失败', false);
+    if (d.success) {
+      input.value = '';
+      // 先重建再提示：loadWecomConfig 会 innerHTML 覆盖，先 show 等于白提示
+      loadWecomConfig(true).then(function() { showWecomMsg(botKey, d.message, true); });
+    } else showWecomMsg(botKey, d.error || '保存失败', false);
   } catch (e) { showWecomMsg(botKey, '网络错误', false); }
+  finally { wecomBusy--; }
 }
 
 function onWecomToggle(el) {
   var botKey = el.dataset.bot;
+  var want = el.checked;
   var label = el.parentElement.querySelector('span');
-  label.textContent = el.checked ? '已启用' : '已禁用';
-  label.style.color = el.checked ? 'var(--success)' : 'var(--text-muted)';
-  // Toggle 时仅更新开关状态（key 不变）
-  var input = document.querySelector('.wecom-key-input[data-bot="' + botKey + '"]');
-  if (!input.value.trim()) { loadWecomConfig(); return; }
+  label.textContent = want ? '已启用' : '已禁用';
+  label.style.color = want ? 'var(--success)' : 'var(--text-muted)';
+  // 只切换开关，不带 key：后端在 key 为空时沿用现有值
+  // （effective_key = new_key or cfg.get(base) or cfg.get(base + '_disabled')）。
+  // 旧实现在这里判断「输入框有没有内容」，没内容就 loadWecomConfig() 返回 ——
+  // 于是没有 key 时勾选被静默回滚，用户看不到任何原因。
+  // M132：把「输入框状态」当成了「这个操作是否合法」的判据。
+  wecomBusy++;
   fetch('/api/system/wecom-config', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bot: botKey, key: input.value.trim(), enabled: el.checked })
+    body: JSON.stringify({ bot: botKey, enabled: want })
   }).then(function(r) { return r.json(); }).then(function(d) {
-    if (!d.success) { el.checked = !el.checked; loadWecomConfig(); }
-  });
+    // 列表必须重建（状态文字、KEY 预览都会变），所以提示要放在重建之后，
+    // 否则 showWecomMsg 写进的是马上被 innerHTML 覆盖掉的旧节点。
+    return loadWecomConfig(true).then(function() {
+      if (d.success) {
+        showWecomMsg(botKey, d.message, true);
+      } else {
+        var msg = (d.code === 'need_key')
+          ? '该机器人还没有 KEY：请先在下方输入框粘贴 Webhook Key 并点「保存」（保存即启用）'
+          : (d.error || '切换失败');
+        showWecomMsg(botKey, msg, false);
+      }
+    });
+  }).catch(function() {
+    loadWecomConfig(true).then(function() { showWecomMsg(botKey, '网络错误', false); });
+  }).finally(function() { wecomBusy--; });
 }
 
 async function testWecomPush(botKey) {

@@ -621,8 +621,16 @@ def api_system_wecom_config():
         if not base:
             return jsonify({'success': False, 'error': '无效的机器人'}), 400
 
-        new_key = (data.get('key') or '').strip()
-        enabled = bool(data.get('enabled', True))
+        new_key = str(data.get('key') or '').strip()
+        # bool("false") 是 True：外部脚本/表单传字符串 "false" 会被当成「启用」，
+        # 与「禁用即真的不发」正好相反，而且不报错（M132）
+        raw_enabled = data.get('enabled', True)
+        if isinstance(raw_enabled, bool):
+            enabled = raw_enabled
+        elif raw_enabled in (0, 1):
+            enabled = bool(raw_enabled)
+        else:
+            return jsonify({'success': False, 'error': 'enabled 必须是 true/false'}), 400
 
         cfg = {}
         if os.path.exists(WECOM_CONFIG_PATH):
@@ -630,14 +638,21 @@ def api_system_wecom_config():
                 cfg = json.load(f)
 
         disabled_field = base + '_disabled'
-        current_key = cfg.get(base) or cfg.get(disabled_field) or ''
+        # 历史上手工编辑过的值可能带空格/换行；不 strip 会在下一步正则处
+        # 报「KEY 格式无效」，用户面对一个自己没动过的 key 且永远开不了（M132）
+        current_key = str(cfg.get(base) or cfg.get(disabled_field) or '').strip()
         # 提供了新 key 则用新的，否则沿用现有（只改开关时不覆盖 key）
         effective_key = new_key if new_key else current_key
 
         if not effective_key:
-            return jsonify({'success': False, 'error': '请先填写 KEY'}), 400
-        # 企业微信 webhook key 为 UUID 风格，做宽松校验
-        if not re.fullmatch(r'[0-9a-fA-F-]{20,64}', effective_key):
+            # code 让前端区分「没配 key」和「其它失败」：前者要引导去填 key，
+            # 不该被显示成网络错误（M132）
+            return jsonify({'success': False, 'error': '请先填写 KEY',
+                            'code': 'need_key'}), 400
+        # 只校验**用户新输入**的 key。沿用历史 key 时不校验：手工写进 sentry.json
+        # 的旧值可能带空格或长度不符，一旦校验，用户「只想把开关关掉」也会 400 ——
+        # 结果既开不回来也关不掉（M132）
+        if new_key and not re.fullmatch(r'[0-9a-fA-F-]{20,64}', new_key):
             return jsonify({'success': False, 'error': 'KEY 格式无效（应为企业微信 webhook key）'}), 400
 
         if enabled:
@@ -653,6 +668,12 @@ def api_system_wecom_config():
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
+            # mkstemp 建的是 0600，replace 会把 sentry.json 从 0644 收窄成 0600；
+            # 同机若还有别的用户身份读它（哨兵推送等），会突然 PermissionError
+            try:
+                os.chmod(tmp, os.stat(WECOM_CONFIG_PATH).st_mode & 0o777)
+            except OSError:
+                os.chmod(tmp, 0o644)
             os.replace(tmp, WECOM_CONFIG_PATH)
         except Exception:
             if os.path.exists(tmp):
