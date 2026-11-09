@@ -85,13 +85,20 @@ DEFAULTS: Dict[str, Any] = {
     "ts_timeout_s": 8,
     "https_timeout_s": 10,
     "probe_every_s": 150,        # 低频 HTTPS 双发探针（必须 < B 的 ALARM=5T=300s）
-    "states_interval_s": 300,    # TeslaMate /states 轮询（配额克制）
+    # 键名保留 states_interval_s（兼容旧配置），实际拉的是 /msg：
+    # /states 返回的是服务配置状态，与车辆无关（M133）
+    "states_interval_s": 300,
     "queue_max": 200,
     "offline_default_s": 3600,   # going_offline 的默认窗口
     # ── 报告（A 端直连企微，不依赖 B）──
     "report_transition": True,   # 自检结果跨档/恢复时推送
     "report_daily_at": "20:00",  # 每日摘要时刻（空串 = 关闭）
     "report_cooldown_s": 1800,   # 同一档位的去重窗口
+    # 锁车后必推一条「停车自检」（用户明确要求：无论正常与否都要收到）。
+    # 与 report_transition 是两条独立通道：那条只在档位变化时发，这条是事件型。
+    "report_on_lock": True,
+    "lock_report_min_gap_s": 600,   # 同一把锁之后 N 秒内不再重复（下车拿东西又锁一次）
+    "lock_detect_fallback": True,   # TeslaMate 拿不到车态时，用 SEI / 行车记录仪文件兜底
     "ping_fail_threshold": 3,    # 连续 N 次 ping 不通判「B 侧失联」
     # ── 僚机版本同步 ──
     # B 包的 Ed25519 公钥（**离线签名机**持有私钥；A 只用来预验签）
@@ -102,8 +109,25 @@ DEFAULTS: Dict[str, Any] = {
 # 模块级缓存（线程安全由调用方保证：仅在后台线程使用）
 _TS_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
 _TM_CACHE: Dict[str, Any] = {"at": 0.0, "ok": None}
-_STATES_CACHE: Dict[str, Any] = {"at": 0.0, "data": None, "err": None}
-_STATES_INFLIGHT = threading.Event()   # 防 /states 拉取线程堆积
+# 车辆实时状态缓存。数据源是 /msg 的 raw_data（扁平 95 键），**不是** /states ——
+# 后者名字骗人，返回的是「服务配置状态」（auto_del / buttons / schedule …20 键）。
+# 这个坑导致 v0.3.1.80 及以前 vehicle.locked/state 恒为 null，
+# 连带 "出车/解锁自动握手" 从未生效过（M133）。
+_VEHICLE_CACHE: Dict[str, Any] = {"at": 0.0, "data": None, "err": None}
+_VEHICLE_INFLIGHT = threading.Event()   # 防 /msg 拉取线程堆积
+
+# 行车记录仪目录（Tesla 命名 2026-11-09_09-37-02-front.mp4，字典序即时间序）
+_TESLA_CLIP_DIRS = {
+    "SentryClips": "/mnt/teslacam/TeslaCam/SentryClips",
+    "SavedClips": "/mnt/teslacam/TeslaCam/SavedClips",
+    "RecentClips": "/mnt/teslacam/TeslaCam/RecentClips",
+}
+_CLIPS_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
+_CLIPS_TTL_S = 60          # 每拍（60s）最多扫一次目录
+_SEI_CACHE: Dict[str, Any] = {"path": "", "at": 0.0, "data": None}
+_SEI_BAD: Dict[str, float] = {}      # path -> 最近一次解析失败的时刻（负缓存）
+_SEI_BAD_TTL_S = 300
+_SEI_MAX_BYTES = 80 * 1024 * 1024   # 超过就跳过：全量读入内存解析，太大不值得
 _SC_CACHE: Dict[str, tuple] = {}       # systemctl is-active 缓存 {unit: (bool|None, mono)}
 _WIFI_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
 
@@ -325,6 +349,7 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
         "queue_max":        (1, 1000),
         "offline_default_s": (60, 21600),
         "report_cooldown_s": (300, 7200),
+        "lock_report_min_gap_s": (120, 7200),
         "ping_fail_threshold": (2, 6),
     }
     for key, (lo, hi) in _CLAMP.items():
@@ -341,6 +366,8 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     cfg["enabled"] = _as_bool(cfg.get("enabled"), default=False)
     cfg["report_transition"] = _as_bool(cfg.get("report_transition"), default=True)
     cfg["report_daily_at"] = _norm_hhmm(cfg.get("report_daily_at"))
+    cfg["report_on_lock"] = _as_bool(cfg.get("report_on_lock"), default=True)
+    cfg["lock_detect_fallback"] = _as_bool(cfg.get("lock_detect_fallback"), default=True)
     cfg["token"] = str(cfg.get("token") or "")
     cfg["ca_path"] = str(cfg.get("ca_path") or "")
     # 公钥可能是用户从终端粘贴的整行（含 principal 前缀），统一剥成裸 key
@@ -633,14 +660,21 @@ def _wechat_snapshot() -> Dict[str, Any]:
     return out
 
 
-def _states_refresh(cfg: Dict[str, Any]) -> None:
-    """拉一次 TeslaMate /states 写入缓存。配额克制：仅按 states_interval_s 调用。"""
+def _vehicle_refresh(cfg: Dict[str, Any]) -> None:
+    """拉一次 TeslaMate /msg 的 raw_data 写入缓存。配额克制：按 states_interval_s 调用。
+
+    **为什么不是 /states**：那个端点返回的是「服务配置状态」
+    （auto_del / buttons / schedule / mqtt_relay / share_config …共 20 个键），
+    与车辆毫无关系。真正的车辆字段在 /msg 的 raw_data 里，是**扁平 95 键**：
+    locked / sentry_mode / is_user_present / state / shift_state / speed /
+    ui_park_time_str …（没有 vehicle_state 那一层，别套 Tesla 官方嵌套结构）。
+    """
     try:
         scfg = _read_json(app_config.SENTRY_CONFIG_FILE) or {}
         base_url = str(scfg.get("teslamate_url") or "").strip()
         password = str(scfg.get("teslamate_password") or "")
         if not base_url:
-            _STATES_CACHE.update(at=time.monotonic(), data=None, err="no_url")
+            _VEHICLE_CACHE.update(at=time.monotonic(), data=None, err="no_url")
             return
 
         from location_detector import TeslaMateCustomAPI
@@ -649,38 +683,191 @@ def _states_refresh(cfg: Dict[str, Any]) -> None:
             password=password,
             token_cache_path=os.path.join(app_config.DATA_DIR, ".teslamate_token.json"),
         )
-        states = api.get_states()
-        _STATES_CACHE.update(
+        raw = api.get_vehicle_data()      # 返回 /msg 的 raw_data
+        _VEHICLE_CACHE.update(
             at=time.monotonic(),
-            data=states if isinstance(states, dict) else None,
-            err=None if isinstance(states, dict) else "empty",
+            data=raw if isinstance(raw, dict) else None,
+            err=None if isinstance(raw, dict) else "empty",
         )
     except Exception as e:
-        _STATES_CACHE.update(at=time.monotonic(), data=None, err=str(e)[:120])
-        logger.debug("拉取 /states 失败: %s", e)
+        _VEHICLE_CACHE.update(at=time.monotonic(), data=None, err=str(e)[:120])
+        logger.debug("拉取 /msg 失败: %s", e)
 
 
-def _states_refresh_guarded(cfg: Dict[str, Any]) -> None:
-    """带在途闸的 /states 拉取：上一轮没结束就跳过，防线程堆积。"""
-    if _STATES_INFLIGHT.is_set():
+def _vehicle_refresh_guarded(cfg: Dict[str, Any]) -> None:
+    """带在途闸的 /msg 拉取：上一轮没结束就跳过，防线程堆积。"""
+    if _VEHICLE_INFLIGHT.is_set():
         return
-    _STATES_INFLIGHT.set()
+    _VEHICLE_INFLIGHT.set()
     try:
-        _states_refresh(cfg)
+        _vehicle_refresh(cfg)
     finally:
-        _STATES_INFLIGHT.clear()
+        _VEHICLE_INFLIGHT.clear()
+
+
+def _clip_name_ts(name: str) -> Optional[float]:
+    """从 Tesla 文件名取时间。字典序即时间序，比 stat 的 mtime 稳（M52/M58）。"""
+    if len(name) < 19:
+        return None
+    try:
+        return time.mktime(time.strptime(name[:19], "%Y-%m-%d_%H-%M-%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _latest_clip(dir_path: str) -> Optional[Dict[str, Any]]:
+    """取该目录里最新一个 mp4（不排序、不 stat）。
+
+    两种布局都必须支持（`video_service.py:185-187` 写明了）：
+      · RecentClips —— **平铺**：RecentClips/2026-11-09_09-37-02-front.mp4
+      · SentryClips / SavedClips —— **事件子目录**：
+            SentryClips/2026-05-09_17-47-03/2026-05-09_17-47-03-front.mp4
+    只扫顶层的话，哨兵目录永远扫不到 mp4（顶层全是目录名），
+    于是 L3 的「已锁车」判定永久失效。
+    """
+    def _scan(folder: str, fixed_ts: float = 0.0):
+        best = None
+        try:
+            with os.scandir(folder) as it:
+                for e in it:
+                    n = e.name
+                    if not n.endswith(".mp4"):
+                        continue
+                    ts = fixed_ts or _clip_name_ts(n)
+                    if not ts:
+                        continue
+                    if best is None or ts > best[1]:
+                        best = (os.path.join(folder, n), ts)
+        except OSError:
+            return None
+        return best
+
+    newest = _scan(dir_path)                 # 平铺（RecentClips）
+    best_dir = None
+    try:
+        with os.scandir(dir_path) as it:     # 事件子目录（SentryClips/SavedClips）
+            for e in it:
+                try:
+                    if not e.is_dir():
+                        continue
+                except OSError:
+                    continue
+                dts = _clip_name_ts(e.name)  # 目录名本身就是事件时间
+                if dts and (best_dir is None or dts > best_dir[1]):
+                    best_dir = (e.path, dts)
+    except OSError:
+        pass
+    if best_dir:
+        inner = _scan(best_dir[0], fixed_ts=best_dir[1])
+        if inner and (newest is None or inner[1] > newest[1]):
+            newest = inner
+
+    if newest is None:
+        return None
+    path, ts = newest
+    age = time.time() - ts
+    # 文件名时间来自车机 GPS 授时，本机钟未同步时会算成「未来」→ 不可信（M51）
+    if age < -300:
+        return None
+    return {"name": os.path.basename(path), "ts": ts, "path": path,
+            "age_s": max(0.0, age)}
+
+
+def _clips_hint() -> Optional[Dict[str, Any]]:
+    """L3 兜底：用行车记录仪文件名判断车态（60s 缓存，纯本地，零网络）。
+
+    依据是 2026-06-01 实测结论：
+      · SentryClips **只在锁车后**由哨兵录制 —— 有新文件 ≈ 已锁车（最强判据）
+      · RecentClips 在行驶中持续写入 —— 有新文件 ≈ 车还在活动
+      · SentryClips 里**永远没有 SEI**（哨兵片段不含遥测），所以别指望用它读档位
+    """
+    now = time.monotonic()
+    if _CLIPS_CACHE["data"] is not None and now - _CLIPS_CACHE["at"] < _CLIPS_TTL_S:
+        return _CLIPS_CACHE["data"]
+
+    sen = _latest_clip(_TESLA_CLIP_DIRS["SentryClips"])
+    rec = _latest_clip(_TESLA_CLIP_DIRS["RecentClips"])
+    out: Dict[str, Any] = {
+        "sentry_age_s": round(sen["age_s"]) if sen else None,
+        "recent_age_s": round(rec["age_s"]) if rec else None,
+    }
+    # RecentClips 新鲜 = 还在录；两个都新鲜时按「在动」处理（防御，正常不会同时成立）
+    if rec and rec["age_s"] <= 120:
+        out.update(locked=False, why="recent_clip_writing")
+    elif sen and sen["age_s"] <= 600:
+        out.update(locked=True, why="sentry_clip_written")
+    else:
+        out.update(locked=None, why="no_recent_clip")
+    _CLIPS_CACHE.update(at=now, data=out)
+    return out
+
+
+def _sei_hint() -> Optional[Dict[str, Any]]:
+    """L2 兜底：解析最新**已写完**的 mp4 的 SEI，读档位与车速。
+
+    Tesla 每分钟写一组（同时间戳前缀）4 个摄像头文件。要跳过的是**最新的一组**，
+    不是「一个文件」—— 按 `name[:19]` 分组后整体跳过，否则解析的仍是正在写入的那组。
+    SentryClips 始终没有 SEI（哨兵片段不含遥测），所以只扫 RecentClips / SavedClips。
+    """
+    cands: List[str] = []
+    for key in ("RecentClips", "SavedClips"):
+        d = _TESLA_CLIP_DIRS[key]
+        groups: Dict[str, List[str]] = {}
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    n = e.name
+                    if n.endswith(".mp4") and len(n) >= 19:
+                        groups.setdefault(n[:19], []).append(n)
+        except OSError:
+            continue
+        for g in sorted(groups, reverse=True)[1:4]:      # 跳过最新一组（可能正在写）
+            for n in sorted(groups[g], reverse=True)[:1]:  # 每组取一个摄像头即可
+                cands.append(os.path.join(d, n))
+    if not cands:
+        return None
+
+    now = time.monotonic()
+    for path in cands:
+        if _SEI_CACHE["path"] == path and _SEI_CACHE["data"] is not None:
+            return _SEI_CACHE["data"]
+        # 负缓存：解析失败的文件 5 分钟内不再重读（否则稳态每拍重读 26MB）
+        bad_at = _SEI_BAD.get(path)
+        if bad_at is not None and now - bad_at < _SEI_BAD_TTL_S:
+            continue
+        try:
+            if os.path.getsize(path) > _SEI_MAX_BYTES:
+                continue
+            from utils.sei_parser import _extract_sei_direct
+            rows = _extract_sei_direct(path)
+        except Exception as e:
+            logger.debug("SEI 解析失败 %s: %s", os.path.basename(path), e)
+            _SEI_BAD[path] = now
+            continue
+        if not rows:
+            _SEI_BAD[path] = now
+            continue
+        last = rows[-1]                   # 最后一条 = 该片段结束时的车态
+        out = {"gear": last.get("gear_state"), "speed": last.get("speed_kmh"),
+               "file": os.path.basename(path)}
+        _SEI_CACHE.update(path=path, at=now, data=out)
+        return out
+    return None
 
 
 def _vehicle_snapshot(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """车辆三态（只读缓存，不在这里发网络请求，避免拖慢心跳节拍）。
+    """车辆状态（只读缓存，不在这里发网络请求，避免拖慢心跳节拍）。
 
-    缓存过旧时必须降级为「全 unknown」：否则车已开走，B 仍按旧快照的
-    locked=True/sentry=True/user_present=False 判「该在线」→ 断电后误报。
+    三层数据源，按可靠性降级：
+      L1 TeslaMate `/msg` 的 raw_data —— locked/shift_state/speed 最权威
+      L2 SEI 解析最新**已写完**的 mp4 —— 能读档位/车速；但 SentryClips 无 SEI
+      L3 行车记录仪文件名 —— SentryClips 有新文件 ≈ 已锁车（零网络，最抗故障）
+
+    缓存过旧时必须降级为 unknown：否则车已开走，B 仍按旧快照的 locked=True
+    判「该在线」→ 断电后误报。
     """
-    data = _STATES_CACHE["data"]
-    age = None if not _STATES_CACHE["at"] else time.monotonic() - _STATES_CACHE["at"]
-    # 阈值必须跟随**实际配置**：写死 DEFAULTS 时，若用户把 states_interval 调到 1800，
-    # 900s 就判 stale → 车态长期 unknown → B 的判据退化成「未知按 judge」（误报风险）。
+    data = _VEHICLE_CACHE["data"]
+    age = None if not _VEHICLE_CACHE["at"] else time.monotonic() - _VEHICLE_CACHE["at"]
     interval = (cfg or {}).get("states_interval_s", DEFAULTS["states_interval_s"])
     try:
         interval = int(interval)
@@ -695,23 +882,51 @@ def _vehicle_snapshot(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "user_present": None,
         "state": None,
         "park_time": None,
+        "shift_state": None,
+        "speed": None,
         "age_s": round(age) if age is not None else None,
         "source": "unavailable",
+        "detect": "none",        # 锁车态来自哪一层：teslamate / clips / sei / none
     }
-    if not isinstance(data, dict):
-        return out
-    if stale:
+    if isinstance(data, dict) and not stale:
+        out["source"] = "teslamate_msg"
+        # /msg 的 raw_data 是**扁平**结构：字段直接在顶层，没有 vehicle_state 那一层。
+        # 早期版本按 Tesla 官方嵌套结构去取 data["vehicle_state"]["locked"]，
+        # 结果永远拿不到值（M133）。
+        out["locked"] = _tri(data.get("locked"))
+        out["sentry_mode"] = _tri(data.get("sentry_mode"))
+        out["user_present"] = _tri(data.get("is_user_present"))
+        st = data.get("state")
+        out["state"] = str(st).lower() if isinstance(st, str) else None
+        pt = data.get("ui_park_time_str")
+        out["park_time"] = pt if isinstance(pt, str) else None
+        ss = data.get("shift_state")
+        out["shift_state"] = (str(ss).upper()
+                              if isinstance(ss, str) and ss.strip() else None)
+        sp = data.get("speed")
+        out["speed"] = float(sp) if isinstance(sp, (int, float)) else None
+        if out["locked"] is not None:
+            out["detect"] = "teslamate"
+    elif isinstance(data, dict):
         out["source"] = "stale"
-        return out
 
-    out["source"] = "teslamate_states"
-    out["locked"] = _tri(data.get("locked"))
-    out["sentry_mode"] = _tri(data.get("sentry_mode"))
-    out["user_present"] = _tri(data.get("is_user_present"))
-    st = data.get("state")
-    out["state"] = str(st).lower() if isinstance(st, str) else None
-    pt = data.get("ui_park_time_str")
-    out["park_time"] = pt if isinstance(pt, str) else None
+    # ── 兜底：L1 拿不到 locked 才启用（车休眠时 /msg 常返回空值）──
+    if out["locked"] is None and (cfg or {}).get("lock_detect_fallback", True):
+        h = _clips_hint()
+        if isinstance(h, dict):
+            out["clips_age_s"] = h.get("sentry_age_s")
+            out["clips_why"] = h.get("why")
+            if h.get("locked") is not None:
+                out["locked"] = h["locked"]
+                out["detect"] = "clips"
+        if out["locked"] is None:
+            s = _sei_hint()
+            if isinstance(s, dict):
+                if out["shift_state"] is None:
+                    out["shift_state"] = s.get("gear")
+                if out["speed"] is None:
+                    out["speed"] = s.get("speed")
+                out["detect"] = "sei"
     return out
 
 
@@ -952,6 +1167,11 @@ class GuardSender:
         self._last_result = ""                    # 上一拍的 selfcheck.result
         self._report_at: Dict[str, float] = {}    # 各档位最近推送时刻（单调钟）
         self._daily_done = ""                     # 已推日报的日期 YYYY-MM-DD
+        # ── 锁车事件报告（与档位跃迁是两条独立通道）──
+        self._prev_locked: Optional[bool] = None  # 上一拍的 locked（边沿判定）
+        self._locked_primed = False               # 首拍只建基准，不补推
+        self._lock_report_at = 0.0                # 上次锁车报告时刻（冷却）
+        self._lock_reported = False               # 这一把锁已经报过（等真实解锁才复位）
         # 待重发的报告用**小列表**而不是单槽：单槽会让「B 侧失联」这类安全通知
         # 被随后的一条自检报告覆盖掉（谁后写谁活），那是最不该丢的一条。
         self._pending_reports: List[Dict[str, Any]] = []   # {text, critical, tries, at}
@@ -1011,11 +1231,12 @@ class GuardSender:
             return
         now_mono = time.monotonic()
 
-        # TeslaMate /states 独立节奏（300s），不进主节拍
+        # TeslaMate /msg 独立节奏（states_interval_s），不进主节拍。
+        # 端点必须是 /msg：/states 返回的是服务配置状态，与车辆无关（M133）。
         if now_mono - self._last_states >= self.cfg["states_interval_s"]:
             self._last_states = now_mono
-            threading.Thread(target=_states_refresh_guarded, args=(self.cfg,),
-                             daemon=True, name="guard-states").start()
+            threading.Thread(target=_vehicle_refresh_guarded, args=(self.cfg,),
+                             daemon=True, name="guard-vehicle").start()
 
         snap = build_snapshot(self.cfg)
         self._seq += 1
@@ -1294,8 +1515,14 @@ class GuardSender:
     def _maybe_going_offline(self, snap: Dict[str, Any]) -> None:
         """车态从「停着」转「开走/解锁」时先握手，B 端在窗口内静默（防误报）。"""
         v = snap.get("vehicle") or {}
+        # 只有 TeslaMate 的 locked 才参与「解锁」握手。clips/sei 推出来的是**推断值**
+        # （RecentClips 在写 ≠ 车没锁），拿它去给 B 开 900s 静默窗口，
+        # 恰好会在「车已锁、设备即将断电」这个最需要告警的窗口把告警关掉。
+        # 默认可信，只排除**明确来自兜底**的值：缺字段的老路径不能因此失效，
+        # 而 clips/sei 是推断值，绝不能拿来给 B 开静默窗口。
+        trusted = str(v.get("detect") or "") not in ("clips", "sei")
         cur = {
-            "locked": v.get("locked"),
+            "locked": v.get("locked") if trusted else None,
             "state": v.get("state"),
             "user_present": v.get("user_present"),
         }
@@ -1469,6 +1696,19 @@ class GuardSender:
             "僚机：%s" % b_line,
         ])
 
+    def _fmt_locked(self, snap: Dict[str, Any]) -> str:
+        sc = snap.get("selfcheck") or {}
+        result = str(sc.get("result") or "unknown")
+        v = snap.get("vehicle") or {}
+        how = {"clips": "（据行车记录仪）", "sei": "（据视频遥测）"}.get(
+            str(v.get("detect") or ""), "")
+        if v.get("locked") is True:
+            head = "【停车自检】车辆已锁车%s · %s" % (how, _TIER_CN.get(result, result))
+        else:
+            # 只有 L2（SEI 读到 P 档）能到这一步：确实停了，但锁没锁不知道
+            head = "【停车自检】车辆已停止（锁车状态未知）· %s" % _TIER_CN.get(result, result)
+        return "\n".join([head, self._device_line(), self._fmt_items(snap)])
+
     def _fmt_b_down(self, kind: str) -> str:
         if kind == "auth":
             head = "【护卫告警】B 侧在线，但令牌不匹配"
@@ -1581,9 +1821,17 @@ class GuardSender:
         # 预热期内不出任何报告（含日报）：这段时间 bgpreview 还没写扫描心跳，
         # 日报会把「注意」当成常态发出去，反而让人以为设备一直有问题。
         if time.monotonic() < self._warmup_until:
+            # 预热期只抑制推送，**仍要跟踪锁车边沿**：否则重启后 5 分钟内锁车的
+            # 事件会永久丢失（预热结束后第一拍只会「建基准」）。
+            self._maybe_lock_report(snap, dry_run=True)
             return
 
         self._maybe_daily_report(snap)
+
+        # 锁车是事件型通知，优先于档位跃迁：这一拍刚锁车就只发停车自检。
+        # 否则「锁车 → gadget 判 warn」会同时触发跃迁报告，用户收到两条重复消息。
+        if self._maybe_lock_report(snap):
+            return
 
         # 跃迁/恢复：只在两个**已知档位**之间判定。
         # unknown（探针集体失效、刚开机）不参与，否则每次重启都会误报一次跃迁。
@@ -1596,6 +1844,59 @@ class GuardSender:
                     self._push_report(self._fmt_recovery(prev, snap))
                 else:
                     self._push_report(self._fmt_transition(prev, result, snap))
+
+    def _maybe_lock_report(self, snap: Dict[str, Any], dry_run: bool = False) -> bool:
+        """锁车 → 推一份停车自检（无论档位）。返回是否已推送。
+
+        用户明确要求「车辆锁车后无论正常与否都要推送」。这与 report_transition
+        （只在档位变化时报）互不重叠：那条是状态型，这条是事件型。
+
+        用「这一把锁是否已报过」的**闩锁**，而不是只看时间窗：车休眠时 /msg 常返回
+        nil，`locked` 会在 True→None→True 之间抖动，光靠时间窗一晚上能推六条。
+        """
+        cfg = self.cfg
+        v = snap.get("vehicle") or {}
+        cur = v.get("locked")
+
+        # 首拍只建立基准：服务重启后不能因为「没有上一拍」就立刻补推一条
+        if not self._locked_primed:
+            self._locked_primed = True
+            self._lock_reported = (cur is True)
+            return False
+
+        # 基准只在拿到已知值时更新：None 不得覆盖已知状态，否则抖动会重新「上膛」
+        if cur is not None:
+            self._prev_locked = cur
+
+        if cur is False:
+            self._lock_reported = False          # 只有真实解锁才复位
+        if cur is not True:
+            return False
+        if self._lock_reported:
+            return False
+        if dry_run:
+            return False                         # 预热期：只跟踪，不推送
+
+        if not cfg.get("report_on_lock", True):
+            return False
+
+        # 还在开就别报：等红灯挂 P 也会让 locked 抖动，加一道车速/档位闸
+        gear = str(v.get("shift_state") or "").upper()
+        if gear in ("D", "R"):
+            return False
+        sp = v.get("speed")
+        if isinstance(sp, (int, float)) and sp > 3:
+            return False
+
+        now_mono = time.monotonic()
+        if now_mono - self._lock_report_at < cfg.get("lock_report_min_gap_s", 600):
+            return False                    # 下车拿东西又锁一次，不重复打扰
+        self._lock_report_at = now_mono
+        self._lock_reported = True
+        self._push_report(self._fmt_locked(snap))
+        logger.info("停车自检已发出（车态来源=%s, 档位=%s）",
+                    v.get("detect") or "none", gear or "-")
+        return True
 
     def _maybe_daily_report(self, snap: Dict[str, Any]) -> None:
         at = str(self.cfg.get("report_daily_at") or "").strip()

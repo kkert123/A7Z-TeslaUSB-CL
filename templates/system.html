@@ -877,6 +877,7 @@ var GUARD_FIELDS = [
   {k:'queue_max',          label:'补报队列上限',  unit:'条', min:1,   max:1000, hint:''},
   {k:'offline_default_s',  label:'出车静默窗口',  unit:'秒', min:60,  max:21600,hint:'车开走后僚机静默时长'},
   {k:'report_cooldown_s',  label:'报告去重窗口',  unit:'秒', min:300, max:7200, hint:'同档位内不重复推送'},
+  {k:'lock_report_min_gap_s', label:'锁车报告冷却', unit:'秒', min:120, max:7200, hint:'下车拿东西又锁一次时不重复打扰'},
   {k:'ping_fail_threshold',label:'B 失联判据',    unit:'次', min:2,   max:6,    hint:'×探针周期 = 检测时延'},
   {k:'ts_timeout_s',       label:'TS 超时',       unit:'秒', min:2,   max:30,   hint:''},
   {k:'https_timeout_s',    label:'HTTPS 超时',    unit:'秒', min:2,   max:30,   hint:''}
@@ -925,6 +926,9 @@ function renderGuardConfig(cfg) {
   html += '<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:10px;padding-top:8px;border-top:0.5px solid var(--border)">' +
     '<label style="display:flex;align-items:center;gap:5px;font-size:0.75rem;cursor:pointer">' +
     '<input type="checkbox" id="guard-report-transition"' + (cfg.report_transition ? ' checked' : '') + '> 自检跃迁/恢复即时推送</label>' +
+    '<label style="display:flex;align-items:center;gap:5px;font-size:0.75rem;cursor:pointer">' +
+    // 默认开：事件型通知，与上面那条（状态型）互补
+    '<input type="checkbox" id="guard-report-on-lock"' + (cfg.report_on_lock === true ? ' checked' : '') + '> 锁车后推送停车自检</label>' +
     '<label style="display:flex;align-items:center;gap:5px;font-size:0.75rem">每日摘要' +
     '<input type="time" id="guard-report-daily" value="' + escapeHtml(cfg.report_daily_at || '') + '" ' +
     'style="padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.72rem">' +
@@ -1048,6 +1052,8 @@ async function saveGuardConfig() {
     report_transition: !!(document.getElementById('guard-report-transition') || {}).checked,
     report_daily_at: (document.getElementById('guard-report-daily') || {}).value || ''
   };
+  var lockEl = document.getElementById('guard-report-on-lock');
+  if (lockEl) payload.report_on_lock = !!lockEl.checked;
   var tok = (document.getElementById('guard-token') || {}).value || '';
   if (tok.trim()) payload.token = tok.trim();      // 空 = 保持原值，避免把掩码写回去
   document.querySelectorAll('.guard-num').forEach(function(i) {

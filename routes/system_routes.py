@@ -1475,6 +1475,7 @@ GUARD_EDITABLE = {
     'interval_s', 'ts_timeout_s', 'https_timeout_s', 'probe_every_s',
     'states_interval_s', 'queue_max', 'offline_default_s',
     'report_transition', 'report_daily_at', 'report_cooldown_s',
+    'report_on_lock', 'lock_report_min_gap_s', 'lock_detect_fallback',
     'ping_fail_threshold',
     # 僚机包签名公钥（只有公钥，泄露无害；私钥在离线签名机上）
     'pkg_pubkey',
@@ -1498,6 +1499,7 @@ def api_guard_config():
                 'queue_max': [1, 1000],
                 'offline_default_s': [60, 21600],
                 'report_cooldown_s': [300, 7200],
+                'lock_report_min_gap_s': [120, 7200],
                 'ping_fail_threshold': [2, 6],
                 'ts_timeout_s': [2, 30],
                 'https_timeout_s': [2, 30],

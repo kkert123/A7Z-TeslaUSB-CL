@@ -119,7 +119,7 @@ gc.tailscale_state = lambda force=False: {"backend": "Running", "exit_node": Non
 gc._internet_ok = lambda: True
 gc._teslamate_ok = lambda: True
 gc._systemctl_active = lambda unit: True
-gc._states_refresh = lambda cfg: None
+gc._vehicle_refresh = lambda cfg: None
 
 
 def fresh_cfg(**over):
@@ -241,7 +241,7 @@ print("\n[C] 预期离线握手")
 
 REC.reset()
 gc.atomic_write_json(gc.QUEUE_PATH, [])
-gc._STATES_CACHE.update(at=time.monotonic(), data=None, err=None)
+gc._VEHICLE_CACHE.update(at=time.monotonic(), data=None, err=None)
 cfg3 = fresh_cfg(endpoints={"ts": base, "https": ""})
 s3 = gc.GuardSender(cfg3)
 s3._prev_vehicle = {"locked": True, "state": "asleep", "user_present": False}
@@ -448,17 +448,19 @@ gc.atomic_write_json(gc.STATUS_PATH, {"ts": int(time.time()), "selfcheck": {}})
 ok("F7d 新鲜快照 → available=true", gc.get_last_status().get("available") is True)
 
 # F8 vehicle 缓存过期必须降级为 unknown（P1-10）
-gc._STATES_CACHE.update(at=time.monotonic() - 4000,
+gc._VEHICLE_CACHE.update(at=time.monotonic() - 4000,
                         data={"locked": True, "sentry_mode": True, "is_user_present": False},
                         err=None)
-v = gc._vehicle_snapshot()
+# 关掉兜底再断言：新设计允许 stale 之后由 L3（行车记录仪文件）给出 locked，
+# 那样 F8b 就失去意义。这条只验证「不采信过期的 L1」。
+v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
 ok("F8a 过期缓存 → source=stale", v.get("source") == "stale", str(v.get("source")))
 ok("F8b 过期缓存 → 三态置 None", v.get("locked") is None and v.get("sentry_mode") is None)
-gc._STATES_CACHE.update(at=time.monotonic(),
+gc._VEHICLE_CACHE.update(at=time.monotonic(),
                         data={"locked": True, "sentry_mode": True, "is_user_present": False},
                         err=None)
 v = gc._vehicle_snapshot()
-ok("F8c 新鲜缓存 → 正常解析", v.get("locked") is True and v.get("source") == "teslamate_states")
+ok("F8c 新鲜缓存 → 正常解析", v.get("locked") is True and v.get("source") == "teslamate_msg")
 
 # F9 补报必须在新鲜心跳之前（否则 B 的 last_body 停在最旧快照）（P2-1）
 REC.reset()
@@ -517,11 +519,11 @@ ok("F12e 下一拍拿到 locked=False 仍能触发解锁跃迁", len(ev12d) == 1
 
 # F13 vehicle stale 阈值必须跟随配置（不是写死 900s）
 cfg_long = fresh_cfg(endpoints={"ts": base, "https": ""}, states_interval_s=1800)
-gc._STATES_CACHE.update(at=time.monotonic() - 2000,
+gc._VEHICLE_CACHE.update(at=time.monotonic() - 2000,
                         data={"locked": True, "sentry_mode": True, "is_user_present": False},
                         err=None)
 v = gc._vehicle_snapshot(cfg_long)
-ok("F13a states_interval=1800 时 2000s 不算 stale", v.get("source") == "teslamate_states",
+ok("F13a states_interval=1800 时 2000s 不算 stale", v.get("source") == "teslamate_msg",
    str(v.get("source")))
 v = gc._vehicle_snapshot(fresh_cfg(endpoints={"ts": base, "https": ""}, states_interval_s=300))
 ok("F13b 300s 配置下 2000s 判 stale", v.get("source") == "stale", str(v.get("source")))

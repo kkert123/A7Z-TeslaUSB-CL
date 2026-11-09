@@ -20,8 +20,8 @@
 
 | 端点 | 说明 | 仓库是否在用 |
 |------|------|------------|
-| `GET /states` | **车辆实时状态**（196 字段，见 §3） | ❌ 未用（**低垂果实**） |
-| `GET /msg` | `raw_data`：`ui_current_address`、`location`(lat/lng)、`latitude`、`longitude` | ✅ `get_location()` |
+| `GET /states` | ⚠️ **服务配置状态**（`auto_del` / `buttons` / `schedule` / `mqtt_relay` / `share_config` …共 **20 键**），**与车辆无关** | ❌ 不用（名字骗人，见 §3 顶部警告） |
+| `GET /msg` | `raw_data`：**车辆实时状态，扁平 95 键**（`locked` / `sentry_mode` / `shift_state` / `speed` / `state` / `ui_park_time_str` …）+ 位置字段 | ✅ `get_location()`、`guard_client._vehicle_refresh()`（v0.3.1.81 起） |
 | `GET /api/dashboard` | `drives_list[0].desc`（"起点 → 终点"） | ✅ `get_last_trip_end()` |
 | `GET /logs?limit=N` / `/logs/download` | 运行日志 | ❌ |
 | `POST /wake-vehicle` | 唤醒车辆 | ❌ |
@@ -33,7 +33,16 @@
 
 完整端点清单见 `.workbuddy/artifacts/自检守护-可行性与设计评估.md` 附录 B。
 
-## 3. `GET /states` 关键字段
+## 3. `GET /msg` → `raw_data` 关键字段
+
+> **⚠️ 命名陷阱（M133，2026-11-09 实测）**：`/states` 返回的是**服务自身的配置状态**
+> （20 个键：`auto_del` / `buttons` / `cars` / `schedule` / `mqtt_relay` / `share_config`
+> / `teslamate_status` …），**没有任何车辆字段**。本文档早期版本把它写成「车辆实时状态
+> （196 字段）」，导致守护自检按 `data["locked"]` 解析时永远拿到 `None`，
+> 连带「出车/解锁自动握手」从未生效。
+>
+> 正确的车态在 **`/msg` 的 `raw_data`** 里，且是**扁平**结构 —— 没有 Tesla 官方
+> `vehicle_state` / `climate_state` 那一层。下表字段全部取自 `raw_data` 顶层。
 
 ### 3.1 车辆状态 / 判断类（自检守护最关心）
 
