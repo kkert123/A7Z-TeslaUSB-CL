@@ -113,6 +113,13 @@
       <div class="vc-status" id="ver-status" data-page-node-id="urFD67fkpTdzaTaBDqIRY2">—</div>
     </div>
 
+    <!-- 混合态告警：运行中的进程与软链指向的版本不一致（回退/升级后没重启）。
+         旧实现只在"当前版本"里显示运行中版本，用户看到"已是 v83"却怎么也回不到 v82。 -->
+    <div id="ver-mixed-bar" style="display:none;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;border-radius:8px;background:rgba(230,162,60,.14);color:#e6a23c;font-size:.72rem;line-height:1.5">
+      <span id="ver-mixed-text" style="flex:1"></span>
+      <button class="btn btn-sm btn-outline" onclick="serviceAction('restart')" style="white-space:nowrap">重启服务</button>
+    </div>
+
     <!-- 检查 / 升级 / 回退 三个按钮统一对齐 -->
     <div class="btn-row" style="margin-bottom:6px;flex-wrap:wrap;gap:8px" data-page-node-id="HllA0u5jfCxFgeDNvPP2go">
       <button class="btn btn-sm btn-primary" onclick="checkVersionNow()" data-page-node-id="GUSeF3H6G15GnokdcDHp7E">检查更新</button>
@@ -2135,6 +2142,18 @@ function checkVersionNow() {
       if (!d.success || d.error) { le.textContent = d.error || '失败'; se.textContent = '警告'; se.style.color = 'var(--warning)'; return; }
       le.textContent = d.latest ? 'v' + d.latest : '—';
       document.getElementById('ver-current-display').textContent = 'v' + d.current;
+      // 运行中版本 vs 磁盘版本：不一致 = 需要重启（否则"回退成功"但页面还是旧版本）
+      var bar = document.getElementById('ver-mixed-bar');
+      var mtxt = document.getElementById('ver-mixed-text');
+      if (bar && mtxt) {
+        if (d.mixed && d.running_version && d.disk_version) {
+          bar.style.display = 'flex';
+          mtxt.textContent = '运行中 v' + d.running_version + '，磁盘上是 v' + d.disk_version
+            + '（回退/升级后未重启）。点右侧重启服务才会真正切换。';
+        } else {
+          bar.style.display = 'none';
+        }
+      }
       document.getElementById('ver-summary').textContent = 'v' + d.current;
       document.getElementById('sys-version-display').textContent = 'v' + d.current;
       if (d.has_update) {

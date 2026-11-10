@@ -12,6 +12,7 @@ import re
 import hashlib
 import tarfile
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -24,6 +25,7 @@ SYMLINK = os.path.join(DEPLOY_BASE, "teslausb")
 BACKUP_DIR = os.path.join(DEPLOY_BASE, "teslausb-backups")  # 旧版目录级备份（v0.3.1.35 起废弃，仅迁移/兼容扫描）
 BAK_DIR = os.path.join(DEPLOY_BASE, "teslausb-bak")         # v0.3.1.35：运行版本压缩包备份（tar.gz + .sha256）
 BAK_KEEP = 5                                                 # teslausb-bak 保留压缩包数量（v0.3.1.74：10→5）
+MIN_BACKUP_BYTES = 200 * 1024                                    # 备份包体积下限（M139）
 VERSION_DIR_KEEP = 5                                         # 版本目录保留数量（v0.3.1.74）
 SHARED_DIR = os.path.join(DEPLOY_BASE, "shared")             # 跨版本共享目录（v0.3.1.74）
 SHARED_THUMBNAILS = os.path.join(SHARED_DIR, "thumbnails")   # 缩略图唯一存放位置
@@ -86,16 +88,115 @@ def get_current_version_dir():
 # 升级流程
 # ═══════════════════════════════════════════════════════════════
 
+class UserDataError(Exception):
+    """用户配置/数据搬迁失败。
+
+    调用方**必须中止升级**：此时软链还没切，中止是安全的；
+    继续下去就会拿"半份配置"跑新版本（2026-11-10 实证）。
+    """
+
+
+# 文件名像临时产物的不参与"完整性"判定（在线写入会不断产生/消失）
+_TMP_NAME_RE = re.compile(r'^\.|\.tmp(\.|$)|~$|\.swp$')
+
+
+def _warn(msg):
+    print("[upgrade] " + msg, flush=True)
+
+
+def _required_names(directory):
+    """取"必须存在"的文件相对路径集合（排除临时文件）。"""
+    out = set()
+    for root, _dirs, files in os.walk(directory):
+        rel = os.path.relpath(root, directory)
+        for f in files:
+            if _TMP_NAME_RE.search(f):
+                continue
+            out.add(f if rel == "." else os.path.join(rel, f))
+    return out
+
+
+def _assert_copied(src_dir, dst_dir, what):
+    """校验 dst 覆盖了 src 的全部"必须存在"文件。缺一个就抛错（不再静默）。"""
+    if not os.path.isdir(dst_dir):
+        raise UserDataError('%s 备份目录不存在' % what)
+    missing = sorted(_required_names(src_dir) - _required_names(dst_dir))
+    if missing:
+        raise UserDataError('%s 备份不完整，缺 %d 个文件（如 %s）'
+                            % (what, len(missing), ', '.join(missing[:3])))
+
+
+def _sqlite_ok(path):
+    try:
+        conn = sqlite3.connect(path, timeout=2)
+        try:
+            row = conn.execute('PRAGMA quick_check').fetchone()
+            return bool(row) and str(row[0]).lower() == 'ok'
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def _checkpoint_sqlite(directory):
+    """尽量把 WAL 落盘。失败不致命——复制时 -wal/-shm 会一起带走。
+
+    WAL 模式下 .db 与 -wal 是两个文件，在线复制顺序不定；能 checkpoint 就先并回去，
+    把"表只存在于 WAL 里"的概率降到最低（2026-11-10：delete_queue 表就是这样消失的）。
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith('.db'):
+            continue
+        try:
+            conn = sqlite3.connect(os.path.join(directory, name), timeout=2)
+            try:
+                conn.execute('PRAGMA wal_checkpoint(FULL)')
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _verify_sqlite_copies(src_dir, dst_dir):
+    """复制出来的每个 .db 做 quick_check；坏了就用 VACUUM INTO 从源库重出一致快照。
+
+    只校验"复制件"不够——复制件可能恰好缺表，所以坏了要重建；重建后仍坏才抛错。
+    """
+    for root, _dirs, files in os.walk(dst_dir):
+        for f in files:
+            if not f.endswith('.db'):
+                continue
+            dst = os.path.join(root, f)
+            if _sqlite_ok(dst):
+                continue
+            rel = os.path.relpath(dst, dst_dir)
+            src = os.path.join(src_dir, rel)
+            _warn('%s 的 SQLite 复制件校验未通过，改用 VACUUM INTO 重建' % rel)
+            try:
+                for p in (dst, dst + '-wal', dst + '-shm'):
+                    if os.path.exists(p):
+                        os.unlink(p)
+                conn = sqlite3.connect(src, timeout=3)
+                try:
+                    conn.execute('VACUUM INTO ?', (dst,))
+                finally:
+                    conn.close()
+            except Exception as exc:
+                raise UserDataError('%s 的数据一致性快照失败：%s' % (rel, exc))
+            if not _sqlite_ok(dst):
+                raise UserDataError('%s 的数据复制后仍不完整（SQLite 校验未通过）' % rel)
+
+
 def _save_user_data(base_dir):
-    """保存 config/、data/ 和 static/thumbnails/ 目录（升级时保留用户配置和缩略图）
+    """保存 config/、data/、static/thumbnails/ 到临时目录，供升级后恢复。
 
-    永久保护：config/、data/、static/thumbnails/ 始终会被保存/恢复。
-
-    v0.3.1.74：
-      · 返回 4 元组 (tmpd, cfg, data, thumbs)，调用方**必须在 finally 里**
-        shutil.rmtree(tmpd)，否则每次升级泄漏一整份备份（曾泄漏 3 份 / 5.5G）；
-      · 若 static/thumbnails 已是指向共享目录的 symlink，只复制**链接本身**，
-        不再 copytree 上万个文件（升级耗时与磁盘占用双双下降）。
+    v0.3.1.84（M139）：失败**必须抛 UserDataError**，不再 `except: pass`。
+    旧实现吞掉异常后会留下半份备份，恢复时把完整配置覆盖成半份，且全程零报错——
+    现场表现就是"升级后企微 key 全空、守护线程起不来、sqlite 丢表"。
     """
     tmpd = tempfile.mkdtemp(prefix=KEEP_TMP_PREFIX)
     saved_cfg = None
@@ -108,20 +209,26 @@ def _save_user_data(base_dir):
         if os.path.isdir(old_cfg):
             saved_cfg = os.path.join(tmpd, 'config')
             shutil.copytree(old_cfg, saved_cfg, symlinks=True)
+            _assert_copied(old_cfg, saved_cfg, 'config')
         if os.path.isdir(old_data):
+            _checkpoint_sqlite(old_data)
             saved_data = os.path.join(tmpd, 'data')
             shutil.copytree(old_data, saved_data, symlinks=True)
-        # 关键：缩略图保存是"路径驱动"的，不依赖调用者是否解包第四元素
+            _assert_copied(old_data, saved_data, 'data')
+            _verify_sqlite_copies(old_data, saved_data)
         saved_thumbs = os.path.join(tmpd, 'thumbnails')
         if os.path.islink(old_thumbs):
-            # 已共享 → 只复制链接（瞬时），_restore_user_data 会按链接重建
+            # 已共享 → 只复制链接本身（不要 copytree 上万张图）
             os.symlink(os.readlink(old_thumbs), saved_thumbs)
         elif os.path.isdir(old_thumbs):
             shutil.copytree(old_thumbs, saved_thumbs, symlinks=True)
         else:
             saved_thumbs = None
-    except Exception:
-        pass
+    except Exception as exc:
+        shutil.rmtree(tmpd, ignore_errors=True)
+        if isinstance(exc, UserDataError):
+            raise
+        raise UserDataError(str(exc))
     return tmpd, saved_cfg, saved_data, saved_thumbs
 
 
@@ -133,18 +240,53 @@ def _release_keep_tmp(ctx):
         ctx["keep_tmpd"] = None
 
 
+def _prune_old_dirs(parent, tag, keep=1):
+    """只保留最新的 keep 个 `<tag>.old-*`（data.old 可能很大）。"""
+    try:
+        cands = sorted([d for d in os.listdir(parent) if d.startswith(tag + '.old-')],
+                       reverse=True)
+    except OSError:
+        return
+    for d in cands[keep:]:
+        shutil.rmtree(os.path.join(parent, d), ignore_errors=True)
+
+
+def _copy_dir_atomic(src_dir, dest_dir, tag):
+    """把 src 复制到 dest：先拷到 `<tag>.new-<ts>`，再 rename 顶上；旧目录改名保留。
+
+    绝不用 `rmtree(dest) + copytree`：那个窗口里目录**不存在**，任何读请求都会拿到
+    "配置丢失"（2026-11-10：页面显示登录信息全空、守护线程起不来、迁移中断留半份）。
+    rename 在同一目录内是原子的：读侧要么看到旧的、要么看到新的，没有空窗。
+    """
+    parent = os.path.dirname(dest_dir) or '.'
+    stamp = time.strftime('%Y%m%d%H%M%S')
+    tmp = os.path.join(parent, '%s.new-%s' % (tag, stamp))
+    old = os.path.join(parent, '%s.old-%s' % (tag, stamp))
+    if os.path.exists(tmp):
+        shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        shutil.copytree(src_dir, tmp, symlinks=True)
+        _assert_copied(src_dir, tmp, tag)
+        if os.path.exists(dest_dir):
+            os.rename(dest_dir, old)
+        os.rename(tmp, dest_dir)
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    _prune_old_dirs(parent, tag, keep=1)
+    return old if os.path.exists(old) else ''
+
+
 def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
-    """恢复之前保存的 config/、data/ 和 static/thumbnails/ 目录"""
-    if saved_cfg and os.path.isdir(saved_cfg):
-        dest = os.path.join(target_dir, 'config')
-        if os.path.exists(dest):
-            shutil.rmtree(dest)
-        shutil.copytree(saved_cfg, dest, symlinks=True)
-    if saved_data and os.path.isdir(saved_data):
-        dest = os.path.join(target_dir, 'data')
-        if os.path.exists(dest):
-            shutil.rmtree(dest)
-        shutil.copytree(saved_data, dest, symlinks=True)
+    """恢复 config/、data/、static/thumbnails（原子替换 + 完整性校验）。"""
+    if saved_cfg:
+        if not os.path.isdir(saved_cfg):
+            raise UserDataError('配置备份不可用（目录不存在）')
+        _copy_dir_atomic(saved_cfg, os.path.join(target_dir, 'config'), 'config')
+    if saved_data:
+        if not os.path.isdir(saved_data):
+            raise UserDataError('数据备份不可用（目录不存在）')
+        _copy_dir_atomic(saved_data, os.path.join(target_dir, 'data'), 'data')
     dest_thumbs = os.path.join(target_dir, 'static', 'thumbnails')
     if saved_thumbs and os.path.islink(saved_thumbs):
         # 共享目录模式：恢复成同样的 symlink（不要 copytree，否则又把 1.8G 复制一遍）
@@ -271,14 +413,21 @@ def _do_upgrade_impl(ctx, new_version, asset_url, sha256_expected=None, sig_url=
     steps.append("备份当前版本...")
     ok, msg = _backup_current()
     if not ok:
-        steps[-1] = f"备份警告: {msg}（继续升级）"
-    else:
-        steps[-1] = f"已备份到 {msg}"
+        # 没有备份就没有退路：宁可这次不升（2026-11-10 那次回退救不回来就是这个原因）
+        _clear_progress()
+        _cleanup(tarball, sig_file)
+        return False, f"升级前备份失败，已中止（未改动任何文件）：{msg}"
+    steps[-1] = f"已备份到 {msg}"
 
     # ── 5. 保存旧版本数据（升级后恢复，避免 config/wecom.json 等丢失）──
     _write_progress("保存配置", 66)
     steps.append("保存配置...")
-    keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    try:
+        keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    except UserDataError as exc:
+        _clear_progress()
+        _cleanup(tarball, sig_file)
+        return False, f"已中止升级（未改动任何文件）：{exc}"
     ctx["keep_tmpd"] = keep_tmpd   # finally 里统一删除（v0.3.1.74）
 
     # ── 6. 解压并安装 ──
@@ -331,17 +480,23 @@ def _do_upgrade_impl(ctx, new_version, asset_url, sha256_expected=None, sig_url=
     steps[-1] = "安装完成"
     _write_progress("安装完成", 90)
 
-    # ── 恢复旧版本配置 ──
-    _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
+    # ── 恢复旧版本配置（原子替换；失败必须中止，绝不能切软链）──
+    try:
+        _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
+    except UserDataError as exc:
+        _clear_progress()
+        _cleanup(tarball, sig_file)
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return False, f"已中止升级（软链未切换，当前版本不受影响）：{exc}"
 
     # ── 6. 切换 symlink ──
     _write_progress("切换版本", 94)
     steps.append("切换版本...")
-    if os.path.islink(SYMLINK):
-        os.unlink(SYMLINK)
-    elif os.path.isdir(SYMLINK):
-        shutil.rmtree(SYMLINK)
-    os.symlink(new_dir, SYMLINK)
+    try:
+        _switch_symlink(new_dir)
+    except UserDataError as exc:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return False, str(exc)
 
     # ── 7. 记录版本 ──
     _record_version(new_version, sha256_expected, "upgrade")
@@ -412,10 +567,17 @@ def _do_upgrade_from_tarball_impl(ctx, tarball_path, new_version):
     # 备份
     steps.append("备份当前版本...")
     ok, msg = _backup_current()
-    steps[-1] = f"已备份到 {msg}" if ok else f"备份警告: {msg}（继续升级）"
+    if not ok:
+        return False, f"升级前备份失败，已中止（未改动任何文件）：{msg}"
+    steps[-1] = f"已备份到 {msg}"
 
     # 保存旧版本 config/data
-    keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    try:
+        keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+    except UserDataError as exc:
+        _clear_progress()
+        _cleanup(tarball, sig_file)
+        return False, f"已中止升级（未改动任何文件）：{exc}"
     ctx["keep_tmpd"] = keep_tmpd   # finally 里统一删除（v0.3.1.74）
 
     # 解压安装（内联，不调用 _extract_and_setup——运行中进程可能用旧版）
@@ -456,15 +618,19 @@ def _do_upgrade_from_tarball_impl(ctx, tarball_path, new_version):
             steps.append(f"pip 警告(不影响): {_e[:120] if _e else '?'}")
     steps[-1] = "安装完成"
 
-    # 恢复用户数据
-    _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
+    # 恢复用户数据（原子替换；失败必须中止）
+    try:
+        _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
+    except UserDataError as exc:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return False, f"已中止升级（软链未切换，当前版本不受影响）：{exc}"
 
     # 切 symlink
-    if os.path.islink(SYMLINK):
-        os.unlink(SYMLINK)
-    elif os.path.isdir(SYMLINK):
-        shutil.rmtree(SYMLINK)
-    os.symlink(new_dir, SYMLINK)
+    try:
+        _switch_symlink(new_dir)
+    except UserDataError as exc:
+        shutil.rmtree(new_dir, ignore_errors=True)
+        return False, str(exc)
 
     _record_version(new_version, "", "manual-upload")
     _prune_bak()
@@ -546,10 +712,15 @@ def do_rollback(version=None):
         current = get_current_version_dir()
         if current and os.path.realpath(target_dir) == os.path.realpath(current):
             return False, f"当前已是 v{version}，无需回退"
-        # 完整性校验（防回退到解压中断残留的损坏目录 → 服务起不来）
+        # 完整性校验（防回退到"解压中断残留 / 配置被搬走"的目录 → 服务起不来或配置全丢）
         missing = [f for f in ("app.py", "config.py", "requirements.txt") if not os.path.exists(os.path.join(target_dir, f))]
         if missing:
             return False, f"目标版本 v{version} 目录不完整（缺少 {', '.join(missing)}），拒绝回退"
+        # v0.3.1.84（M139）：配置必须有内容。回退到"空 config"的目录，等于把企微 key、
+        # 守护 token、登录保护全部清空 —— 比不回退更糟（2026-11-10 现场就是这个形态）。
+        cfg_dir = os.path.join(target_dir, "config")
+        if not os.path.isdir(cfg_dir) or not _required_names(cfg_dir):
+            return False, f"目标版本 v{version} 的 config/ 为空，拒绝回退（会让企微/守护/登录配置全丢）"
         record_sha = ""
     else:
         # ── 旧逻辑：回退到上一版本 ──
@@ -564,16 +735,17 @@ def do_rollback(version=None):
         target_dir = res
         record_sha = prev.get("sha256", "")
 
-    # 切 symlink
-    if os.path.islink(SYMLINK):
-        os.unlink(SYMLINK)
-    elif os.path.isdir(SYMLINK):
-        shutil.rmtree(SYMLINK)
-    os.symlink(target_dir, SYMLINK)
+    # 切 symlink（真实目录布局直接拒绝，别把整个部署删了）
+    try:
+        _switch_symlink(target_dir)
+    except UserDataError as exc:
+        return False, str(exc)
 
     _record_version(version, record_sha, "rollback")
 
-    return True, f"已回退到 v{version}（重启后生效）"
+    # 路由层会立刻重启 web 服务：只切软链不重启 = 运行中进程仍是旧版本，
+    # 页面显示"当前 v83"、再点回退却说"已是 v82"（2026-11-10 实证 M138/M139）
+    return True, f"已回退到 v{version}，正在重启服务…"
 
 
 def get_rollback_options():
@@ -1327,15 +1499,55 @@ def startup_self_heal():
 
 
 def _backup_current():
-    """备份当前运行版本（v0.3.1.35：打包压缩包存 teslausb-bak，替代 copytree 全量目录）"""
+    """备份当前运行版本到 teslausb-bak/。**升级前必须成功，否则不升级。**
+
+    v0.3.1.84（M139）加三道校验——旧实现是"尽力而为"，失败只 warning 就继续升：
+      ① base 必须是**真实版本目录**：目标缺失时 `get_current_version_dir()` 会拿到软链
+         路径本身，包名变成 `teslausb-vteslausb.tar.gz`、内容近乎空（2026-11-10：8994 B）；
+      ② 包内必须含 `app.py` 与 `config/`——否则"备份成功"也回不到能跑的版本；
+      ③ 体积下限 `MIN_BACKUP_BYTES`。
+    """
     current = get_current_version_dir()
     if not current or not os.path.isdir(current):
         return False, "当前部署目录不存在"
-    version = os.path.basename(current).replace("teslausb-v", "")
-    ok, msg = _pack_version_dir(current, version)
-    if ok:
-        return True, f"teslausb-bak/{os.path.basename(msg)}"
-    return False, msg
+    real = os.path.realpath(current)
+    m = _VERSION_DIR_RE.match(os.path.basename(real))
+    if not m:
+        return False, f"部署目录不是版本目录（{real}），拒绝备份"
+    version = "%s.%s.%s" % (m.group(1), m.group(2), m.group(3))
+    if m.group(4):
+        version += "." + m.group(4)
+    ok, msg = _pack_version_dir(real, version)
+    if not ok:
+        return False, msg
+    try:
+        size = os.path.getsize(msg)
+        if size < MIN_BACKUP_BYTES:
+            return False, f"备份包过小（{size} B < {MIN_BACKUP_BYTES}），疑似打包不完整"
+        with tarfile.open(msg, "r:*") as tf:
+            names = tf.getnames()
+        has_app = any(n == "app.py" or n.endswith("/app.py") for n in names)
+        has_cfg = any(n.startswith("config/") for n in names)
+        if not has_app or not has_cfg:
+            return False, "备份包内容不完整（app.py=%s, config=%s）" % (has_app, has_cfg)
+    except Exception as exc:
+        return False, f"备份包校验失败: {exc}"
+    return True, f"teslausb-bak/{os.path.basename(msg)}"
+
+
+def _switch_symlink(target_dir):
+    """把部署根软链切到 target_dir。**拒绝**在"真实目录"布局上自动切换。
+
+    旧代码对真实目录执行 `shutil.rmtree(SYMLINK)` —— 那会把整个部署（含 config/data）
+    直接删掉再建软链（2026-11-10 实证：`/opt/radxa_data/teslausb` 一度是真目录，
+    一次升级把它删了，配置靠"备份-恢复"侥幸拼回来，sqlite 丢了表）。
+    """
+    if os.path.islink(SYMLINK):
+        os.unlink(SYMLINK)
+    elif os.path.isdir(SYMLINK):
+        raise UserDataError(
+            "部署根 %s 是真实目录（旧扁平布局），拒绝自动切换；请先手工迁移成软链" % SYMLINK)
+    os.symlink(target_dir, SYMLINK)
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -1,4 +1,4 @@
-import os, json, time, subprocess, threading, random
+import os, json, re, time, subprocess, threading, random
 from datetime import datetime
 from flask import Blueprint, render_template, request, jsonify, Response, send_file, send_from_directory, redirect, url_for
 from app_state import state
@@ -830,13 +830,39 @@ def api_system_info():
 
 # ── 版本管理 API ──────────────────────────────────────────────
 
+def _disk_version():
+    """软链指向的版本号（= 磁盘上"应该跑"的版本）。读不到返回 ''。"""
+    try:
+        import upgrade_service
+        d = upgrade_service.get_current_version_dir()
+        if not d:
+            return ''
+        base = os.path.basename(os.path.realpath(d))
+        m = re.match(r'^teslausb-v(\d+\.\d+\.\d+(?:\.\d+)?)$', base)
+        return m.group(1) if m else ''
+    except Exception:
+        return ''
+
+
 @system_bp.route('/api/version/check')
 def api_version_check():
-    """查询当前版本与 GitHub 最新 release"""
+    """查询当前版本与 GitHub 最新 release
+
+    v0.3.1.84：额外返回 running_version / disk_version / mixed。
+    「回退只切软链、不重启」时，运行中的进程还是旧版本，而页面拿的是**运行中**的版本号
+    → 显示"当前 v83"、再点回退却说"已是 v82"，自相矛盾且无法自愈（2026-11-10 实证）。
+    把两个版本都摆出来，前端才能提示"需要重启服务"。
+    """
     try:
         import version_service
         result = version_service.check_latest_release()
-        return jsonify({'success': True, **result})
+        running = str(result.get('current') or getattr(config, 'APP_VERSION', '') or '')
+        disk = _disk_version()
+        out = {'success': True, **result,
+               'running_version': running,
+               'disk_version': disk,
+               'mixed': bool(running and disk and running != disk)}
+        return jsonify(out)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1087,7 +1113,14 @@ def api_version_rollback():
         version = (data.get('version') or '').strip() or None
         ok, msg = upgrade_service.do_rollback(version)
         if ok:
-            return jsonify({'success': True, 'message': msg})
+            # 切完软链必须重启：前端确认框早就承诺"并重启服务"，后端却只切链接，
+            # 于是运行中进程仍是旧版本，页面与磁盘两个版本号互相打架（M138/M139）
+            try:
+                _schedule_restart()
+                msg = msg if '重启' in msg else (msg + '，正在重启服务…')
+            except Exception as exc:
+                msg = msg + f'（自动重启失败：{exc}）请手动重启服务'
+            return jsonify({'success': True, 'message': msg, 'restarting': True})
         return jsonify({'success': False, 'error': msg}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

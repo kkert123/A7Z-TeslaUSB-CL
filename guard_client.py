@@ -32,6 +32,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 import config as app_config
@@ -974,6 +975,7 @@ def _vehicle_snapshot(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "park_time": None,
         "shift_state": None,
         "speed": None,
+        "battery": None,          # 电量%（v0.3.1.84：模板里带一行，便于看停车后掉电）
         "age_s": round(age) if age is not None else None,
         "source": "unavailable",
         "detect": "none",        # 锁车态来自哪一层：teslamate / clips / sei / none
@@ -1000,6 +1002,12 @@ def _vehicle_snapshot(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             out["speed"] = float(sp) if sp is not None and str(sp).strip() else None
         except (TypeError, ValueError):
             out["speed"] = None
+        # 电量（v0.3.1.84）：停车自检里带一行，方便看"停车后有没有异常掉电"
+        bp = data.get("battery_level")
+        try:
+            out["battery"] = int(float(bp)) if bp is not None and str(bp).strip() else None
+        except (TypeError, ValueError):
+            out["battery"] = None
         if out["locked"] is not None:
             out["detect"] = "teslamate"
         # TeslaMate 的 locked 会陈旧/漂移：实测「车已锁定 + 哨兵开启」时它返回
@@ -1181,6 +1189,22 @@ def _queue_push(body: Dict[str, Any], limit: int) -> int:
 
 _REPORT_RANK = {"pass": 0, "warn": 1, "fail": 2}
 _TIER_CN = {"pass": "正常", "warn": "注意", "fail": "异常"}
+
+
+def _disp_width(text: str) -> int:
+    """按显示列数算宽度（中文=2，ASCII=1）——企微里对齐全靠这个。"""
+    n = 0
+    for ch in str(text or ""):
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
+def _pad(text: str, width: int = 8) -> str:
+    """右侧补空格到固定显示宽度（对齐「网络/USB链路/缩略图」这种不等长标签）。
+
+    至少留 1 个空格：`企微推送` 本身就占满 8 列，否则会和状态字粘成「企微推送正常」。
+    """
+    return str(text or "") + " " * max(1, width - _disp_width(text))
 _ITEM_CN = {"net": "网络", "gadget": "USB链路", "thumb": "缩略图", "wechat": "企微推送"}
 _B_KIND_CN = {
     "timeout": "连接超时",
@@ -1750,7 +1774,8 @@ class GuardSender:
         return "v%s → %s" % (app_config.APP_VERSION, host or "未配置")
 
     def _fmt_evidence(self, key: str, net: Dict[str, Any], gad: Dict[str, Any],
-                      th: Dict[str, Any], wc: Dict[str, Any]) -> str:
+                      th: Dict[str, Any], wc: Dict[str, Any],
+                      tier: str = "") -> str:
         """每项后面附一句「凭什么这么判」，否则报告只能说『异常』没法排查。"""
         try:
             if key == "net":
@@ -1786,6 +1811,10 @@ class GuardSender:
                 age = wc.get("last_ok_age_s")
                 if isinstance(age, (int, float)):
                     bits = ["最近成功%d小时前" % int(age // 3600)]
+                elif tier == "pass":
+                    # 判 pass 却没有成功记录 = 只是"没有待发消息"，不是异常。
+                    # 直接写"最近无成功记录"会让人以为通道坏了（自相矛盾）。
+                    bits = ["无待发消息"]
                 else:
                     bits = ["最近无成功记录"]
                 if wc.get("consecutive_fail"):
@@ -1839,6 +1868,66 @@ class GuardSender:
             "僚机：%s" % b_line,
         ])
 
+    # ── 停车自检模板（v0.3.1.84，样式 2：结论置顶 + 异常置顶 + 分项对齐）──
+    _ITEM_ORDER = ("net", "gadget", "thumb", "wechat")
+    _ADVICE = {
+        "net": "WiFi/热点与 Tailscale 是否可用",
+        "gadget": "USB 线是否在位、车机口是否有电",
+        "thumb": "预览积压可在设置页手动清理",
+        "wechat": "企微机器人 key 是否还有效",
+    }
+
+    def _vehicle_line(self, v: Dict[str, Any]) -> str:
+        bits = []
+        sh = str(v.get("shift_state") or "").strip()
+        if sh:
+            bits.append("%s 档" % sh)
+        pt = str(v.get("park_time") or "").strip()
+        if pt:
+            # 00:24:42 → 00:24：秒对"停了多久"没有信息量
+            parts = pt.split(":")
+            if len(parts) == 3:
+                pt = "%s:%s" % (parts[0], parts[1])
+            bits.append("停车 %s" % pt)
+        bat = v.get("battery")
+        if isinstance(bat, int):
+            bits.append("电量 %d%%" % bat)
+        return "%s%s" % (_pad("车辆"), " · ".join(bits) or "—")
+
+    def _fmt_items_aligned(self, snap: Dict[str, Any]) -> List[str]:
+        """分项：全绿时逐行列出；有异常时**异常项置顶**、正常项压成一行。
+
+        只报「注意/异常」是不够的——用户还要知道"凭什么这么判"，所以每行都带证据
+        （`_fmt_evidence`），异常行前置 ⚠。
+        """
+        sc = snap.get("selfcheck") or {}
+        items = sc.get("items") or {}
+        net = snap.get("net") or {}
+        gad = snap.get("gadget") or {}
+        th = snap.get("thumb") or {}
+        wc = snap.get("wechat") or {}
+        bad, good = [], []
+        for k in self._ITEM_ORDER:
+            st = str(items.get(k, "unknown"))
+            line = "%s%s%s" % (_pad(_ITEM_CN.get(k, k)), _TIER_CN.get(st, st),
+                               self._fmt_evidence(k, net, gad, th, wc, tier=st))
+            if st == "pass":
+                good.append((k, line))
+            else:
+                bad.append((k, line))
+        out = ["⚠ " + ln for _k, ln in bad]
+        if bad and good:
+            out.append("%s%s 正常" % (_pad("其余"), " · ".join(_ITEM_CN[k] for k, _l in good)))
+        elif good:
+            out.extend(ln for _k, ln in good)
+        return out
+
+    def _advice_line(self, snap: Dict[str, Any]) -> str:
+        items = (snap.get("selfcheck") or {}).get("items") or {}
+        tips = [self._ADVICE[k] for k in self._ITEM_ORDER
+                if items.get(k) not in (None, "pass")]
+        return ("建议：" + "；".join(tips[:2])) if tips else ""
+
     def _fmt_locked(self, snap: Dict[str, Any], restarted: bool = False) -> str:
         sc = snap.get("selfcheck") or {}
         result = str(sc.get("result") or "unknown")
@@ -1855,13 +1944,19 @@ class GuardSender:
         if restarted:
             bits.append("重启后补报")
         suffix = ("（%s）" % "·".join(bits)) if bits else ""
+        icon = {"pass": "✅", "warn": "⚠️", "fail": "❗"}.get(result, "•")
         tier = _TIER_CN.get(result, "未知")
-        if v.get("locked") is True:
-            head = "【停车自检】车辆已锁车%s · %s" % (suffix, tier)
-        else:
-            # 当前不可达（调用方已保证 locked is True）；保留给将来 L2 停车判定启用时
-            head = "【停车自检】车辆已停止（锁车状态未知）%s · %s" % (suffix, tier)
-        return "\n".join([head, self._device_line(), self._fmt_items(snap)])
+        head = "【停车自检】%s %s · %s%s" % (
+            icon, tier,
+            "车辆已锁" if v.get("locked") is True else "车辆已停止（锁车状态未知）",
+            suffix)
+        lines = [head, self._vehicle_line(v)]
+        lines.extend(self._fmt_items_aligned(snap))
+        advice = self._advice_line(snap)
+        if advice:
+            lines.append(advice)
+        lines.append("%s · %s" % (self._device_line(), time.strftime("%H:%M")))
+        return "\n".join(lines)
 
     def _fmt_b_down(self, kind: str) -> str:
         if kind == "auth":
