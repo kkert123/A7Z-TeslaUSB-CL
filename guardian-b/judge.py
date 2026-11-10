@@ -19,6 +19,7 @@ guardian-b · 判死 / 告警状态机
 
 import logging
 import time
+import unicodedata
 
 logger = logging.getLogger("guard-b.judge")
 
@@ -29,6 +30,75 @@ FAULT_TITLE = {
     FAULT_TS: "Tailscale 通道故障",
     FAULT_DEV: "设备失联",
 }
+
+
+# 企微手机端一行约 26~28 显示列就开始强行折行，留余量取 22。
+# 折出来的碎行（「已锁」/「哨兵开」各占一行）比少说一句难看得多（2026-11-10 现场）。
+LINE_MAX = 22
+
+
+def _disp_width(text) -> int:
+    """按显示列数算宽度（中文=2，ASCII=1）。"""
+    n = 0
+    for ch in str(text or ""):
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
+def _clip(text, width: int) -> str:
+    s = str(text or "")
+    if _disp_width(s) <= width:
+        return s
+    out = ""
+    for ch in s:
+        if _disp_width(out + ch) > width - 1:
+            break
+        out += ch
+    return out + "…"
+
+
+def _fit(text, limit: int = LINE_MAX) -> str:
+    """压进 `limit` 列：先按 ` · ` 丢尾部片段，再不行就截断。
+
+    模板是拼出来的，而版本号、时长、车态都是变量——宽度必须由渲染末端兜住。
+    """
+    s = str(text or "")
+    if _disp_width(s) <= limit:
+        return s
+    parts = s.split(" · ")
+    while len(parts) > 1 and _disp_width(" · ".join(parts)) > limit:
+        parts.pop()
+    s = " · ".join(parts)
+    return s if _disp_width(s) <= limit else _clip(s, limit)
+
+
+def _wrap(text, limit: int = LINE_MAX) -> list:
+    """按 ` · ` 分组**装箱成多行**（每行 ≤ limit）。
+
+    与 `_fit` 的区别很关键：`_fit` 会丢尾段，`_wrap` 只换行。
+    车态这种「在开 43km/h · 已锁 · 哨兵开」的串里每一段都是判据（M135：车在开却已锁
+    = 值得警觉的矛盾态），裁掉任何一段都会让告警失去意义。宁可多占一行。
+    """
+    out, cur = [], ""
+    for seg in str(text or "").split(" · "):
+        if not seg:
+            continue
+        cand = (cur + " · " + seg) if cur else seg
+        if cur and _disp_width(cand) > limit:
+            out.append(cur)
+            cur = seg
+        else:
+            cur = cand
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
+def _hhmm(ts) -> str:
+    try:
+        return time.strftime("%H:%M", time.localtime(float(ts)))
+    except (TypeError, ValueError, OSError):
+        return "--:--"
 
 
 def _human_age(sec) -> str:
@@ -325,6 +395,11 @@ class Judge:
         logger.warning("锁车代发已发送（设备失联中）mode=%s", mode)
 
     def _fmt_lock_relay(self, now: float) -> str:
+        """锁车代发。窄排版：每行 ≤ LINE_MAX，手机上不被强行折行。
+
+        旧版最长一行 33 列（`【停车自检·僚机代发】车辆已锁车 · 设备失联`）+ 一段
+        22 列的解释句，在企微手机端被折成 9 行碎块（2026-11-10 现场）。
+        """
         b = self.store.data.get("board") or {}
         ls = self.store.data.get("last_seen") or {}
         body = self.store.data.get("last_body") or {}
@@ -334,17 +409,21 @@ class Judge:
             car.append("已锁")
         if b.get("sentry") is True:
             car.append("哨兵开")
-        if b.get("state"):
-            car.append("车辆状态 %s" % b["state"])
-        return "\n".join([
-            "【停车自检·僚机代发】车辆已锁车 · 设备失联",
-            "· 车态（TeslaMate）：%s" % (" · ".join(car) or "未知"),
-            "· A7Z：最后心跳 %s（%s）" % (_human_age(min(ages)) if ages else "从未收到",
-                                         str(body.get("version") or "未知")),
-            "",
-            "本条由 B 端代发：设备此刻没有心跳，它自己的停车自检（USB/网络/存储）生成不了。",
-            "建议：确认设备指示灯，以及它当时连的热点（车载 MIFI / 家宽）是否可用。",
-        ])
+        st = str(b.get("state") or "").strip().lower()
+        if st:
+            car.append({"online": "车辆在线", "asleep": "车辆休眠",
+                        "offline": "车辆离线"}.get(st, st))
+        lines = [
+            "【停车自检·僚机代发】",
+            _fit(" · ".join(car) or "车态未知"),
+            _fit("A7Z 心跳 " + (_human_age(min(ages)) if ages else "从未收到")),
+            "A 无心跳，自检发不出",
+            "建议：查设备灯与热点",
+            # 不印 B 的版本号：取它要 `import app`，会在模块级触发建目录/起线程；
+            # 而且用户看不出「1.1.x」的差异，排查时去 /guard/status 更准
+            "僚机 · %s" % _hhmm(now),
+        ]
+        return "\n".join(x for x in lines if x)
 
     # ── 告警 / 恢复 内部 ────────────────────────────────────
     def _raise(self, fault: str, now: float, age_ts: float, age_https: float) -> dict:
@@ -400,11 +479,13 @@ class Judge:
         ls = self.store.data.get("last_seen") or {}
         ts_seen = float(ls.get("ts") or 0) > 0
         https_seen = float(ls.get("https") or 0) > 0
+        # 恢复消息也走窄排版：`【A7Z 自检·恢复】Tailscale 通道故障` 有 26 列，必折
+        short = {FAULT_TS: "TS 通道", FAULT_DEV: "设备失联"}.get(fault, fault)
         msg = "\n".join([
-            "【A7Z 自检·恢复】%s" % FAULT_TITLE.get(fault, fault),
-            "· Tailscale：%s" % (_human_age(age_ts) if ts_seen else "未启用"),
-            "· HTTPS：%s" % (_human_age(age_https) if https_seen else "未启用"),
-            "心跳已恢复正常，无需处理。",
+            "【A7Z 恢复】%s" % short,
+            _fit("TS " + (_human_age(age_ts) if ts_seen else "未启用")),
+            _fit("HTTPS " + (_human_age(age_https) if https_seen else "未启用")),
+            "心跳正常，无需处理",
         ])
         mode = self.alerter.send_text(msg)
         rec["active"] = False
@@ -422,12 +503,11 @@ class Judge:
 
         if fault == FAULT_TS:
             return "\n".join([
-                "【A7Z 自检】Tailscale 通道故障（设备本体在线）",
-                "· Tailscale：%s ← 这条断了" % _human_age(age_ts),
-                "· HTTPS：%s ← 仍在收心跳" % (_human_age(age_https) if https_seen else "未启用"),
-                "",
-                "结论：设备活着，只是走 Tailscale 的那条路不通。",
-                "建议检查：tailnet 状态 / A7Z 的 Tailscale key 是否过期",
+                "【A7Z】Tailscale 通道故障",
+                "设备本体在线",
+                "TS %s ← 这条断了" % _human_age(age_ts),
+                "HTTPS %s ← 还在收心跳" % (_human_age(age_https) if https_seen else "未启用"),
+                "建议：查 tailnet 或 key 过期",
             ])
 
         ages = []
@@ -438,20 +518,17 @@ class Judge:
         v = body.get("vehicle") if isinstance(body.get("vehicle"), dict) else {}
         was_driving = str(v.get("state") or "").strip().lower() == "driving"
         lines = [
-            "【A7Z 自检】设备失联",
-            "最后心跳：%s（%s）" % (_human_age(min(ages)) if ages else "从未收到", ver),
-            "· Tailscale：%s" % (_human_age(age_ts) if ts_seen else "未启用"),
-            "· HTTPS：%s" % (_human_age(age_https) if https_seen else "未启用"),
-            "· 最后车态：%s" % _vehicle_line(v),
-            "",
-            "可能原因：断电 / 系统崩溃 / 网络中断（云端无法区分）",
-            # 行驶中失联 ≠ 停车后失联：前者最常见的是「离开家宽/车载热点后没网」，
-            # 让用户去「确认车还停着」等于答非所问（2026-11-09 现场就是这种）。
-            ("建议：车最后一次上报是在行驶中。若车已停妥，先看设备指示灯，"
-             "再确认它当时连的热点（车载 MIFI / 家宽）是否可用"
-             if was_driving else
-             "建议：确认车还停着，再检查设备电源与网络指示灯"),
+            "【A7Z】设备失联",
+            _fit("最后心跳 " + (_human_age(min(ages)) if ages else "从未收到")),
         ]
+        # 车态可能有多段（在开 43km/h · 已锁 · D 档 · 哨兵开）：分段换成多行，一段都不丢
+        vl = _wrap(_vehicle_line(v), LINE_MAX - 5)
+        lines.append(_fit("车态 " + vl[0]))
+        lines.extend(_fit(x) for x in vl[1:])
+        lines.append(_fit("版本 %s" % ver))
+        # 行驶中失联 ≠ 停车后失联：前者最常见的是「离开家宽/车载热点后没网」，
+        # 让用户去「确认车还停着」等于答非所问（2026-11-09 现场就是这种）。
+        lines.append("建议：查设备灯与热点" if was_driving else "建议：查电源与指示灯")
         return "\n".join(lines)
 
     # ── 状态页用 ────────────────────────────────────────────

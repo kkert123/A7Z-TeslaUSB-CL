@@ -1506,7 +1506,7 @@ def api_guard_status():
 GUARD_EDITABLE = {
     'enabled', 'token', 'endpoints', 'ca_path',
     'interval_s', 'ts_timeout_s', 'https_timeout_s', 'probe_every_s',
-    'states_interval_s', 'queue_max', 'offline_default_s',
+    'states_interval_s', 'states_fast_s', 'queue_max', 'offline_default_s',
     'report_transition', 'report_daily_at', 'report_cooldown_s',
     'report_on_lock', 'lock_report_min_gap_s', 'lock_detect_fallback',
     'ping_fail_threshold',
@@ -1529,6 +1529,7 @@ def api_guard_config():
                 'interval_s': [15, 60],
                 'probe_every_s': [60, 150],
                 'states_interval_s': [120, 1800],
+                'states_fast_s': [20, 300],
                 'queue_max': [1, 1000],
                 'offline_default_s': [60, 21600],
                 'report_cooldown_s': [300, 7200],

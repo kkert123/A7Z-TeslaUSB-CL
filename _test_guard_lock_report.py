@@ -203,7 +203,7 @@ def main():
         ok("C2 未锁→已锁 触发", s._maybe_lock_report(snap(True)) is True)
         eq("C3 推送条数", len(s.pushed), 1)
         ok("C4 文案含停车自检",
-           "【停车自检】" in s.pushed[0] and "车辆已锁" in s.pushed[0],
+           "【停车自检】" in s.pushed[0] and "已锁" in s.pushed[0],
            s.pushed[0][:60])
         ok("C5 推送后仍保持 locked 基准", s._prev_locked is True)
         ok("C6 已锁→已锁 不重复", s._maybe_lock_report(snap(True)) is False)
@@ -248,7 +248,7 @@ def main():
         sn["vehicle"]["detect"] = "clips"
         s._maybe_lock_report(snap(False))
         s._maybe_lock_report(sn)
-        ok("C17 标注来源", "据行车记录仪" in s.pushed[0], s.pushed[0][:50])
+        ok("C17 标注来源", "据记录仪" in s.pushed[0], s.pushed[0][:50])
 
         # C18：**已报过之后** True→None→True（车休眠 /msg 返回 nil）不能重复推。
         # 注意 v0.3.1.82 起「首拍时车已锁」不再视为已报（那是被推翻的旧语义，
@@ -333,7 +333,7 @@ def main():
 
         ok("G5 预热结束后补推", s._maybe_lock_report(snapv(True)) is True)
         eq("G6 共 1 条", len(s.pushed), 1)
-        ok("G7 文案标注重启后补报", "重启后补报" in s.pushed[0], s.pushed[0][:50])
+        ok("G7 文案标注重启后补报", "补报" in s.pushed[0], s.pushed[0][:50])
         ok("G8 补报后不重复", s._maybe_lock_report(snapv(True)) is False)
 
         # G9：首拍已锁但随后解锁 → 补报作废（事件已过期）
@@ -396,7 +396,7 @@ def main():
         s._warmup_until = time.monotonic() - 1
         s._maybe_report(snapv(True))
         eq("I3 预热结束后补推 1 条", len(s.pushed), 1)
-        ok("I4 标注重启后补报", "重启后补报" in s.pushed[0], s.pushed[0][:60])
+        ok("I4 标注重启后补报", "补报" in s.pushed[0], s.pushed[0][:60])
 
         # ══ J. 冷却基准不能是 0.0（monotonic 是开机秒数，审查 P0）══
         sent[:] = []
@@ -468,6 +468,78 @@ def main():
         v = gc._vehicle_snapshot(dict(gc.DEFAULTS, lock_detect_fallback=False))
         eq("O1 行驶中不归一（保持未锁）", v["locked"], False)
         eq("O2 无矛盾标记", v.get("locked_note"), None)
+
+        # ══ P. 闩锁复位：车开走必须松开，否则下一次锁车被吞 ══
+        # 2026-11-10 现场：14:06 推过之后开门上车开走，TeslaMate 的 locked 一路仍报
+        # true → 旧实现只在 `locked is False` 时复位 → 闩锁卡死 → 16:31 / 19:21
+        # 两次真实锁车被当成「这一把已报过」直接 return。这一组就是钉这个。
+        def snap_mv(locked=True, gear="P", speed=0.0, state="online"):
+            d = snap(locked, gear, speed)
+            d["vehicle"]["state"] = state
+            return d
+
+        s = make_sender(gc)
+        s._maybe_lock_report(snap_mv(False))                       # 首拍建基准
+        ok("P1 锁车推一次", s._maybe_lock_report(snap_mv(True)) is True)
+        eq("P2 条数", len(s.pushed), 1)
+
+        # TeslaMate 的 locked 在开走后仍报 true —— 这正是现场形态
+        ok("P3 车开走（locked 仍 true + 43km/h）不推",
+           s._maybe_lock_report(snap_mv(True, gear="D", speed=43.0, state="driving")) is False)
+        eq("P3b 但闩锁必须已松开", s._lock_reported, False)
+
+        s._lock_report_at -= 200                                   # 模拟 200 秒后回来
+        ok("P4 回来后锁车要再推一条", s._maybe_lock_report(snap_mv(True)) is True)
+        eq("P5 共 2 条", len(s.pushed), 2)
+        ok("P6 同一把锁重复上报不重复", s._maybe_lock_report(snap_mv(True)) is False)
+        eq("P7 仍 2 条", len(s.pushed), 2)
+
+        # state=driving 单独也算在动（gear/speed 在 TeslaMate 里可能滞后）
+        s2 = make_sender(gc)
+        s2._maybe_lock_report(snap_mv(False))
+        s2._maybe_lock_report(snap_mv(True))
+        s2._maybe_lock_report(snap_mv(True, "0.0", 0.0, "driving"))   # 档位给了个无效值，只剩 state 可用
+        eq("P8 state=driving 也松闩锁", s2._lock_reported, False)
+
+        # 只有车速（档位未知）同样要松
+        s3 = make_sender(gc)
+        s3._maybe_lock_report(snap_mv(False))
+        s3._maybe_lock_report(snap_mv(True))
+        s3._maybe_lock_report(snap_mv(True, None, 12.0))
+        eq("P9 只靠车速也能松闩锁", s3._lock_reported, False)
+
+        # ══ Q. 采样节奏自适应 ══
+        s4 = make_sender(gc)
+        s4.cfg = dict(gc.DEFAULTS, states_interval_s=300, states_fast_s=60)
+        s4._lock_reported = False
+        eq("Q1 未确认锁好 → 快档 60s", s4._states_interval(), 60)
+        s4._lock_reported = True
+        eq("Q2 已锁已推 → 慢档 300s", s4._states_interval(), 300)
+        s4.cfg = dict(s4.cfg, states_fast_s=600)
+        eq("Q3 fast>slow 退化慢档（配错不能把采样打快）", s4._states_interval(), 300)
+        s4.cfg = dict(s4.cfg, states_fast_s=0)
+        eq("Q4 fast=0 退化慢档", s4._states_interval(), 300)
+        eq("Q5 默认配置下快档是 60s", gc.DEFAULTS["states_fast_s"], 60)
+
+        # ══ R. 冷却从 600s 放宽到 120s（短途二次锁车不再漏） ══
+        eq("R0 默认冷却已改 120s", gc.DEFAULTS["lock_report_min_gap_s"], 120)
+        s5 = make_sender(gc)
+        s5._maybe_lock_report(snap_mv(False))
+        s5._maybe_lock_report(snap_mv(True))
+        eq("R1 首次推送", len(s5.pushed), 1)
+        s5._maybe_lock_report(snap_mv(True, "D", 20.0))            # 开走
+        s5._lock_report_at -= 130
+        ok("R2 130 秒后二次锁车要推", s5._maybe_lock_report(snap_mv(True)) is True)
+        eq("R3 共 2 条", len(s5.pushed), 2)
+
+        s6 = make_sender(gc)
+        s6._maybe_lock_report(snap_mv(False))
+        s6._maybe_lock_report(snap_mv(True))
+        s6._maybe_lock_report(snap_mv(True, "D", 20.0))
+        s6._lock_report_at -= 50
+        ok("R4 50 秒内二次锁车仍防抖（不连着发）",
+           s6._maybe_lock_report(snap_mv(True)) is False)
+        eq("R4b 防抖期间不丢闩锁（下拍还能推）", s6._lock_reported, False)
 
     finally:
         gc._TESLA_CLIP_DIRS = saved_dirs

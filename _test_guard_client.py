@@ -644,7 +644,7 @@ s3._ping_failed("timeout")
 ok("G8a 未达阈值不推", len(PUSHED) == 0, str(len(PUSHED)))
 s3._ping_failed("timeout")
 ok("G8b 达阈值推一条", len(PUSHED) == 1, str(len(PUSHED)))
-ok("G8c 文案是「B 侧失联」", bool(PUSHED) and "B 侧" in PUSHED[0] and "失联" in PUSHED[0],
+ok("G8c 文案是「僚机失联」", bool(PUSHED) and "僚机" in PUSHED[0] and "失联" in PUSHED[0],
    PUSHED[0][:26] if PUSHED else "")
 s3._ping_failed("timeout")
 s3._ping_failed("timeout")

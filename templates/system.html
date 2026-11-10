@@ -880,11 +880,12 @@ async function loadSummary() {
 var GUARD_FIELDS = [
   {k:'interval_s',         label:'心跳间隔',      unit:'秒', min:15,  max:60,   hint:'>60 会吃掉僚机 3T 余量'},
   {k:'probe_every_s',      label:'探针/探活周期', unit:'秒', min:60,  max:150,  hint:'必须 ≤150s，否则通道抖动会被误判成设备失联'},
-  {k:'states_interval_s',  label:'车态拉取间隔',  unit:'秒', min:120, max:1800, hint:'TeslaMate /states，配额克制'},
+  {k:'states_fast_s',      label:'车态快采间隔',  unit:'秒', min:20,  max:300,  hint:'还没确认锁好时用这个节奏，锁车后延迟 ≤ 它；20~60 比较合理'},
+  {k:'states_interval_s',  label:'车态慢采间隔',  unit:'秒', min:120, max:1800, hint:'确认锁好并已推送后放慢到这个节奏，省流量'},
   {k:'queue_max',          label:'补报队列上限',  unit:'条', min:1,   max:1000, hint:''},
   {k:'offline_default_s',  label:'出车静默窗口',  unit:'秒', min:60,  max:21600,hint:'车开走后僚机静默时长'},
   {k:'report_cooldown_s',  label:'报告去重窗口',  unit:'秒', min:300, max:7200, hint:'同档位内不重复推送'},
-  {k:'lock_report_min_gap_s', label:'锁车报告冷却', unit:'秒', min:120, max:7200, hint:'下车拿东西又锁一次时不重复打扰'},
+  {k:'lock_report_min_gap_s', label:'锁车报告冷却', unit:'秒', min:120, max:7200, hint:'纯防抖；闩锁才是主判据，别调到几百秒'},
   {k:'ping_fail_threshold',label:'B 失联判据',    unit:'次', min:2,   max:6,    hint:'×探针周期 = 检测时延'},
   {k:'ts_timeout_s',       label:'TS 超时',       unit:'秒', min:2,   max:30,   hint:''},
   {k:'https_timeout_s',    label:'HTTPS 超时',    unit:'秒', min:2,   max:30,   hint:''}

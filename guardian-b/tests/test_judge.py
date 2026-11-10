@@ -379,7 +379,6 @@ def t_alert_text_is_human_readable():
     txt = al.sent[0]
     assert "1794124" not in txt, "把 epoch 当年龄印出来了：%s" % txt
     assert "小时前" in txt, txt
-    assert "未启用" in txt, txt
     assert "0.3.1.6x" in txt, txt
     assert "建议" in txt, txt
 
@@ -485,7 +484,31 @@ def t_alert_text_shows_last_vehicle():
     j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
     j.tick(now=1000 + cfg.offline_default_s + 10)
     txt = al.sent[0]
-    assert "最后车态" in txt and "在开 43km/h" in txt and "已锁" in txt, txt
+    assert "车态" in txt and "在开 43km/h" in txt and "已锁" in txt, txt
+
+
+@case
+def t_alert_text_no_overlong_lines():
+    """所有推送文案每行 ≤ LINE_MAX。
+
+    企微手机端一行约 26~28 列就强行折行；2026-11-10 现场一份 8 行的停车自检
+    被折成 14 行碎块。行宽是"渲染末端"的责任，必须由测试钉住，不能靠每处自己数。
+    """
+    import judge as jm
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
+    j.tick(now=1000 + cfg.offline_default_s + 10)      # ① 设备失联
+    _c2, _s2, al2, j2 = make_judge()
+    j2.on_heartbeat("ts", 1, hb_body(), now=1000)
+    j2.on_heartbeat("https", 2, hb_body(), now=1000 + 3600)
+    j2.tick(now=1000 + 4000)                           # ② TS 通道故障
+    j2.tick(now=1000 + 4000 + cfg.warn_s + 1)          # ③ 恢复
+    bad = []
+    for m in list(al.sent) + list(al2.sent):
+        for ln in m.split("\n"):
+            if jm._disp_width(ln) > jm.LINE_MAX:
+                bad.append("%d|%s" % (jm._disp_width(ln), ln))
+    assert not bad, "存在超宽行（会在手机上折行）：\n" + "\n".join(bad)
 
 
 def main():

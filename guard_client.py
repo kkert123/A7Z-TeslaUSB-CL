@@ -95,7 +95,13 @@ DEFAULTS: Dict[str, Any] = {
     "probe_every_s": 150,        # 低频 HTTPS 双发探针（必须 < B 的 ALARM=5T=300s）
     # 键名保留 states_interval_s（兼容旧配置），实际拉的是 /msg：
     # /states 返回的是服务配置状态，与车辆无关（M133）
+    # ── 车态采样：两档自适应（v0.3.1.86）──
+    # 慢档用于「已确认锁好并已推送」——车睡着时 TeslaMate 那边不会有任何新事件，
+    # 再高频采样纯属白烧流量；
+    # 快档用于「还没确认这把锁」——必须在 1 分钟内抓到「下车 → 锁车」的瞬间。
+    # 旧版固定 300s：即使闩锁判断全对，锁车后最多也要等 5 分钟才可能发现（M141）。
     "states_interval_s": 300,
+    "states_fast_s": 60,
     "queue_max": 200,
     "offline_default_s": 3600,   # going_offline 的默认窗口
     # ── 报告（A 端直连企微，不依赖 B）──
@@ -105,7 +111,7 @@ DEFAULTS: Dict[str, Any] = {
     # 锁车后必推一条「停车自检」（用户明确要求：无论正常与否都要收到）。
     # 与 report_transition 是两条独立通道：那条只在档位变化时发，这条是事件型。
     "report_on_lock": True,
-    "lock_report_min_gap_s": 600,   # 同一把锁之后 N 秒内不再重复（下车拿东西又锁一次）
+    "lock_report_min_gap_s": 120,   # 同一把锁之后 N 秒内不再重复（纯防抖：闩锁才是主判据）
     "lock_detect_fallback": True,   # TeslaMate 拿不到车态时，用 SEI / 行车记录仪文件兜底
     "ping_fail_threshold": 3,    # 连续 N 次 ping 不通判「B 侧失联」
     # ── 僚机版本同步 ──
@@ -437,6 +443,7 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
         # age_https 会随机跨过 300 → 被误判成「设备失联」（见设计 §2 vs §4 的矛盾）
         "probe_every_s":    (60, 150),
         "states_interval_s": (120, 1800),
+        "states_fast_s":    (20, 300),
         "queue_max":        (1, 1000),
         "offline_default_s": (60, 21600),
         "report_cooldown_s": (300, 7200),
@@ -1205,7 +1212,59 @@ def _pad(text: str, width: int = 8) -> str:
     至少留 1 个空格：`企微推送` 本身就占满 8 列，否则会和状态字粘成「企微推送正常」。
     """
     return str(text or "") + " " * max(1, width - _disp_width(text))
+
+
+# 企微手机端一行约 26~28 显示列就开始强行折行。留 4~6 列余量取 22：
+# 折出来的碎行（「车辆」/「已锁」/「（重启后补报）」各占一行）比少说一句难看得多。
+_LINE_MAX = 22
+
+
+def _clip(text: str, width: int) -> str:
+    """按显示宽度截断，超宽补 `…`（用于长 SSID / 长错误串）。"""
+    s = str(text or "")
+    if _disp_width(s) <= width:
+        return s
+    out = ""
+    for ch in s:
+        if _disp_width(out + ch) > width - 1:
+            break
+        out += ch
+    return out + "…"
+
+
+def _fit(text: str, limit: int = _LINE_MAX) -> str:
+    """把一行压进 `limit` 显示列：先按 ` · ` 丢尾部片段，再不行就截断。
+
+    为什么需要它：模板是"拼"出来的，而 WiFi SSID、错误串、连续失败次数都是变量。
+    只要有一个变量变长就会折行——所以宽度必须由**渲染末端**强制保证，不能靠每处自己数。
+    """
+    s = str(text or "")
+    if _disp_width(s) <= limit:
+        return s
+    parts = s.split(" · ")
+    while len(parts) > 1 and _disp_width(" · ".join(parts)) > limit:
+        parts.pop()
+    s = " · ".join(parts)
+    return s if _disp_width(s) <= limit else _clip(s, limit)
+
+
+def _dur_short(sec) -> str:
+    """秒数 → 极短中文（21秒 / 8分 / 3时 / 2天）。停车自检里没有空间写「秒前」。"""
+    try:
+        n = float(sec)
+    except (TypeError, ValueError):
+        return "?"
+    if n < 90:
+        return "%d秒" % int(n)
+    if n < 5400:
+        return "%d分" % int(n // 60)
+    if n < 172800:
+        return "%d时" % int(n // 3600)
+    return "%d天" % int(n // 86400)
 _ITEM_CN = {"net": "网络", "gadget": "USB链路", "thumb": "缩略图", "wechat": "企微推送"}
+# 停车自检的短标签：标签列宽 7（「缩略图」6 列 + 1 空格），其余补到 7
+_ITEM_SHORT = {"net": "网络", "gadget": "USB", "thumb": "缩略图", "wechat": "推送"}
+_TAG_W = 7
 _B_KIND_CN = {
     "timeout": "连接超时",
     "unreachable": "无法连接",
@@ -1363,6 +1422,28 @@ class GuardSender:
                 interval = 60
             self._stop.wait(max(1.0, interval - elapsed))
 
+    def _states_interval(self) -> int:
+        """车态采样间隔（两档自适应）。
+
+        锁车推送要在 ~1 分钟内到达，就必须在「还没确认这把锁」时高频采样；
+        而一旦确认锁好**并且已经推送过**，TeslaMate 那边不会有任何新事件
+        （车睡着，`/msg` 一直是同一份），再高频采样纯属白烧流量。
+
+        用 `_lock_reported` 当开关，语义刚好：True = 这把锁已经通知过。
+        """
+        try:
+            slow = int(self.cfg.get("states_interval_s") or DEFAULTS["states_interval_s"])
+        except (TypeError, ValueError):
+            slow = DEFAULTS["states_interval_s"]
+        try:
+            fast = int(self.cfg.get("states_fast_s") or DEFAULTS["states_fast_s"])
+        except (TypeError, ValueError):
+            fast = DEFAULTS["states_fast_s"]
+        # 配错（fast 比 slow 还大、或非正数）时退回慢档，绝不能把采样打成 0 秒
+        if fast <= 0 or fast > slow:
+            return slow
+        return slow if self._lock_reported else fast
+
     def _tick(self) -> None:
         if self._stop.is_set():
             # 已被 apply_config 停用：绝不能再跑一轮。
@@ -1371,9 +1452,9 @@ class GuardSender:
             return
         now_mono = time.monotonic()
 
-        # TeslaMate /msg 独立节奏（states_interval_s），不进主节拍。
+        # TeslaMate /msg 独立节奏（自适应：未确认锁好 60s / 已确认 300s），不进主节拍。
         # 端点必须是 /msg：/states 返回的是服务配置状态，与车辆无关（M133）。
-        if now_mono - self._last_states >= self.cfg["states_interval_s"]:
+        if now_mono - self._last_states >= self._states_interval():
             self._last_states = now_mono
             threading.Thread(target=_vehicle_refresh_guarded, args=(self.cfg,),
                              daemon=True, name="guard-vehicle").start()
@@ -1773,223 +1854,213 @@ class GuardSender:
         host = base.split("//")[-1].strip("/")
         return "v%s → %s" % (app_config.APP_VERSION, host or "未配置")
 
-    def _fmt_evidence(self, key: str, net: Dict[str, Any], gad: Dict[str, Any],
-                      th: Dict[str, Any], wc: Dict[str, Any],
-                      tier: str = "") -> str:
-        """每项后面附一句「凭什么这么判」，否则报告只能说『异常』没法排查。"""
-        try:
-            if key == "net":
-                bits = []
-                if net.get("wifi_ssid"):
-                    bits.append(str(net["wifi_ssid"]))
-                if net.get("rssi") is not None:
-                    bits.append("%s%%" % net["rssi"])
-                bits.append("出网%s" % ("正常" if net.get("internet_ok") else "不通"))
-                if net.get("tailscale"):
-                    bits.append("TS %s" % net["tailscale"])
-                return "（%s）" % " · ".join(bits)
-            if key == "gadget":
-                bits = ["mode=%s" % (gad.get("mode") or "?")]
-                if gad.get("udc_connected"):
-                    bits.append("已连接")
-                elif gad.get("cable") is False:
-                    bits.append("线离位")
-                else:
-                    bits.append("state=%s" % (gad.get("state") or "?"))
-                age = gad.get("age_s")
-                if isinstance(age, (int, float)):
-                    bits.append("状态%d秒前" % int(age))
-                return "（%s）" % " · ".join(bits)
-            if key == "thumb":
-                bits = ["服务%s" % ("active" if th.get("service") else "非active")]
-                bits.append("积压%s" % (th.get("queue") if th.get("queue") is not None else "?"))
-                age = th.get("last_scan_age_s")
-                bits.append("扫描%s" % (("%d秒前" % int(age))
-                                        if isinstance(age, (int, float)) else "无记录"))
-                return "（%s）" % " · ".join(bits)
-            if key == "wechat":
-                age = wc.get("last_ok_age_s")
-                if isinstance(age, (int, float)):
-                    bits = ["最近成功%d小时前" % int(age // 3600)]
-                elif tier == "pass":
-                    # 判 pass 却没有成功记录 = 只是"没有待发消息"，不是异常。
-                    # 直接写"最近无成功记录"会让人以为通道坏了（自相矛盾）。
-                    bits = ["无待发消息"]
-                else:
-                    bits = ["最近无成功记录"]
-                if wc.get("consecutive_fail"):
-                    bits.append("连续失败%s" % wc["consecutive_fail"])
-                return "（%s）" % " · ".join(bits)
-        except Exception:
-            pass
-        return ""
+    def _device_short(self) -> str:
+        """窄版设备行：只留版本 + 时间。
 
-    def _fmt_items(self, snap: Dict[str, Any]) -> str:
-        sc = snap.get("selfcheck") or {}
-        items = sc.get("items") or {}
-        net = snap.get("net") or {}
-        gad = snap.get("gadget") or {}
-        th = snap.get("thumb") or {}
-        wc = snap.get("wechat") or {}
-        lines = []
-        for k in ("net", "gadget", "thumb", "wechat"):
-            st = str(items.get(k, "unknown"))
-            lines.append("· %s：%s%s" % (_ITEM_CN.get(k, k), _TIER_CN.get(st, st),
-                                        self._fmt_evidence(k, net, gad, th, wc)))
-        return "\n".join(lines)
+        `v0.3.1.84 → 100.111.252.121:8899` 有 33 列，在企微手机端占两行；
+        而地址几乎从不变，要看它去设置页——推送里不值得占一行半（2026-11-10）。
+        """
+        return "v%s · %s" % (app_config.APP_VERSION, time.strftime("%H:%M"))
 
     def _fmt_transition(self, prev: str, cur: str, snap: Dict[str, Any]) -> str:
-        return "\n".join([
-            "【A7Z 自检】%s → %s" % (_TIER_CN.get(prev, prev), _TIER_CN.get(cur, cur)),
-            self._device_line(),
-            self._fmt_items(snap),
-        ])
+        lines = ["【A7Z】%s → %s" % (_TIER_CN.get(prev, prev), _TIER_CN.get(cur, cur)),
+                 self._device_short()]
+        lines.extend(self._fmt_items_aligned(snap))
+        return "\n".join(_fit(x) for x in lines if x)
 
     def _fmt_recovery(self, prev: str, snap: Dict[str, Any]) -> str:
-        return "\n".join([
-            "【A7Z 自检恢复】%s → 正常" % _TIER_CN.get(prev, prev),
-            self._device_line(),
-            self._fmt_items(snap),
-        ])
+        lines = ["【A7Z】已恢复正常", self._device_short()]
+        lines.extend(self._fmt_items_aligned(snap))
+        return "\n".join(_fit(x) for x in lines if x)
 
     def _fmt_daily(self, snap: Dict[str, Any]) -> str:
         sc = snap.get("selfcheck") or {}
         result = str(sc.get("result") or "unknown")
         eps = self.cfg["endpoints"]
         ch = [c for c in ("TS", "HTTPS") if eps.get("ts" if c == "TS" else "https")]
-        b_line = ("正常" if not self._b_down_notified
-                  else "失联（%s）" % _B_KIND_CN.get(self._ping_kind, self._ping_kind))
-        return "\n".join([
-            "【A7Z 自检日报】%s" % _TIER_CN.get(result, result),
-            self._device_line(),
-            self._fmt_items(snap),
-            "通道：%s · 成功 %d / 失败 %d · 队列 %d" % (
-                "+".join(ch) or "未配置", self._tx_ok, self._tx_fail, self._queue_count),
-            "僚机：%s" % b_line,
-        ])
+        # 短词：`队列 0 · 僚机失联（连接超时）` 有 23 列会折行；原因由「B 失联」那条消息负责
+        b_line = "正常" if not self._b_down_notified else "失联"
+        lines = ["【A7Z】自检日报 %s" % _TIER_CN.get(result, result),
+                 self._device_short()]
+        lines.extend(self._fmt_items_aligned(snap))
+        lines.append(_fit("通道 %s 成功%d/失败%d" % (
+            "+".join(ch) or "无", self._tx_ok, self._tx_fail)))
+        lines.append(_fit("队列 %d · 僚机%s" % (self._queue_count, b_line)))
+        return "\n".join(_fit(x) for x in lines if x)
 
-    # ── 停车自检模板（v0.3.1.84，样式 2：结论置顶 + 异常置顶 + 分项对齐）──
+    # ── 停车自检模板（v0.3.1.85，样式 2 窄排版：结论置顶 + 异常置顶 + 单行不折）──
     _ITEM_ORDER = ("net", "gadget", "thumb", "wechat")
     _ADVICE = {
-        "net": "WiFi/热点与 Tailscale 是否可用",
-        "gadget": "USB 线是否在位、车机口是否有电",
-        "thumb": "预览积压可在设置页手动清理",
-        "wechat": "企微机器人 key 是否还有效",
+        "net": "查 WiFi 与热点",
+        "gadget": "查 USB 与供电",
+        "thumb": "设置页清理预览",
+        "wechat": "查机器人 key",
     }
 
-    def _vehicle_line(self, v: Dict[str, Any]) -> str:
-        bits = []
+    def _evidence_brief(self, key: str, net: Dict[str, Any], gad: Dict[str, Any],
+                        th: Dict[str, Any], wc: Dict[str, Any],
+                        tier: str = "") -> str:
+        """停车自检专用的**极短证据**：不放括号、最多一个片段。
+
+        之所以单独一套（而不是给旧版加个 brief 参数）：旧版的括号整段拼接没有宽度概念，
+        每行超过约 22 列就被强行折行（2026-11-10 现场：8 行被折成 14 行，碎得没法看）。
+        规则：pass 态只保留「短且有诊断价值」的（WiFi SSID），其余留白；
+        非 pass 态给最关键那一条，具体排查引导交给末尾的「建议」行。
+        """
+        try:
+            if key == "net":
+                if tier != "pass" and net.get("internet_ok") is not True:
+                    return "出网不通"
+                ssid = str(net.get("wifi_ssid") or "").strip()
+                if ssid:
+                    # 9 列：一行总宽 7+4+1+9 = 21，还留 1 列余量给 emoji 宽度误差
+                    return _clip(ssid, 9)
+                return "出网正常" if net.get("internet_ok") else ""
+            if key == "gadget":
+                if gad.get("udc_connected"):
+                    return "已连接"
+                if tier == "pass":
+                    return ""
+                if gad.get("cable") is False:
+                    return "线离位"
+                return "mode=%s" % _clip(gad.get("mode") or "?", 8)
+            if key == "thumb":
+                q = th.get("queue")
+                try:
+                    q = int(q)
+                except (TypeError, ValueError):
+                    return "" if tier == "pass" else "积压未知"
+                age = th.get("last_scan_age_s")
+                # 正常态只报「积压几」——它同时也是"扫描还在跑"的证据
+                if q > 0 and tier != "pass" and isinstance(age, (int, float)):
+                    return "积压%d·%s前" % (q, _dur_short(age))
+                return "积压%d" % q
+            if key == "wechat":
+                if tier == "pass":
+                    return ""
+                n = wc.get("consecutive_fail")
+                if n:
+                    return "连续失败%s次" % n
+                return "无成功记录" if wc.get("last_ok_age_s") is None else ""
+        except Exception:
+            pass
+        return ""
+
+    def _vehicle_lines(self, v: Dict[str, Any], restarted: bool = False) -> List[str]:
+        """锁车态 + 停车信息各占一行（原先是「车辆 + 三段 + 括号」挤一行，必折）。
+
+        `车辆` 这个标签省掉：紧跟标题行的第一段，语义上没有歧义，
+        省出的 4 列正好让「已锁（据哨兵·补报）」这种带注释的形态不折行。
+        """
+        lock = "已锁" if v.get("locked") is True else "锁车未知"
+        notes = []
+        src_cn = {"clips": "据记录仪", "sei": "据遥测"}.get(str(v.get("detect") or ""), "")
+        if src_cn:
+            notes.append(src_cn)
+        if str(v.get("locked_note") or "") == "sentry_conflict":
+            notes.append("据哨兵")
+        if restarted:
+            notes.append("补报")
+        out = [lock + (("（%s）" % "·".join(notes)) if notes else "")]
+        info = []
         sh = str(v.get("shift_state") or "").strip()
-        if sh:
-            bits.append("%s 档" % sh)
-        pt = str(v.get("park_time") or "").strip()
+        if sh and sh.upper() not in ("P", "N", ""):
+            # P 档是停车常态、没有信息量；出现别的档位才是"值得说"的事
+            info.append("%s 档" % sh)
+        pt = str(v.get("park_time") or "").strip().strip("-")
         if pt:
-            # 00:24:42 → 00:24：秒对"停了多久"没有信息量
             parts = pt.split(":")
             if len(parts) == 3:
-                pt = "%s:%s" % (parts[0], parts[1])
-            bits.append("停车 %s" % pt)
+                pt = "%s:%s" % (parts[0], parts[1])     # 秒对"停了多久"没有信息量
+            info.append("停车 %s" % pt)
         bat = v.get("battery")
         if isinstance(bat, int):
-            bits.append("电量 %d%%" % bat)
-        return "%s%s" % (_pad("车辆"), " · ".join(bits) or "—")
+            info.append("电量 %d%%" % bat)
+        if info:
+            out.append(" · ".join(info))
+        return out
 
     def _fmt_items_aligned(self, snap: Dict[str, Any]) -> List[str]:
-        """分项：全绿时逐行列出；有异常时**异常项置顶**、正常项压成一行。
-
-        只报「注意/异常」是不够的——用户还要知道"凭什么这么判"，所以每行都带证据
-        （`_fmt_evidence`），异常行前置 ⚠。
-        """
+        """分项：全绿时逐项一行；有异常时**异常项置顶**、正常项压成「其余 N 项正常」。"""
         sc = snap.get("selfcheck") or {}
         items = sc.get("items") or {}
         net = snap.get("net") or {}
         gad = snap.get("gadget") or {}
         th = snap.get("thumb") or {}
         wc = snap.get("wechat") or {}
-        bad, good = [], []
+        bad, good = [], 0
         for k in self._ITEM_ORDER:
             st = str(items.get(k, "unknown"))
-            line = "%s%s%s" % (_pad(_ITEM_CN.get(k, k)), _TIER_CN.get(st, st),
-                               self._fmt_evidence(k, net, gad, th, wc, tier=st))
             if st == "pass":
-                good.append((k, line))
+                good += 1
             else:
-                bad.append((k, line))
-        out = ["⚠ " + ln for _k, ln in bad]
-        if bad and good:
-            out.append("%s%s 正常" % (_pad("其余"), " · ".join(_ITEM_CN[k] for k, _l in good)))
-        elif good:
-            out.extend(ln for _k, ln in good)
+                ev = self._evidence_brief(k, net, gad, th, wc, tier=st)
+                mark = "❗" if st == "fail" else "⚠"
+                line = "%s %s%s" % (mark, _pad(_ITEM_SHORT.get(k, k), _TAG_W), ev)
+                bad.append(_fit(line.rstrip()))
+        if bad:
+            out = list(bad)
+            if good:
+                out.append("其余 %d 项正常" % good)
+            return out
+        out = []
+        for k in self._ITEM_ORDER:
+            ev = self._evidence_brief(k, net, gad, th, wc, tier="pass")
+            out.append(_fit(("%s%s%s" % (_pad(_ITEM_SHORT.get(k, k), _TAG_W),
+                                         "正常", (" " + ev) if ev else "")).rstrip()))
         return out
 
     def _advice_line(self, snap: Dict[str, Any]) -> str:
         items = (snap.get("selfcheck") or {}).get("items") or {}
         tips = [self._ADVICE[k] for k in self._ITEM_ORDER
                 if items.get(k) not in (None, "pass")]
-        return ("建议：" + "；".join(tips[:2])) if tips else ""
+        # 多条建议用 ` · ` 连接：超宽时 `_fit` 能按片段安全裁剪，`；` 切不动
+        return _fit("建议：" + " · ".join(tips[:2])) if tips else ""
 
     def _fmt_locked(self, snap: Dict[str, Any], restarted: bool = False) -> str:
         sc = snap.get("selfcheck") or {}
         result = str(sc.get("result") or "unknown")
         v = snap.get("vehicle") or {}
-        # 来源与补报合并进**一个**括号：拆成两个会出现
-        # 「（据行车记录仪）（重启后补报）」这种背靠背括号，微信里像两条修饰语打架
-        bits = []
-        src_cn = {"clips": "据行车记录仪", "sei": "据视频遥测"}.get(
-            str(v.get("detect") or ""), "")
-        if src_cn:
-            bits.append(src_cn)
-        if str(v.get("locked_note") or "") == "sentry_conflict":
-            bits.append("据哨兵推断")
-        if restarted:
-            bits.append("重启后补报")
-        suffix = ("（%s）" % "·".join(bits)) if bits else ""
         icon = {"pass": "✅", "warn": "⚠️", "fail": "❗"}.get(result, "•")
-        tier = _TIER_CN.get(result, "未知")
-        head = "【停车自检】%s %s · %s%s" % (
-            icon, tier,
-            "车辆已锁" if v.get("locked") is True else "车辆已停止（锁车状态未知）",
-            suffix)
-        lines = [head, self._vehicle_line(v)]
+        lines = ["【停车自检】%s %s" % (icon, _TIER_CN.get(result, "未知"))]
+        lines.extend(self._vehicle_lines(v, restarted))
         lines.extend(self._fmt_items_aligned(snap))
         advice = self._advice_line(snap)
         if advice:
             lines.append(advice)
-        lines.append("%s · %s" % (self._device_line(), time.strftime("%H:%M")))
-        return "\n".join(lines)
+        # 版本 + 时间：不再带僚机地址（`v0.3.1.84 → 100.111.252.121:8899 · 12:41`
+        # 有 33 列，占两行且信息价值极低，要看地址去设置页）
+        lines.append("v%s · %s" % (app_config.APP_VERSION, time.strftime("%H:%M")))
+        return "\n".join(_fit(x) for x in lines if x)
 
     def _fmt_b_down(self, kind: str) -> str:
+        # 标题压到 ≤22 列（`【护卫告警】B 侧在线，但令牌不匹配` 有 30 列，手机上折两行），
+        # 原因挪到正文第一行。
         if kind == "auth":
-            head = "【护卫告警】B 侧在线，但令牌不匹配"
-            tail = "→ B 端进程是活的，是两边 token 不一致。到设置页重新保存守护配置即可。"
+            head, why = "【护卫告警】令牌不符", "B 侧在线，token 不符"
+            tail = "建议：重新保存守护配置"
         elif kind == "config":
-            head = "【护卫告警】守护通道配置错误"
-            tail = "→ 检查 endpoints（HTTPS 通道必须是 https://，且 ca_path 存在）。"
+            head, why = "【护卫告警】配置错误", "endpoints 配置有误"
+            tail = "建议：检查地址与证书"
         else:
-            head = "【护卫告警】B 侧失联（%s）" % _B_KIND_CN.get(kind, kind)
-            tail = "→ 设备本身在线，是云端僚机连不上。设备若此刻掉线将无人告警。"
-        return "\n".join([
-            head,
-            self._device_line(),
-            "连续失败：%d 次（探针每 %ds 一次）" % (self._ping_fail, self.cfg["probe_every_s"]),
+            head = "【护卫告警】僚机失联"
+            why = "原因 %s" % _B_KIND_CN.get(kind, kind)
+            tail = "僚机掉线就没人告警"
+        return "\n".join(_fit(x) for x in [
+            head, why, self._device_short(),
+            "连续失败 %d 次" % self._ping_fail,
             tail,
-        ])
+        ] if x)
 
     def _fmt_b_recovered(self) -> str:
         # 措辞按原因区分：令牌错/配置错从来没"失联"过，说"已恢复连通"会误导
         kind = self._ping_kind
-        if kind == "auth":
-            head = "【护卫恢复】令牌已匹配，B 侧重新接受心跳"
-        elif kind == "config":
-            head = "【护卫恢复】守护通道配置已修正"
-        else:
-            head = "【护卫恢复】B 侧已恢复连通"
-        return "\n".join([
-            head,
-            self._device_line(),
-            "此前连续失败 %d 次（%s）" % (self._ping_fail,
-                                        _B_KIND_CN.get(kind, kind)),
-        ])
+        head = {"auth": "【护卫恢复】令牌已匹配",
+                "config": "【护卫恢复】配置已修正"}.get(kind, "【护卫恢复】已连通")
+        return "\n".join(_fit(x) for x in [
+            head, self._device_short(),
+            "此前连续失败 %d 次" % self._ping_fail,
+        ] if x)
 
     def _push_report(self, text: str, critical: bool = False) -> None:
         """推一条报告。失败留待重试。
@@ -2141,8 +2212,28 @@ class GuardSender:
         if cur is not None:
             self._prev_locked = cur
 
+        # ★「车在动」是**铁证级的未锁**，判据必须排在闩锁之前，而且必须复位闩锁。
+        #
+        # TeslaMate 的 locked 会滞后：14:06 锁车后开门上车、开走，它一路仍报 true
+        # （2026-11-10 实证：15:06 / 16:31 / 19:21 三次「矛盾」都是它漂移）。
+        # 旧实现只在 `cur is False` 时复位，于是整个行驶过程闩锁卡在 True，
+        # 下一次真正锁车被当成「这一把已报过」直接 return —— 下午两趟漏推就是这个。
+        # 而车速/档位过去只用来"挡推送"、不"松闩锁"，等于看着铁证不解锁。
+        gear = str(v.get("shift_state") or "").upper()
+        sp = v.get("speed")
+        moving = (gear in ("D", "R")
+                  or str(v.get("state") or "").lower() == "driving"
+                  or (isinstance(sp, (int, float)) and sp > 3))
+        if moving:
+            if self._lock_reported:
+                logger.info("锁车闩锁已复位（车在动：档位=%s 车速=%s），下一次锁车会重新推送",
+                            gear or "-", sp if sp is not None else "-")
+            self._lock_reported = False
+            self._lock_pending_report = False    # 车在动就不该补一条「停车自检」
+            return False
+
         if cur is False:
-            self._lock_reported = False          # 只有真实解锁才复位
+            self._lock_reported = False          # 真实解锁同样复位
             self._lock_pending_report = False    # 已解锁，补报没有意义
         if cur is not True:
             return False
@@ -2159,19 +2250,10 @@ class GuardSender:
             self._lock_reported = True
             return False
 
-        # 还在开就别报：等红灯挂 P 也会让 locked 抖动，加一道车速/档位闸
-        gear = str(v.get("shift_state") or "").upper()
-        sp = v.get("speed")
-        if gear in ("D", "R") or (isinstance(sp, (int, float)) and sp > 3):
-            # 车在动就不该补一条「停车自检」；挂起标记一并作废，
-            # 否则它会一直挂着，等几小时后挂 P 档时突然报一条（审查 P2-4）
-            self._lock_pending_report = False
-            return False
-
         # 同 P0：0.0 当哨兵在 monotonic（开机秒数）下会误判成「冷却中」，
         # 冷启动 10 分钟内锁车时补报会被拖住。None = 从未报过
         now_mono = time.monotonic()
-        gap = cfg.get("lock_report_min_gap_s", 600)
+        gap = cfg.get("lock_report_min_gap_s", DEFAULTS["lock_report_min_gap_s"])
         if self._lock_report_at is not None and now_mono - self._lock_report_at < gap:
             return False                    # 下车拿东西又锁一次，不重复打扰
         pending = self._lock_pending_report
