@@ -99,6 +99,56 @@ ok('4.1 不再有「else 一律切换中」的写法',
   !/\}\s*else\s*\{\s*peerMsg\('切换中…（'/.test(src));
 ok('4.2 peerMsg 支持 warn 三态', /tone === 'warn'/.test(src));
 
+// ── 5. 预置按钮判定（M146：码过期后按钮永久灰 → 死锁）──────────
+// 现场：B 停在 verified（包已暂存等确认），确认码 600 秒过期后，
+// 「预置到僚机」被 st !== 'verified' 永久禁用，而红字又提示"请重新点预置" ——
+// 提示指向的正是自己禁掉的按钮，用户无路可走。
+function fnSrc(name) {
+  const m = src.match(new RegExp('function ' + name + '\\([\\s\\S]*?\\n\\}'));
+  if (!m) { console.log('FAIL 模板里找不到 ' + name); process.exit(1); }
+  return m[0];
+}
+const prepDecision = new Function(
+  [fnSrc('peerVerTuple'), fnSrc('peerVerCmp'), fnSrc('peerPrepDecision')].join('\n')
+  + '\nreturn peerPrepDecision;')();
+
+const dIdle = prepDecision('idle', 0, true, '1.1.7', '1.1.5');
+ok('5.1 空闲 + 有更新包 → 可预置', dIdle.can === true, JSON.stringify(dIdle));
+eq('5.2 标签写目标版本', dIdle.label, '预置 v1.1.7 到僚机');
+
+const dWaiting = prepDecision('verified', 300, true, '1.1.7', '1.1.5');
+ok('5.3 待确认且码仍有效 → 禁（别覆盖正在等确认的 job）', dWaiting.can === false,
+  JSON.stringify(dWaiting));
+
+// ★ 核心回归：码过期必须放开，否则永远出不去
+const dExpired = prepDecision('verified', 0, true, '1.1.7', '1.1.5');
+ok('5.4 待确认但码已过期 → 可重新预置（核心回归）', dExpired.can === true,
+  JSON.stringify(dExpired));
+ok('5.5 过期时标签要说明会换新码', dExpired.label.indexOf('换新码') >= 0, dExpired.label);
+ok('5.6 expires_in 是字符串 "0" 也算过期', prepDecision('verified', '0', true, '1.1.7', '1.1.5').can === true);
+ok('5.7 负数（时钟漂移）也算过期', prepDecision('verified', -5, true, '1.1.7', '1.1.5').can === true);
+
+ok('5.8 committed（正在切换）即使过期也禁',
+  prepDecision('committed', 0, true, '1.1.7', '1.1.5').can === false);
+ok('5.9 僚机未开远程升级 → 禁',
+  prepDecision('idle', 0, false, '1.1.7', '1.1.5').can === false);
+ok('5.10 没有更新的包 → 禁且提示已是最新',
+  prepDecision('idle', 0, true, '1.1.5', '1.1.5').can === false
+  && prepDecision('idle', 0, true, '1.1.5', '1.1.5').label === '已是最新');
+ok('5.11 包库为空 → 已是最新',
+  prepDecision('idle', 0, true, '', '1.1.5').label === '已是最新');
+
+// 接线静态断言
+ok('5.12 存在「换新码」按钮且复用 peerUpgrade',
+  /id="btn-peer-recoded"[^>]*onclick="peerUpgrade\(\)"/.test(src.replace(/\s+/g, ' ')));
+ok('5.13 loadPeer 不再硬编码 st !== \'verified\' 禁按钮',
+  codeLines.indexOf("st !== 'verified'") < 0);
+ok('5.14 canUp 改用 peerPrepDecision', src.indexOf('peerPrepDecision(st, p.confirm_expires_in') >= 0);
+ok('5.15 倒计时归零会放开按钮（调 peerOnCodeExpired）',
+  /left <= 0[\s\S]{0,300}peerOnCodeExpired\(\)/.test(src));
+ok('5.16 过期文案不再指向被禁用的「预置到僚机」',
+  src.indexOf('请重新点「预置到僚机」生成新码') < 0);
+
 console.log('\n' + pass + '/' + (pass + fail) + ' passed');
 if (failed.length) console.log('FAILED: ' + failed.join(', '));
 process.exit(fail === 0 ? 0 : 1);

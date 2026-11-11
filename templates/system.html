@@ -169,6 +169,10 @@
           <input id="peer-code" placeholder="确认码 6 位" maxlength="6" autocomplete="off"
                  style="width:120px;font-family:monospace;text-transform:uppercase;letter-spacing:2px">
           <button class="btn btn-sm btn-primary" id="btn-peer-confirm" onclick="peerConfirm()">确认切换</button>
+          <!-- 码过期后的一键出路：不重传包，直接在僚机重新暂存并换新码。
+               没有它的话，用户得回上面找「重新预置」，而那个按钮历史上是永久灰的（M146）。 -->
+          <button class="btn btn-sm btn-outline" id="btn-peer-recoded" onclick="peerUpgrade()"
+                  style="display:none" title="重新在僚机暂存同一个包并生成新的确认码">换新码</button>
         </span>
       </div>
       <div id="peer-msg" style="font-size:0.72rem;margin-top:6px;line-height:1.6"></div>
@@ -1697,7 +1701,7 @@ function savePreviewConfig() {
 var _peer = { job: '', version: '', busy: false, pending: false,
               confirming: false, timer: null, tries: 0,
               lastState: '', watchTimer: null, expAt: 0, expTimer: null,
-              holdMsg: false };
+              holdMsg: false, prep: null };
 
 function peerMsg(html, tone) {
   var el = document.getElementById('peer-msg');
@@ -1754,10 +1758,9 @@ function peerCountdownTick() {
   var el = document.getElementById('peer-exp');
   var left = Math.max(0, Math.round((_peer.expAt - Date.now()) / 1000));
   if (left <= 0) {
-    if (el) { el.textContent = '已过期 · 请重新预置'; el.style.color = PEER_COLOR.warn; }
-    var b = document.getElementById('btn-peer-confirm');
-    if (b) b.disabled = true;
+    if (el) { el.textContent = '已过期 · 点「换新码」'; el.style.color = PEER_COLOR.warn; }
     peerCountdownStop();
+    peerOnCodeExpired();
     return;
   }
   if (el) {
@@ -1919,12 +1922,19 @@ async function loadPeer(manual, holdMsg) {
       var cb = document.getElementById('btn-peer-confirm');
       var expired = !(p.confirm_expires_in > 0);
       if (cb) cb.disabled = expired;
+      var recode = document.getElementById('btn-peer-recoded');
+      if (recode) recode.style.display = expired ? '' : 'none';
       if (expired) {
-        peerMsg('确认码已过期，请重新点「预置到僚机」生成新码（包不用重传）。', 'err');
+        // 文案必须指向**此刻真的能点**的按钮。旧文案写「请重新点预置到僚机」，
+        // 而那个按钮正因为 st === 'verified' 被禁用 —— 提示把用户指向死路（M146）。
+        peerMsg('确认码已过期（有效期 600 秒）。点「换新码」或下方「重新预置」'
+          + '重新在僚机暂存并生成新码 —— 包已在 A 端，不用重传。', 'err');
       }
       peerCountdownStart(p.confirm_expires_in || 0);
     } else {
       box.style.display = 'none';
+      var recode0 = document.getElementById('btn-peer-recoded');
+      if (recode0) recode0.style.display = 'none';
       peerCountdownStop();
       // 已经不是待确认态：watch 再跑只会和 startPeerPoll 抢着写提示文案
       if (st !== 'idle') peerStopWatch();
@@ -1950,15 +1960,14 @@ async function loadPeer(manual, holdMsg) {
       hint.textContent = '僚机未启用远程升级（B 上 GUARD_UPGRADE_ENABLE=0）。可以读版本，但推不上去。';
     }
 
-    // 升级按钮：有更新的包 + 僚机开了远程升级 + 当前没有进行中的任务
+    // 升级按钮：判定全部交给纯函数（含「verified 但码已过期 → 可重新预置」）
     var newest = pkgs.length ? pkgs[0].version : '';
-    var canUp = !!(newest && p.upgrade_enabled && st !== 'verified' && st !== 'committed'
-                   && peerVerCmp(newest, p.version) > 0);
+    _peer.prep = { enabled: !!p.upgrade_enabled, newest: newest,
+                   peerVer: String(p.version || '') };
+    var dec = peerPrepDecision(st, p.confirm_expires_in, p.upgrade_enabled, newest, p.version);
     var btn = document.getElementById('btn-peer-upgrade');
-    btn.disabled = !canUp;
-    btn.textContent = (newest && peerVerCmp(newest, p.version) > 0)
-      ? ('预置 v' + newest + ' 到僚机')
-      : '已是最新';
+    btn.disabled = !dec.can;
+    btn.textContent = dec.label;
 
     if (manual) peerMsg('已刷新');
   } catch (e) {
@@ -2153,6 +2162,42 @@ function peerPollKind(st) {
   if (st === 'rolled_back' || st === 'failed') return 'failed';
   if (st === 'idle' || st === 'verified' || st === '') return 'gone';
   return 'running';
+}
+
+// ── 预置按钮的可点性与文案（纯函数，node 单测钉死）──
+// 死锁根源：B 的 journal 停在 verified（包已暂存、等确认）时这里把按钮永久禁用，
+// 而码过期后提示又让用户去点「预置到僚机」—— 指向的正是自己禁掉的那个按钮（M146）。
+// 所以 verified 必须分两种：
+//   · 码还有效  → 禁（别把正在等确认的 job 覆盖掉）
+//   · 码已过期  → 放开重新预置（B 的 prepare 只拒 committed，重发会换新 job 和新码）
+function peerPrepDecision(st, expiresIn, upgradeEnabled, newestVer, peerVer) {
+  st = String(st || '');
+  var newest = String(newestVer || '');
+  var exp = Number(expiresIn) || 0;
+  var newer = !!(newest && peerVerCmp(newest, String(peerVer || '')) > 0);
+  var plain = '预置 v' + newest + ' 到僚机';
+  if (st === 'committed') return { can: false, label: plain };
+  if (st === 'verified' && exp > 0) return { can: false, label: plain };
+  if (!newest || !newer) return { can: false, label: '已是最新' };
+  if (!upgradeEnabled) return { can: false, label: plain };
+  if (st === 'verified') return { can: true, label: '重新预置 v' + newest + '（换新码）' };
+  return { can: true, label: plain };
+}
+
+// 倒计时归零的那一刻就放开，别等 30 秒轮询——那 30 秒里用户看到的是
+// 灰按钮 + 「请重新预置」，正是这次截图里的死锁观感（M146）。
+function peerOnCodeExpired() {
+  var b = document.getElementById('btn-peer-confirm');
+  if (b) b.disabled = true;
+  var rb = document.getElementById('btn-peer-recoded');
+  if (rb) rb.style.display = '';
+  var up = document.getElementById('btn-peer-upgrade');
+  if (up && _peer.prep) {
+    var dec = peerPrepDecision('verified', 0, _peer.prep.enabled,
+                               _peer.prep.newest, _peer.prep.peerVer);
+    up.disabled = !dec.can;
+    up.textContent = dec.label;
+  }
 }
 
 // 轮询任务状态：3 秒一次，最多 ~3 分钟。
