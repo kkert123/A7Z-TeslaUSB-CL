@@ -67,8 +67,9 @@ def main():
     # ── A. 全绿结构 ────────────────────────────────────────
     txt = s._fmt_locked(snap(ALL))
     lines = txt.split("\n")
-    ok("A1 标题只有「图标 + 档位」（不加「· 车辆已锁」）",
-       lines[0] == "【停车自检】✅ 正常", lines[0])
+    ok("A1 标题 =「来源 + 图标 + 档位」，不带「· 车辆已锁」",
+       lines[0] == "【A7Z】停车自检 ✅正常", lines[0])
+    ok("A1b 标题标明来源是 A7Z（与僚机的【僚机】区分）", lines[0].startswith("【A7Z】"), lines[0])
     ok("A2 第二行是锁车态 + 推断来源", lines[1].startswith("已锁") and "据哨兵" in lines[1], lines[1])
     ok("A3 第三行是停车时长 + 电量",
        "停车 00:24" in lines[2] and "电量 67%" in lines[2], lines[2])
@@ -88,7 +89,7 @@ def main():
     sn["thumb"] = {"service": True, "queue": 128, "last_scan_age_s": 480}
     txt = s._fmt_locked(sn)
     lines = txt.split("\n")
-    ok("B1 标题带 ⚠️ 与「注意」", lines[0] == "【停车自检】⚠️ 注意", lines[0])
+    ok("B1 标题带 ⚠️ 与「注意」", lines[0] == "【A7Z】停车自检 ⚠️注意", lines[0])
     idx_bad = next(i for i, l in enumerate(lines) if "缩略图" in l)
     ok("B2 异常项置顶（紧跟车辆信息之后）", idx_bad == 3, (idx_bad, lines))
     ok("B3 异常行带 ⚠ 与积压+时长证据",
@@ -127,12 +128,24 @@ def main():
 
     # 长 SSID 必须被截断，不能让整行超宽
     t6 = s._fmt_locked(snap(ALL, ssid="WiFi-YL-MIFI-000500"))
-    net_line = next(l for l in t6.split("\n") if l.startswith("网络"))
-    ok("C7 超长 SSID 被截断（不撑破行宽）", "…" in net_line, net_line)
+    wifi_line = next(l for l in t6.split("\n") if l.startswith("WiFi"))
+    ok("C7 超长 SSID 走独立行，且截断后不撑破行宽",
+       "…" in wifi_line and gc._disp_width(wifi_line) <= gc._LINE_MAX, wifi_line)
 
     # 全字段缺失也不许崩、不许超宽
     t7 = s._fmt_locked({"vehicle": {}, "selfcheck": {"result": "unknown"}})
-    ok("C8 字段全缺仍能渲染", "【停车自检】" in t7 and len(t7.split("\n")) >= 3, t7)
+    ok("C8 字段全缺仍能渲染", "【A7Z】停车自检" in t7 and len(t7.split("\n")) >= 3, t7)
+
+    # ── C9/C10. WiFi 名称必须完整，且不挤在「网络」行里 ──────
+    t8 = s._fmt_locked(snap(ALL, ssid="YL-MIFI-000500"))
+    w8 = [l for l in t8.split("\n") if l.startswith("WiFi")]
+    ok("C9 SSID 完整显示（不被截成 YL-MIFI-…）",
+       len(w8) == 1 and "YL-MIFI-000500" in w8[0], w8)
+    ok("C10 「网络」行不再夹带 SSID（否则必折行）",
+       not any("YL-MIFI" in l for l in t8.split("\n") if l.startswith("网络")), t8)
+    t9 = s._fmt_locked(snap(ALL, ssid=""))
+    ok("C11 没有 SSID 时不出现空的 WiFi 行",
+       not any(l.startswith("WiFi") for l in t9.split("\n")), t9)
 
     # ── D. 工具函数 ────────────────────────────────────────
     ok("D1 中文按 2 列算", gc._disp_width("网络") == 4, gc._disp_width("网络"))
@@ -153,6 +166,7 @@ def main():
         "缩略图积压": s._fmt_locked(sn),
         "网络异常+推送失败": tf,
         "长 SSID": t6,
+        "SSID 完整": t8,
         "字段全缺": t7,
         "非 P 档无电量": t5,
     }

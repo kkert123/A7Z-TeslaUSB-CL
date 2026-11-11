@@ -390,7 +390,10 @@ def t_ts_fault_text_says_device_alive():
     j.on_heartbeat("https", 1, hb_body(), now=1300)
     j.tick(now=1330)                    # ts 330s 老，https 30s 新 → TS 通道故障
     assert al.sent, "没有发出告警"
-    assert "Tailscale" in al.sent[0] and "设备本体在线" in al.sent[0], al.sent[0]
+    txt = al.sent[0]
+    assert "TS" in txt and "设备本体在线" in txt, txt
+    # 标题必须标明发送方是僚机（A 端发的是【A7Z】…，两边共用同一个企微机器人）
+    assert txt.startswith("【僚机】"), txt
 
 
 @case

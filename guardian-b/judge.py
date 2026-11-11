@@ -414,7 +414,10 @@ class Judge:
             car.append({"online": "车辆在线", "asleep": "车辆休眠",
                         "offline": "车辆离线"}.get(st, st))
         lines = [
-            "【停车自检·僚机代发】",
+            # 与 A 端统一成「【来源】标题」的写法：A 端是 `【A7Z】停车自检 …`，
+            # 这边是 `【僚机】停车自检 代发`。两边共用同一个企微机器人，
+            # 光看发送方名字分不出谁发的（M143）。
+            "【僚机】停车自检 代发",
             _fit(" · ".join(car) or "车态未知"),
             _fit("A7Z 心跳 " + (_human_age(min(ages)) if ages else "从未收到")),
             "A 无心跳，自检发不出",
@@ -479,10 +482,11 @@ class Judge:
         ls = self.store.data.get("last_seen") or {}
         ts_seen = float(ls.get("ts") or 0) > 0
         https_seen = float(ls.get("https") or 0) > 0
-        # 恢复消息也走窄排版：`【A7Z 自检·恢复】Tailscale 通道故障` 有 26 列，必折
+        # 恢复消息也走窄排版：`【A7Z 自检·恢复】Tailscale 通道故障` 有 26 列，必折。
+        # 方括号里**永远是发送方**：B 端发的就写【僚机】，后接说的是谁的事。
         short = {FAULT_TS: "TS 通道", FAULT_DEV: "设备失联"}.get(fault, fault)
         msg = "\n".join([
-            "【A7Z 恢复】%s" % short,
+            "【僚机】A7Z 已恢复",
             _fit("TS " + (_human_age(age_ts) if ts_seen else "未启用")),
             _fit("HTTPS " + (_human_age(age_https) if https_seen else "未启用")),
             "心跳正常，无需处理",
@@ -503,7 +507,7 @@ class Judge:
 
         if fault == FAULT_TS:
             return "\n".join([
-                "【A7Z】Tailscale 通道故障",
+                "【僚机】TS 通道故障",
                 "设备本体在线",
                 "TS %s ← 这条断了" % _human_age(age_ts),
                 "HTTPS %s ← 还在收心跳" % (_human_age(age_https) if https_seen else "未启用"),
@@ -517,8 +521,10 @@ class Judge:
             ages.append(age_https)
         v = body.get("vehicle") if isinstance(body.get("vehicle"), dict) else {}
         was_driving = str(v.get("state") or "").strip().lower() == "driving"
+        # 方括号 = 发送方。这条是 B 发的（设备失联时 A 已经死了，它自己发不出来），
+        # 写 `【A7Z】设备失联` 会让人以为是设备自己报的（M143）
         lines = [
-            "【A7Z】设备失联",
+            "【僚机】A7Z 失联",
             _fit("最后心跳 " + (_human_age(min(ages)) if ages else "从未收到")),
         ]
         # 车态可能有多段（在开 43km/h · 已锁 · D 档 · 哨兵开）：分段换成多行，一段都不丢

@@ -1264,6 +1264,9 @@ def _dur_short(sec) -> str:
 _ITEM_CN = {"net": "网络", "gadget": "USB链路", "thumb": "缩略图", "wechat": "企微推送"}
 # 停车自检的短标签：标签列宽 7（「缩略图」6 列 + 1 空格），其余补到 7
 _ITEM_SHORT = {"net": "网络", "gadget": "USB", "thumb": "缩略图", "wechat": "推送"}
+# Tailscale 状态短词（`tailscaled` 的 BackendState 小写形式）
+_TS_CN = {"stopped": "未运行", "needslogin": "待登录", "starting": "启动中",
+          "nobackendstate": "未知", "no": "未启用", "off": "未启用"}
 _TAG_W = 7
 _B_KIND_CN = {
     "timeout": "连接超时",
@@ -1909,12 +1912,21 @@ class GuardSender:
         """
         try:
             if key == "net":
-                if tier != "pass" and net.get("internet_ok") is not True:
-                    return "出网不通"
-                ssid = str(net.get("wifi_ssid") or "").strip()
-                if ssid:
-                    # 9 列：一行总宽 7+4+1+9 = 21，还留 1 列余量给 emoji 宽度误差
-                    return _clip(ssid, 9)
+                if tier != "pass":
+                    # 异常必须给出原因，否则只剩一个 `❗ 网络` 等于没说。
+                    # 注意 `internet_ok` 为 True 也可能是 Tailscale 掉了（两条独立的链路）
+                    if net.get("internet_ok") is not True:
+                        return "出网不通"
+                    ts = str(net.get("tailscale") or "").strip()
+                    if ts and ts.lower() != "running":
+                        # 不直接印英文状态：`TS Stopp…` 既被截断又和中文混排
+                        return "TS " + _TS_CN.get(ts.lower(), _clip(ts, 4))
+                    return "链路异常"
+                # SSID 不塞在这行：`网络   正常 YL-MIFI-000500` 有 31 列必折，
+                # 而截到 9 列又会变成 `YL-MIFI-…` 看不出连的是哪个热点（M143）。
+                # 它由 `_wifi_line()` 单独占一行完整显示。
+                if net.get("wifi_ssid"):
+                    return ""
                 return "出网正常" if net.get("internet_ok") else ""
             if key == "gadget":
                 if gad.get("udc_connected"):
@@ -1933,7 +1945,9 @@ class GuardSender:
                 age = th.get("last_scan_age_s")
                 # 正常态只报「积压几」——它同时也是"扫描还在跑"的证据
                 if q > 0 and tier != "pass" and isinstance(age, (int, float)):
-                    return "积压%d·%s前" % (q, _dur_short(age))
+                    # 不带「前」：`⚠ 缩略图 积压128·15秒前` 是 24 列会被截断，
+                    # 去掉这一个字正好 22；语义由同一行的「积压」兜住
+                    return "积压%d·%s" % (q, _dur_short(age))
                 return "积压%d" % q
             if key == "wechat":
                 if tier == "pass":
@@ -2010,6 +2024,17 @@ class GuardSender:
                                          "正常", (" " + ev) if ev else "")).rstrip()))
         return out
 
+    def _wifi_line(self, snap: Dict[str, Any]) -> str:
+        """把当前 SSID 完整显示成一行（最多 22 列，超出才截断）。
+
+        单独占一行的原因：塞进 `网络 正常 …` 那行会折行，截到 9 列又看不出是家宽
+        还是车载热点 —— 而这恰恰是排查「回家没连上 WiFi」时最要看的信息（M143）。
+        """
+        ssid = str((snap.get("net") or {}).get("wifi_ssid") or "").strip()
+        if not ssid:
+            return ""
+        return _fit("%s%s" % (_pad("WiFi", _TAG_W), _clip(ssid, _LINE_MAX - _TAG_W)))
+
     def _advice_line(self, snap: Dict[str, Any]) -> str:
         items = (snap.get("selfcheck") or {}).get("items") or {}
         tips = [self._ADVICE[k] for k in self._ITEM_ORDER
@@ -2022,9 +2047,15 @@ class GuardSender:
         result = str(sc.get("result") or "unknown")
         v = snap.get("vehicle") or {}
         icon = {"pass": "✅", "warn": "⚠️", "fail": "❗"}.get(result, "•")
-        lines = ["【停车自检】%s %s" % (icon, _TIER_CN.get(result, "未知"))]
+        # 标题必须带来源：A 与 B 用的是**同一个企微机器人**（`wecom_guard_webhook_key`
+        # 双持有），手机里发送方名字都叫「A7Z守护」，正文不标就分不出是谁发的。
+        # `✅正常` 中间那格空格去掉：`【A7Z】停车自检 ✅ 正常` 是 23 列会折。
+        lines = ["【A7Z】停车自检 %s%s" % (icon, _TIER_CN.get(result, "未知"))]
         lines.extend(self._vehicle_lines(v, restarted))
         lines.extend(self._fmt_items_aligned(snap))
+        wifi = self._wifi_line(snap)
+        if wifi:
+            lines.append(wifi)
         advice = self._advice_line(snap)
         if advice:
             lines.append(advice)

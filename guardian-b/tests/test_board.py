@@ -155,12 +155,12 @@ def t_lock_relay_when_device_silent():
     j.on_board(parse_board(page(UNLOCKED)), now=1000)
     j.on_board(parse_board(page()), now=1060)
     j.tick(now=1060 + GRACE + 1)                       # 设备已静默 >> WARN
-    relay = [m for m in al.sent if "僚机代发" in m]
+    relay = [m for m in al.sent if "【僚机】" in m]
     assert len(relay) == 1, al.sent
     # 代发已把「设备失联」一并告知，同一拍不得再推一条通用失联
     assert not [m for m in al.sent if "设备失联" in m.split("\n")[0]], al.sent
     txt = relay[0]
-    assert "僚机代发" in txt and "已锁" in txt and "心跳" in txt, txt
+    assert "【僚机】停车自检 代发" in txt and "已锁" in txt and "心跳" in txt, txt
     # 行宽：企微手机端约 26~28 列折行，本模板必须每行 ≤ LINE_MAX
     import judge as jm
     over = ["%d|%s" % (jm._disp_width(l), l) for l in txt.split("\n")
@@ -168,7 +168,7 @@ def t_lock_relay_when_device_silent():
     assert not over, "代发文案存在超宽行：%s" % over
     assert store.data["lock_check"]["done"] is True
     j.tick(now=1060 + GRACE + 100)                     # 同一把锁不重复
-    assert len([m for m in al.sent if "僚机代发" in m]) == 1, al.sent
+    assert len([m for m in al.sent if "【僚机】" in m]) == 1, al.sent
 
 
 @case

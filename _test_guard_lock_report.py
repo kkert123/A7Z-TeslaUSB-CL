@@ -202,8 +202,8 @@ def main():
         s._maybe_lock_report(snap(False))                 # 基准：未锁
         ok("C2 未锁→已锁 触发", s._maybe_lock_report(snap(True)) is True)
         eq("C3 推送条数", len(s.pushed), 1)
-        ok("C4 文案含停车自检",
-           "【停车自检】" in s.pushed[0] and "已锁" in s.pushed[0],
+        ok("C4 文案含停车自检且标明来源 A7Z",
+           "【A7Z】停车自检" in s.pushed[0] and "已锁" in s.pushed[0],
            s.pushed[0][:60])
         ok("C5 推送后仍保持 locked 基准", s._prev_locked is True)
         ok("C6 已锁→已锁 不重复", s._maybe_lock_report(snap(True)) is False)
