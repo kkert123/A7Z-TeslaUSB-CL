@@ -172,6 +172,20 @@
         </span>
       </div>
       <div id="peer-msg" style="font-size:0.72rem;margin-top:6px;line-height:1.6"></div>
+
+      <!-- 回退到本地保留的旧版本：升级出问题时不必先修好包，直接退回去 -->
+      <div id="peer-rb-box" style="display:none;margin-top:8px;padding-top:8px;border-top:0.5px dashed var(--border)">
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px">
+          回退到（本地保留的版本，仅列出可运行的）
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select id="peer-rb-ver" class="btn btn-sm btn-outline"
+                  style="padding:4px 6px;font-size:0.72rem;min-width:110px"></select>
+          <button class="btn btn-sm btn-outline" id="btn-peer-rb" onclick="peerRollback()">回退</button>
+          <span id="peer-rb-msg" style="font-size:0.7rem;color:var(--text-muted)"></span>
+        </div>
+      </div>
+
       <div style="font-size:0.66rem;color:var(--text-muted);margin-top:4px">
         包由离线签名机签发，A 端只做分发；僚机独立验签并要求人工输码后才切换。
       </div>
@@ -1858,6 +1872,7 @@ async function loadPeer(manual, holdMsg) {
     peerDot('ok');
     peerState('ok', '在线');
     document.getElementById('peer-ver').textContent = 'v' + (p.version || '?');
+    loadPeerReleases(p.version || '');
 
     var st = p.state || 'idle';
     _peer.lastState = st;
@@ -2060,6 +2075,72 @@ async function peerConfirm() {
   }
 }
 
+// ── 僚机版本回退（v0.3.1.88）──────────────────────────────
+// 升级出问题时，比"重新打一个包"快得多的处置是直接退回上一版。
+// 列表来自 B 的 `/guard/releases`（本地保留 ≤3 个），只列 ok 的目录。
+var _peerRbAt = 0;
+
+function loadPeerReleases(cur, force) {
+  var box = document.getElementById('peer-rb-box');
+  var sel = document.getElementById('peer-rb-ver');
+  if (!box || !sel) return;
+  var now = Date.now();
+  // 节流：这个列表只在升级/回退后才会变，没必要跟着 30s 轮询一起拉
+  if (!force && now - _peerRbAt < 120000) return;
+  _peerRbAt = now;
+  fetch('/api/guard/peer/releases')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.success) { box.style.display = 'none'; return; }
+      var cv = String(cur || d.current || '');
+      var cand = (d.releases || []).filter(function (x) {
+        return x && x.ok && x.version !== cv;
+      });
+      if (!cand.length) { box.style.display = 'none'; return; }
+      sel.innerHTML = cand.map(function (x) {
+        return '<option value="' + escapeHtml(x.version) + '">v' + escapeHtml(x.version) + '</option>';
+      }).join('');
+      box.style.display = '';
+    })
+    .catch(function () { box.style.display = 'none'; });
+}
+
+function peerRollback() {
+  var sel = document.getElementById('peer-rb-ver');
+  var msg = document.getElementById('peer-rb-msg');
+  var btn = document.getElementById('btn-peer-rb');
+  var ver = sel ? String(sel.value || '') : '';
+  if (!ver) return;
+  var curEl = document.getElementById('peer-ver');
+  var cur = curEl ? String(curEl.textContent || '').replace(/^v/, '') : '';
+  var ok = confirm('确认把僚机回退到 v' + ver + '？\n\n'
+    + '当前版本：v' + cur + '\n'
+    + '回退会切换软链并重启僚机，约 10 秒内不可用。\n'
+    + '若回退后跑不起来，会自动切回 v' + cur + '。');
+  if (!ok) return;
+  btn.disabled = true;
+  if (msg) { msg.textContent = '回退中…'; msg.style.color = 'var(--text-muted)'; }
+  fetch('/api/guard/peer/rollback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version: ver })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (!d.success) {
+      if (msg) { msg.textContent = '✗ ' + (d.error || '失败'); msg.style.color = '#e74c3c'; }
+      return;
+    }
+    if (msg) {
+      msg.textContent = '已下发：v' + (d.from || cur) + ' → v' + (d.to || ver) + '，僚机重启中…';
+      msg.style.color = '#34c759';
+    }
+    // 僚机要重启：8s / 18s 各刷一次，第二次基本能读到新版本
+    setTimeout(function () { peerRefreshNow(); loadPeerReleases('', true); }, 8000);
+    setTimeout(function () { peerRefreshNow(); loadPeerReleases('', true); }, 18000);
+  }).catch(function () {
+    if (msg) { msg.textContent = '✗ 网络错误'; msg.style.color = '#e74c3c'; }
+  }).finally(function () { btn.disabled = false; });
+}
+
 // 轮询终态判定（纯函数）。抽出来是为了能被 node 单测钉死：
 // 这个判定错一次，卡片就会永远停在「切换中」，只能整页刷新才恢复（M138）。
 //   done   → healthy，升级完成
@@ -2138,7 +2219,9 @@ function checkVersionNow() {
   if (btnUp) btnUp.style.display = 'none';
   _upgradeData = null;
 
-  fetch('/api/version/check')
+  // force=1：用户明确点「检查版本」，必须绕过 6 小时缓存真去问 GitHub。
+  // 不带它的话，按钮在缓存期内点了等于没点（M144）。
+  fetch('/api/version/check?force=1')
     .then(r => r.json()).then(d => {
       if (!d.success || d.error) { le.textContent = d.error || '失败'; se.textContent = '警告'; se.style.color = 'var(--warning)'; return; }
       le.textContent = d.latest ? 'v' + d.latest : '—';

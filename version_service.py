@@ -18,6 +18,8 @@ GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 CHECK_INTERVAL = 21600          # 成功缓存 6h（4 次/天，占配额 0.3%）
 FAILURE_CACHE_TTL = 1800        # 失败也缓存 30min——防 30s 轮询轰炸（本次事故放大器）
 MIN_REQUEST_INTERVAL = 600      # 距上次实际请求 <10min 一律用缓存
+# force（用户主动点「检查版本」）的最小间隔：绕过 6h 缓存，但不允许连点打爆配额
+FORCE_MIN_INTERVAL = 30
 RATE_GUARD_REMAINING = 10       # 匿名余量低于此值 → 静默到配额重置时刻
 
 _lock = threading.Lock()
@@ -105,6 +107,13 @@ def check_latest_release(force=False):
                 cached = result_placeholder()
                 cached['error'] = 'GitHub 匿名配额保护中，稍后自动恢复'
             return dict(cached)
+
+        # force（用户点「检查版本」）也要有个下限：连点会把匿名配额打光。
+        # 30 秒内重复点 = 同一次检查，直接给缓存。
+        if force and (now - _last_request_ts) < FORCE_MIN_INTERVAL:
+            cached = _failure_cache or (dict(state._version_cache) if state._version_cache else None)
+            if cached is not None:
+                return dict(cached)
 
         if not force:
             with state.version_cache_lock:

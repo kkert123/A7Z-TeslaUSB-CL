@@ -413,11 +413,85 @@ def main():
             pass
 
 
+def do_rollback(journal_path, j, req_path):
+    """用户主动回退到本地已有的 release（不走签名，因为目录已在本机且由 root 维护）。
+
+    **失败必须自动切回原版本**：回退过去跑不起来是最坏情况——僚机罢工等于守护没了。
+    与升级失败回滚是同一套兜底，只是方向相反。
+
+    `prune` 故意不调用：把刚离开的版本留着，用户可能马上要退回来。
+    `.trusted/floor` 也**不动**——它是「不许降级到有漏洞版本」的安全下限，
+    一次运维回退不应该把它调低，否则降级可以绕过安全检查。
+    """
+    target_ver = str(j.get("version") or "")
+    if not VER_RE.match(target_ver):
+        return fail(journal_path, j, "bad_target_version")
+
+    cur = os.path.join(DEST, "current")
+    releases = os.path.join(DEST, "releases")
+    target = os.path.join(releases, target_ver)
+    if not os.path.isdir(target):
+        return fail(journal_path, j, "target_missing")
+    for f in ("app.py", "config.py"):
+        if not os.path.exists(os.path.join(target, f)):
+            return fail(journal_path, j, "target_incomplete: " + f)
+    if os.path.isdir(cur) and not os.path.islink(cur):
+        return fail(journal_path, j, "legacy_layout")
+
+    # 以 current 实际指向为准（账本在 data/ 下，guardb 可写，不能信）
+    cur_ver = os.path.basename(os.readlink(cur)) if os.path.islink(cur) else ""
+    if cur_ver == target_ver:
+        j.update(state="rolled_back_ok", error="", note="already_there",
+                 updated_at=int(time.time()))
+        write_json(journal_path, j, mode=0o640, owner="guardb")
+        log("current 已是 %s，无需回退", target_ver)
+        return 0
+
+    unit = env_get("GUARD_UNIT", "guard-b")
+    host = env_get("GUARD_BIND_HOST", "100.111.252.121")
+    port = env_get("GUARD_BIND_PORT", "8899")
+    token = env_get("GUARD_TOKEN", "")
+
+    log("回退：%s → %s", cur_ver or "-", target_ver)
+    swap_symlink(cur, target)
+    okr, whyr = restart_unit(unit)
+    if not okr:
+        log("重启失败：%s", whyr)
+    ok, why = health_check(target_ver, host, port, token, budget_s=45)
+    if ok:
+        j.update(state="rolled_back_ok", error="", updated_at=int(time.time()))
+        write_json(journal_path, j, mode=0o640, owner="guardb")
+        log("回退完成：%s → %s", cur_ver or "-", target_ver)
+        return 0
+
+    # 回退失败 → 切回原版本，别把僚机留在起不来的状态
+    log("回退后健康检查失败（%s），切回 %s", why, cur_ver or "-")
+    back_ok = False
+    if VER_RE.match(cur_ver):
+        old_dir = os.path.join(releases, cur_ver)
+        if os.path.isdir(old_dir):
+            swap_symlink(cur, old_dir)
+            restart_unit(unit)
+            back_ok, _why2 = health_check(cur_ver, host, port, token, budget_s=45)
+    j.update(state="rollback_failed",
+             error="healthcheck_failed: " + why,
+             back_ok=bool(back_ok),
+             updated_at=int(time.time()))
+    write_json(journal_path, j, mode=0o640, owner="guardb")
+    return 4
+
+
 def _run():
     journal_path = os.path.join(DEST, "data", "upgrade", "journal.json")
     req_path = os.path.join(DEST, "data", "upgrade", "request")
     j = read_json(journal_path)
     state = j.get("state")
+
+    # 主动回退：与升级是两条独立通道，判据严格等于 "rollback"，
+    # 保证 install 路径（state=committed）逐字节不受影响（M139）
+    if state == "rollback":
+        log("收到回退请求：target=%s", j.get("version"))
+        return do_rollback(journal_path, j, req_path)
     if state != "committed":
         log("journal 状态为 %r，无需操作", state)
         # 顺手清掉触发文件，否则 path unit 会在下次启动时再跑一遍

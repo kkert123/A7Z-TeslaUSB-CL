@@ -379,9 +379,152 @@ def a13_prepare成功后触发推送():
     ok(int(args[5]) == up.CONFIRM_TTL_S, "推送必须带有效期：%r" % (args[5],))
 
 
+# ── 版本回退（v1.1.6）────────────────────────────────────────
+
+REL = os.path.join(TMPDIR, "releases")
+CUR_LINK = os.path.join(TMPDIR, "current")
+
+
+def mk_rel(v, complete=True):
+    d = os.path.join(REL, v)
+    os.makedirs(d, exist_ok=True)
+    for name in (("app.py", "config.py") if complete else ("app.py",)):
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write("# %s\n" % name)
+    return d
+
+
+class Skip(Exception):
+    """本机缺能力（Windows 建符号链接需要特权）→ 跳过，不算失败。"""
+
+
+def _can_symlink():
+    t = os.path.join(TMPDIR, ".symtest")
+    try:
+        os.symlink(TMPDIR, t)
+        os.unlink(t)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def mk_helper(supports_rollback=True):
+    """造一个假的 root helper（B 端靠 grep `def do_rollback(` 判断它支不支持回退）。"""
+    d = os.path.join(TMPDIR, ".tools")
+    os.makedirs(d, exist_ok=True)
+    body = "# fake helper\n"
+    if supports_rollback:
+        body += "def do_rollback(journal_path, j, req_path):\n    pass\n"
+    with open(os.path.join(d, "apply.py"), "w", encoding="utf-8") as f:
+        f.write(body)
+
+
+def setup_rels():
+    if not _can_symlink():
+        raise Skip("本机没有创建符号链接的权限（需在 Linux/真机跑）")
+    os.makedirs(REL, exist_ok=True)
+    mk_helper(True)
+    for v in ("1.1.3", "1.1.4", "1.1.5"):
+        mk_rel(v)
+    mk_rel("1.1.2", complete=False)          # 残缺目录：不得出现在可选项里
+    if os.path.lexists(CUR_LINK):
+        os.unlink(CUR_LINK)
+    os.symlink(os.path.join(REL, "1.1.5"), CUR_LINK)
+    jp = os.path.join(UPDIR, "journal.json")
+    if os.path.exists(jp):
+        os.remove(jp)
+    rq = os.path.join(UPDIR, "request")
+    if os.path.exists(rq):
+        os.remove(rq)
+
+
+@case
+def b1_版本列表_降序且标出可运行():
+    setup_rels()
+    rels = gapp.list_releases(REL, "1.1.5")
+    vs = [r["version"] for r in rels]
+    ok(vs == ["1.1.5", "1.1.4", "1.1.3", "1.1.2"], vs)
+    ok([r for r in rels if r["version"] == "1.1.5"][0]["current"] is True, rels)
+    bad = [r for r in rels if r["version"] == "1.1.2"][0]
+    ok(bad["ok"] is False and "config.py" in bad["missing"], bad)
+
+
+@case
+def b2_版本列表_目录不存在返回空表不抛():
+    ok(gapp.list_releases(os.path.join(TMPDIR, "nope"), "") == [], "不存在应返回 []")
+
+
+@case
+def b3_releases接口():
+    setup_rels()
+    c = client()
+    r = c.get("/guard/releases", headers=H)
+    ok(r.status_code == 200, r.status_code)
+    d = r.get_json()
+    ok(d.get("ok") is True and isinstance(d.get("releases"), list), d)
+    ok(d.get("current") == "1.1.5", d.get("current"))
+
+
+@case
+def b4_回退_非法输入一律拒绝():
+    setup_rels()
+    c = client()
+    r = c.post("/guard/rollback", json={"version": "1.1"}, headers=H)
+    ok(r.status_code == 400 and r.get_json()["error"] == "bad_version", r.get_json())
+    r = c.post("/guard/rollback", json={"version": "9.9.9"}, headers=H)
+    ok(r.status_code == 400 and r.get_json()["error"] == "unknown_version", r.get_json())
+    r = c.post("/guard/rollback", json={"version": "1.1.5"}, headers=H)
+    ok(r.status_code == 400 and r.get_json()["error"] == "already_on_that_version", r.get_json())
+    r = c.post("/guard/rollback", json={"version": "1.1.2"}, headers=H)
+    ok(r.status_code == 400 and r.get_json()["error"] == "release_incomplete", r.get_json())
+
+
+@case
+def b5_回退_写账本并投递触发文件():
+    setup_rels()
+    c = client()
+    r = c.post("/guard/rollback", json={"version": "1.1.4"}, headers=H)
+    ok(r.status_code == 200 and r.get_json().get("ok") is True, r.get_json())
+    with open(os.path.join(UPDIR, "journal.json"), encoding="utf-8") as f:
+        j = json.load(f)
+    ok(j["state"] == "rollback", j)
+    ok(j["version"] == "1.1.4" and j["from_version"] == "1.1.5", j)
+    # 没有触发文件 → path unit 不会启动 → 回退永远不发生（比报错更难查）
+    ok(os.path.exists(os.path.join(UPDIR, "request")), "必须写 request 触发文件")
+
+
+@case
+def b6_回退_handler过旧时明确拒绝():
+    """apply.py 不在升级包内 —— helper 没换时绝不能"接受但什么都不做"。"""
+    setup_rels()
+    mk_helper(False)                      # 旧 helper：没有 do_rollback
+    try:
+        c = client()
+        r = c.post("/guard/rollback", json={"version": "1.1.4"}, headers=H)
+        ok(r.status_code == 501, r.status_code)
+        ok(r.get_json().get("error") == "helper_too_old", r.get_json())
+        # 拒绝就绝不能留下账本（否则下次 apply 起来会莫名其妙执行一次回退）
+        jp = os.path.join(UPDIR, "journal.json")
+        ok(not os.path.exists(jp) or json.load(open(jp)).get("state") != "rollback",
+           "helper 过旧时不得写 rollback 账本")
+    finally:
+        mk_helper(True)
+
+
+@case
+def b7_回退_升级进行中被拒():
+    setup_rels()
+    with open(os.path.join(UPDIR, "journal.json"), "w", encoding="utf-8") as f:
+        json.dump({"state": "committed", "version": "1.1.7", "job": "a" * 16}, f)
+    c = client()
+    r = c.post("/guard/rollback", json={"version": "1.1.3"}, headers=H)
+    ok(r.status_code == 409 and r.get_json()["error"] == "upgrade_in_progress", r.get_json())
+
+
 def main():
     setup_key()
     passed = 0
+    skipped = 0
     total = len(RESULTS)
     for fn in RESULTS:
         name = fn.__name__
@@ -389,13 +532,16 @@ def main():
             fn()
             passed += 1
             print("  PASS  %s" % name)
+        except Skip as exc:
+            skipped += 1
+            print("  SKIP  %s  (%s)" % (name, exc))
         except AssertionError as exc:
             print("  FAIL  %s  -> %s" % (name, exc))
         except Exception:
             import traceback
             print("  ERROR %s" % name)
             traceback.print_exc()
-    print("\n%d/%d passed" % (passed, total))
+    print("\n%d/%d passed（跳过 %d）" % (passed, total - skipped, skipped))
     return 0 if passed == total else 1
 
 

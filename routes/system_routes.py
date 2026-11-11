@@ -855,7 +855,11 @@ def api_version_check():
     """
     try:
         import version_service
-        result = version_service.check_latest_release()
+        # `?force=1`：用户主动点「检查版本」时必须真去问 GitHub。
+        # 不加这个，6 小时缓存会让人以为按钮坏了——现场是「先重启服务再点检查
+        # 才能看到新版本」，因为重启把内存里的 _version_last_check 清零了（M144）。
+        force = str(request.args.get('force') or '').lower() in ('1', 'true', 'yes')
+        result = version_service.check_latest_release(force=force)
         running = str(result.get('current') or getattr(config, 'APP_VERSION', '') or '')
         disk = _disk_version()
         out = {'success': True, **result,
@@ -1855,6 +1859,46 @@ def api_guard_peer_confirm():
         if not ok:
             return jsonify({'success': False, 'error': _peer_err(err)}), 400
         return jsonify({'success': True, 'message': '已确认，僚机正在切换版本并重启（约 1 分钟）'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/peer/releases', methods=['GET'])
+def api_guard_peer_releases():
+    """僚机本地保留的版本列表（给「回退到哪个版本」下拉用）。"""
+    try:
+        import guard_client
+        ok, payload, err = guard_client.peer_list_releases()
+        if not ok:
+            return jsonify({'success': False, 'error': _peer_err(err)}), 400
+        payload = payload if isinstance(payload, dict) else {}
+        return jsonify({'success': True,
+                        'current': payload.get('current'),
+                        'running': payload.get('running'),
+                        'releases': payload.get('releases') or []})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@system_bp.route('/api/guard/peer/rollback', methods=['POST'])
+def api_guard_peer_rollback():
+    """让僚机回退到指定版本。
+
+    校验全部在 B 端做（目标是否合法/完整、是否正在升级）；A 只转达，
+    避免出现「A 认为可以、B 拒绝」这种两套判据打架的局面。
+    """
+    try:
+        import guard_client
+        data = request.get_json(silent=True) or {}
+        ver = str(data.get('version') or '').strip()
+        if not ver:
+            return jsonify({'success': False, 'error': '缺少目标版本'}), 400
+        ok, payload, err = guard_client.peer_rollback(version=ver)
+        if not ok:
+            return jsonify({'success': False, 'error': _peer_err(err)}), 400
+        payload = payload if isinstance(payload, dict) else {}
+        return jsonify({'success': True,
+                        'from': payload.get('from'), 'to': payload.get('to')})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

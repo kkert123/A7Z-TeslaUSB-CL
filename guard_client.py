@@ -2877,6 +2877,24 @@ def peer_confirm(cfg: Optional[Dict[str, Any]] = None, job: str = "",
     return ok, payload, err
 
 
+def peer_list_releases(cfg: Optional[Dict[str, Any]] = None) -> tuple:
+    """列僚机本地保留的 release（供页面做「回退到哪个版本」下拉）。"""
+    cfg = cfg or load_config()
+    return peer_call(cfg, "GET", "/guard/releases", timeout=10)
+
+
+def peer_rollback(cfg: Optional[Dict[str, Any]] = None, version: str = "") -> tuple:
+    """让僚机回退到指定版本。
+
+    这里只负责转发，**不做任何"尽力而为"**：目标版本是否合法、目录是否完整、
+    是否正在升级中，全部由 B 端判定 —— A 端不是可信方，不该替 B 做决定。
+    超时给 20s（B 收到就立刻回，切版本是后台异步做的）。
+    """
+    cfg = cfg or load_config()
+    return peer_call(cfg, "POST", "/guard/rollback",
+                     json_body={"version": str(version or "")}, timeout=20)
+
+
 def peer_upgrade_state(cfg: Optional[Dict[str, Any]] = None, job: str = "") -> tuple:
     cfg = cfg or load_config()
     q = ("?job=" + job) if job else ""

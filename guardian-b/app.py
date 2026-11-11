@@ -22,6 +22,8 @@ import ipaddress
 import json
 import logging
 import os
+import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -45,7 +47,7 @@ _ERR_STATUS = {
     "verifier_missing": 503,
 }
 
-VERSION = "1.1.6"
+VERSION = "1.1.7"
 
 
 def _notify_code(alerter, cfg, job, code, version, ttl, src_ip):
@@ -133,6 +135,44 @@ def setup_logging(cfg) -> None:
 
 
 # ── 应用工厂 ────────────────────────────────────────────────
+VER_DIR_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
+
+
+def list_releases(releases_dir, current=""):
+    """列出本地保留的 release，按版本号**降序**。
+
+    ⚠️ 这个函数必须待在 `app.py` 里，不能放在 `upgrade.py`：
+    后者属于 `.tools/`（**不在升级包内**，它能验签所以不能让包覆盖）。
+    放错地方的话，升级后 app.py 是新的、upgrade.py 还是旧的 → AttributeError，
+    `/guard/releases` 直接 500，而且用户完全看不出为什么（M145）。
+
+    `ok=False` 的目录不给用户选：回退到「半成品目录」（解压中断 / 配置被搬走）
+    等于让僚机直接起不来，比不回退糟得多。这里判一次，apply.py 里还会再判一次
+    —— 它是 root 侧，不能信任 guardb 传来的东西。
+    """
+    out = []
+    try:
+        names = os.listdir(releases_dir)
+    except OSError:
+        return out
+    for n in names:
+        if not VER_DIR_RE.match(n):
+            continue
+        d = os.path.join(releases_dir, n)
+        if not os.path.isdir(d):
+            continue
+        missing = [f for f in ("app.py", "config.py") if not os.path.exists(os.path.join(d, f))]
+        try:
+            size = sum(os.path.getsize(os.path.join(d, f))
+                       for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
+        except OSError:
+            size = 0
+        out.append({"version": n, "ok": not missing, "missing": missing,
+                    "current": (n == current), "size": size})
+    out.sort(key=lambda x: tuple(int(i) for i in x["version"].split(".")), reverse=True)
+    return out
+
+
 def create_app(cfg=None):
     cfg = cfg or load_config()
     app = Flask("guard-b")
@@ -425,6 +465,104 @@ def create_app(cfg=None):
             except Exception:
                 pass
         return out
+
+    def _apply_supports_rollback():
+        """root helper 是否支持主动回退。
+
+        `apply.py` 按设计**不在升级包内**（它能写 /opt/guard-b，被包覆盖等于提权），
+        所以「B 升上去了、helper 还是旧的」是常态。旧 helper 读到 state=rollback
+        只会走「非 committed → 清 request 返回 0」——**接受了但什么都不做**，
+        这种静默失败比报错难查得多，所以进门先问一句。
+        """
+        p = os.path.join(os.path.dirname(cfg.upgrade_dir.rstrip("/")), ".tools", "apply.py")
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                return "def do_rollback(" in f.read()
+        except OSError:
+            return False
+
+    def _current_release():
+        """current 软链指向的版本号（空串 = 读不到）。"""
+        cur = os.path.join(os.path.dirname(cfg.releases_dir.rstrip("/")), "current")
+        try:
+            if os.path.islink(cur):
+                return os.path.basename(os.readlink(cur))
+        except OSError:
+            pass
+        return ""
+
+    @app.route("/guard/releases", methods=["GET"])
+    def guard_releases():
+        """本地保留的 release 列表（供 A 端做「回退到哪个版本」下拉）。
+
+        只读，不改任何状态；`ok=False` 的目录照样列出来但前端禁选，
+        让用户看到「这里有个坏目录」比直接藏起来更利于排查。
+        """
+        bad = _up_guard()
+        if bad:
+            return bad
+        cur = _current_release()
+        rels = list_releases(cfg.releases_dir, cur)
+        return jsonify({"ok": True, "current": cur or VERSION,
+                        "running": VERSION, "releases": rels})
+
+    @app.route("/guard/rollback", methods=["POST"])
+    def guard_rollback():
+        """主动回退到本地某个 release。
+
+        安全边界（不加深）：
+          · 只接受 token + 仅 TS 网段（与升级接口同一套守卫）；
+          · 目标必须是 `releases/` 下已存在且**完整**的目录；
+          · 不接受的输入一概 400，绝不"尽力而为"。
+        真正的切版本由 root helper 做，这里只写账本 + 投递请求。
+        """
+        bad = _up_guard()
+        if bad:
+            return bad
+        if not _apply_supports_rollback():
+            logger.warning("拒绝回退：root helper 版本过旧（缺 do_rollback）")
+            return jsonify({"ok": False, "error": "helper_too_old",
+                            "detail": "先安装新版 .tools/apply.py 再回退"}), 501
+        data = request.get_json(silent=True) or {}
+        want = str(data.get("version") or "").strip()
+        if not upgrade_lib or not VER_DIR_RE.match(want):
+            return jsonify({"ok": False, "error": "bad_version"}), 400
+
+        cur = _current_release()
+        if want == cur:
+            return jsonify({"ok": False, "error": "already_on_that_version",
+                            "current": cur}), 400
+
+        rels = {r["version"]: r for r in list_releases(cfg.releases_dir, cur)}
+        target = rels.get(want)
+        if target is None:
+            return jsonify({"ok": False, "error": "unknown_version",
+                            "available": sorted(rels.keys())}), 400
+        if not target.get("ok"):
+            return jsonify({"ok": False, "error": "release_incomplete",
+                            "missing": target.get("missing")}), 400
+
+        # 正在升级/暂存中一律拒绝：两条流程同时改 current 必然打架
+        try:
+            j = _journal()
+        except Exception:
+            return jsonify({"ok": False, "error": "journal_unreadable"}), 503
+        st = str(j.data.get("state") or "")
+        if st in ("committed", "prepared", "verified", "rollback"):
+            return jsonify({"ok": False, "error": "upgrade_in_progress", "state": st}), 409
+
+        j.data = {
+            "state": "rollback",
+            "version": want,
+            "from_version": cur,
+            "job": secrets.token_hex(8),
+            "requested_at": int(time.time()),
+            "requested_by": "api",
+        }
+        j.save()
+        logger.warning("接受回退请求：%s → %s", cur, want)
+        _request_apply()
+        return jsonify({"ok": True, "from": cur, "to": want})
 
     @app.route("/guard/upgrade/prepare", methods=["POST"])
     def upgrade_prepare():
