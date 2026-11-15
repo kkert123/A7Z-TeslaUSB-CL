@@ -232,7 +232,7 @@ ssh.close()
 2. **MCP GitHub 只有读权限**（403），写操作必须走 curl + PAT
 3. **git push 关凭证助手**：`-c credential.helper=` + `GIT_TERMINAL_PROMPT=0`
 4. **sudo 无 tty**：用 `echo 'pwd' | sudo -S`
-5. **版本检测缓存 6h**（成功结果缓存 6h）；急用可 `systemctl restart teslausb-web` 清缓存
+5. **版本检测缓存 6h**（`version_service.CHECK_INTERVAL`）；v0.3.1.88 起页面「检查版本」带 `?force=1` 绕缓存（服务端 30s 最小间隔防连点）。**命令行查版本也必须带 `?force=1`**，否则读到的是内存缓存，会被误判成「GitHub 上没有新版本」（M144）
 6. **Release body 必须含 `SHA256: <64hex>`，冒号后紧跟 hex、禁止任何包裹符号**（反引号/引号都不行）——设备端 `version_service.py` 正则 `(?:SHA-?256|sha256)[:\s]+([a-fA-F0-9]{64})` 提取，包裹字符会导致解析失败、升级被前端拦下（**M76**）
 7. **tag 用 `target_commitish=master`**，且 `GET /git/ref/tags/{TAG}` 的 sha == push 的 HEAD（M61）
 8. **资产上传走 `uploads.github.com`**（M56）；发布后核对 asset `digest` == 本地 sha256sum == body 声明（M26/M72）
@@ -259,3 +259,17 @@ ssh.close()
 13. **验活/预检要打「根端点」，别复用带 `/repos/{REPO}` 前缀的 `api()` helper**（M91）：`/user` 交给该 helper 会拼出 `https://api.github.com/repos/{owner}/{repo}/user` → **404**（GitHub 对坏端点与坏凭据都回 404，无法凭状态码区分）→ 误报「PAT 失效」。给 helper 留 `abs_url` 逃生口；排查时打印命中的**绝对 URL**；守卫上线前用真实请求实证「该亮绿灯时确实绿灯」。
 14. **真机部署验证以设备状态为准，不看发起请求的返回**（M92）：一键升级可能耗时数分钟（镜像 stall），客户端超时/空响应 ≠ 失败；判据 = `progress.running` + `readlink` symlink + `APP_VERSION`。**禁止并发发起升级**（共用 `/tmp` 包路径会互踩 → 假性 SHA-256 失败）。
 15. **对比设备/打包产物与 git blob 必须忽略 CRLF**（M93）：Windows 工作树 `core.autocrlf` → 包/设备文件常为 CRLF，而 `git show <ref>:<file>` 是 LF；直接比 sha256 会**整文件全红**被误判为「文件漂移」。先判行尾（`grep -qU $'\r'`），比对用 `diff --strip-trailing-cr` 或归一化后再哈希。「全红且行数相同」= 行尾差异指纹。
+
+16. **发布脚本里版本号只能出现一次**（M142）：`TARBALL = f"teslausb-{TAG}.tar.gz"`、`SIG = TARBALL + ".sig"`，
+    其余路径全部派生。**从上一版脚本复制是最高危动作**——2026-11-10 只替换了 `...tar.gz"` 这种写法，
+    而 `.sig` 那行是 `...tar.gz.sig"`（结尾不同）没命中 → 把 v0.3.1.84 的旧签名当成 86 传了上去，
+    而脚本自带的四项自检**全部通过**（它们只校验 `TARBALL`，没有一项校验 `SIG`）。
+    改完必须 `diff` 上一版脚本逐行看，不能只做搜索替换。
+17. **验收方式是「把资产下载回来真验签」**（M142）：`GET /releases/assets/<id>`（`Accept: application/octet-stream`）
+    下载包 + sig → `ssh-keygen -Y verify` 必须 Good。它同时覆盖「传错文件」与「传错名字」两类错误，
+    比 digest/资产名比对更硬 —— 这两类比对都可能是"自洽的错误"。
+18. **发版前确认新功能代码真的在包里**（M145）：`/opt/guard-b/.tools/`（`apply.py`/`upgrade.py`）、
+    守卫脚本等目录**故意不进升级包**（它们能写安装目录，被包覆盖等于提权）。
+    把功能写进去 = 升级后不生效（`app.py` 新版调 `upgrade.py` 旧函数 → AttributeError）。
+    核对：`tar tzf <.tar.gz> | grep <新增文件>`；确属 `.tools/` 的，在 Release body 写「需手工 install」。
+

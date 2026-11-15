@@ -414,3 +414,86 @@ GET  /guard/upgrade/status?job=<id> → {phase, pct, need_confirm?, error_kind?}
 2. **校验的对象必须是"不可被同一权限改写"的东西**。清单和它描述的文件放在同一个可写目录里，等于自己给自己发证书。
 3. **凡是从"低权限可写区"读出来的路径，都不能直接交给高权限进程使用**。要用就先推导、再校验形状、最后校验 realpath。
 4. **"先验后用"必须变成"验的就是用的那一份"**（同一个 fd / 同一份内存字节）。分两次读，中间就有一扇门。
+
+---
+
+## 13. v1.1.5 ~ v1.1.7 / A v0.3.1.88~89 落地后补的三件事
+
+> 这三件都是"用起来才暴露"的，不是设计遗漏；写在这里是因为它们改变了**运维动作**，
+> 后面接手的人必须知道状态机多了两个分支。
+
+### 13.1 状态机补一个子状态：`verified` 分「码有效 / 码已过期」
+
+```
+staging ──→ verified ──(码有效)──→ [等人工确认] ──→ committed ──→ healthy
+               │                                        │
+               └──(600s 过期)──→ verified(expired) ─────┴──→ rolled_back
+                                       │
+                                       └── 重新预置 → 新 job / 新码（旧 job 作废）
+```
+
+关键事实：**B 不会因为码过期而退出 `verified`**。`public_status()` 只做
+
+```python
+"confirm_expires_in": max(0, int(d.get("code_exp") or 0) - int(time.time())),
+```
+
+`state` 仍是 `verified`，且写在 journal 里 —— 重启 B 也不会回 `idle`。
+所以"过期"必须由**消费方（A 端 UI）自己判**，否则就是这个现场：
+
+> 按钮被 `st !== 'verified'` 永久禁用，红字却写"请重新点「预置到僚机」"（M146）。
+
+A 端对应实现（`templates/system.html`）：
+
+| 函数 | 职责 |
+|---|---|
+| `peerPrepDecision(st, expiresIn, upgradeEnabled, newest, peerVer)` | 纯函数，返回 `{can, label}`；`verified && expiresIn>0` 禁、`verified && expiresIn==0` 放开并标「重新预置（换新码）」 |
+| `peerOnCodeExpired()` | 本地倒计时归零那一刻直接放按钮 + 露出「换新码」，不等 30s 轮询 |
+| `btn-peer-recoded` | 「换新码」按钮，复用 `peerUpgrade()`（重传包 → 换 job/码） |
+
+**为什么"过期后允许重新预置"是安全的**：B 的 `stage_package` 只拒 `committed`，
+并要求 `version > current_version` 且 `from` 含当前版本。重新预置同一目标版本合法，
+旧 job 被覆盖、旧码自然失效；`confirm` 对过期码返回 `confirm_expired`，不会误切换。
+
+### 13.2 主动回退（v1.1.7）
+
+原先只有"升级失败自动回滚"，没有用户主动回退。新增链路：
+
+```
+A 页面「回退到 [版本 ▾] [回退]」
+  → A POST /api/guard/peer/rollback {version}   （只转发，不判定）
+  → B  POST /guard/rollback                     （判定：版本合法/目录完整/非当前/无升级中）
+  → journal{state:"rollback", version, from_version}
+  → 写 data/upgrade/request 触发 guardb-upgrade.path
+  → root helper do_rollback()：切 current → restart → 健康检查
+        ├─ 通过 → state=rolled_back_ok
+        └─ 失败 → **自动切回原版本** → state=rollback_failed（back_ok 记账）
+```
+
+四条不变式（改这块别破坏）：
+
+1. **回退失败必须切回去** —— 退到一个跑不起来的版本等于守护没了，比不回退严重。
+2. **不调 `prune`** —— 刚离开的版本留着，用户可能马上要退回来（`releases/` 保留 3 个）。
+3. **不动 `.trusted/floor`** —— 那是"不许降级到有漏洞版本"的安全下限，运维回退不该调低它。
+4. **升级中一律 409** —— `committed/prepared/verified/rollback` 时两条流程不能同时改 `current`。
+
+### 13.3 `.tools/` 不在升级包内（这条最容易踩）
+
+`/opt/guard-b/.tools/{apply.py,upgrade.py}` 由 root 维护、**故意不进升级包**（它能写
+`/opt/guard-b`，被包覆盖等于提权）。后果：
+
+| 症状 | 原因 |
+|---|---|
+| 加了新功能却像没生效 | 代码写进了 `.tools/` 里的文件，包升级不会带上（`list_releases` 一开始就写错了地方，后来移进 `app.py`） |
+| 点回退返回 `501 helper_too_old` | helper 还是旧版（没有 `do_rollback`）；旧 helper 读到 `state=rollback` 会"接受但什么都不做"，静默失败 |
+
+**规则**：能被包覆盖的功能代码一律放 `app.py`；`.tools/` 只放必须 root 权限的东西，
+且每次改动都要在发版说明里写一句"需手工 install"。B 端自身加了能力探测：
+
+```python
+# /guard/rollback 进门先确认 helper 支持回退
+with open(".tools/apply.py") as f:
+    if "def do_rollback(" not in f.read():
+        return 501 {"error": "helper_too_old"}
+```
+
