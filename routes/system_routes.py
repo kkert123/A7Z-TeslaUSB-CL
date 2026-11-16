@@ -19,6 +19,54 @@ _restart_verify_code = None
 _restart_verify_expire = 0.0
 _VERIFY_TTL = 300  # 秒
 
+# 看门狗的外部重启请求文件（与 usb_guard.py 共用同一个路径与格式）
+_REBOOT_REQUEST_FILE = '/opt/radxa_data/teslausb/data/usb_guard_reboot_request.json'
+
+
+def _request_reboot_via_watchdog(reason: str) -> bool:
+    """兜底：写 watchdog 的重启请求文件（硬件复位，约 25 秒生效）。
+
+    为什么需要它：`sudo shutdown` 依赖 sudoers 的 NOPASSWD 白名单，而白名单会在
+    重装 / 升级 / 换系统时丢失 —— 2026-11-16 实证：它一直是缺的，导致 Web 重启
+    自上线起就是「假成功」。这条通道走文件 + watchdog，不依赖 sudo，
+    能保证「点了总有反应」（代价是不走 clean shutdown）。
+    """
+    try:
+        payload = {
+            'requested_at': time.time(),
+            'requested_at_str': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'reason': reason,
+        }
+        tmp = _REBOOT_REQUEST_FILE + '.web.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+        os.replace(tmp, _REBOOT_REQUEST_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _run_shutdown(flag: str, delay: str = '+1'):
+    """执行 shutdown 并**如实返回结果**。返回 (ok, detail)。
+
+    M151（2026-11-16 实证）：旧实现是
+        subprocess.Popen(['sudo','shutdown',...], stdout=DEVNULL, stderr=DEVNULL)
+    既不检查返回值、又把输出丢掉 —— sudo 因为没有 NOPASSWD 直接失败（exit 1），
+    前端却收到 `success: True 系统将在1分钟后重启`。用户等不到开机通知，
+    最后只能去车里断电。教训：**发起型命令必须看返回码，输出不能丢**。
+    """
+    try:
+        r = subprocess.run(['sudo', '-n', 'shutdown', flag, delay],
+                           capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return False, '命令超时（10s）'
+    except Exception as e:                                  # noqa: BLE001
+        return False, str(e)
+    if r.returncode == 0:
+        return True, ''
+    msg = (r.stderr or r.stdout or '').strip()
+    return False, msg[:200] or ('exit %d' % r.returncode)
+
 
 def _gen_verify_code() -> str:
     """生成 6 位随机数字验证码"""
@@ -133,8 +181,16 @@ def api_system_reboot():
         # 校验通过，单次有效
         _restart_verify_code = None
         _restart_verify_expire = 0.0
-        subprocess.Popen(['sudo', 'shutdown', '-r', '+1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return jsonify({'success': True, 'message': '系统将在1分钟后重启'})
+        ok, detail = _run_shutdown('-r')
+        if ok:
+            return jsonify({'success': True, 'message': '系统将在 1 分钟后重启'})
+        # sudo 失败 → 降级到看门狗硬复位，保证「点了总有反应」（M151）
+        if _request_reboot_via_watchdog('web: sudo shutdown 失败，降级硬复位；%s' % detail):
+            return jsonify({'success': True, 'fallback': True,
+                            'message': '正常重启命令失败（%s），已改用看门狗硬复位，约 25 秒后生效'
+                                       % detail})
+        return jsonify({'success': False,
+                        'error': '重启失败：sudo 与看门狗兜底均不可用（%s）' % detail}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -145,8 +201,13 @@ def api_system_shutdown():
     try:
         if _is_user_away():
             return jsonify({'success': False, 'error': '检测到您当前不在家，无法远程关机（请到家后操作）'}), 403
-        subprocess.Popen(['sudo', 'shutdown', '-h', '+1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return jsonify({'success': True, 'message': '系统将在1分钟后关机'})
+        # 关机没有安全兜底（硬复位 = 重启，不是关机），失败必须如实报错
+        ok, detail = _run_shutdown('-h')
+        if ok:
+            return jsonify({'success': True, 'message': '系统将在 1 分钟后关机'})
+        return jsonify({'success': False,
+                        'error': '关机命令执行失败（检查 sudoers 是否允许 shutdown）: %s'
+                                 % detail}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
