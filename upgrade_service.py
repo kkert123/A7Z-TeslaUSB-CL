@@ -192,24 +192,38 @@ def _verify_sqlite_copies(src_dir, dst_dir):
 
 
 def _save_user_data(base_dir):
-    """保存 config/、data/、static/thumbnails/ 到临时目录，供升级后恢复。
+    """保存 config/、data/、static/thumbnails/ **以及根 config.json** 到临时目录，供升级后恢复。
 
     v0.3.1.84（M139）：失败**必须抛 UserDataError**，不再 `except: pass`。
     旧实现吞掉异常后会留下半份备份，恢复时把完整配置覆盖成半份，且全程零报错——
     现场表现就是"升级后企微 key 全空、守护线程起不来、sqlite 丢表"。
+
+    v0.3.1.92（M149）：补上**根目录 `config.json`**。它一直是用户数据，却不在搬运范围里，
+    因为包里带的历来就是用户真实配置 —— 覆盖后"看起来没变"，这个洞长期不可见。
+    v0.3.1.91 打包开始脱敏该文件（M148），覆盖才第一次产生后果：`auth.users`（登录密码
+    哈希）被清空。判据：**升级后只要包内文件与用户数据可能不同，就必须走保存/恢复**，
+    不能依赖"内容恰好相同"这个隐含前提。
     """
     tmpd = tempfile.mkdtemp(prefix=KEEP_TMP_PREFIX)
     saved_cfg = None
     saved_data = None
     saved_thumbs = None
+    saved_root_cfg = None
     try:
         old_cfg = os.path.join(base_dir, 'config')
         old_data = os.path.join(base_dir, 'data')
         old_thumbs = os.path.join(base_dir, 'static', 'thumbnails')
+        root_cfg = os.path.join(base_dir, 'config.json')
         if os.path.isdir(old_cfg):
             saved_cfg = os.path.join(tmpd, 'config')
             shutil.copytree(old_cfg, saved_cfg, symlinks=True)
             _assert_copied(old_cfg, saved_cfg, 'config')
+        if os.path.isfile(root_cfg):
+            # 用不同的文件名存（不放 tmpd/config/ 里），避免与上面的 config 目录混淆
+            saved_root_cfg = os.path.join(tmpd, 'root-config.json')
+            shutil.copy2(root_cfg, saved_root_cfg)
+            if os.path.getsize(saved_root_cfg) != os.path.getsize(root_cfg):
+                raise UserDataError('config.json 备份不完整（大小不一致）')
         if os.path.isdir(old_data):
             _checkpoint_sqlite(old_data)
             saved_data = os.path.join(tmpd, 'data')
@@ -229,7 +243,7 @@ def _save_user_data(base_dir):
         if isinstance(exc, UserDataError):
             raise
         raise UserDataError(str(exc))
-    return tmpd, saved_cfg, saved_data, saved_thumbs
+    return tmpd, saved_cfg, saved_data, saved_thumbs, saved_root_cfg
 
 
 def _release_keep_tmp(ctx):
@@ -277,8 +291,9 @@ def _copy_dir_atomic(src_dir, dest_dir, tag):
     return old if os.path.exists(old) else ''
 
 
-def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
-    """恢复 config/、data/、static/thumbnails（原子替换 + 完整性校验）。"""
+def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None,
+                       saved_root_cfg=None):
+    """恢复 config/、data/、static/thumbnails、根 config.json（原子替换 + 完整性校验）。"""
     if saved_cfg:
         if not os.path.isdir(saved_cfg):
             raise UserDataError('配置备份不可用（目录不存在）')
@@ -287,6 +302,22 @@ def _restore_user_data(target_dir, saved_cfg, saved_data, saved_thumbs=None):
         if not os.path.isdir(saved_data):
             raise UserDataError('数据备份不可用（目录不存在）')
         _copy_dir_atomic(saved_data, os.path.join(target_dir, 'data'), 'data')
+    if saved_root_cfg:
+        # v0.3.1.92（M149）：根 config.json 同样用「临时名 + os.replace」落地，
+        # 否则写入窗口里被读到半截 JSON，读侧会当成空配置（等于把登录/清理策略清空）。
+        if not os.path.isfile(saved_root_cfg):
+            raise UserDataError('config.json 备份不可用（文件不存在）')
+        dest = os.path.join(target_dir, 'config.json')
+        tmp = dest + '.restore-%s' % time.strftime('%H%M%S')
+        try:
+            shutil.copy2(saved_root_cfg, tmp)
+            os.replace(tmp, dest)
+        except Exception as exc:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise UserDataError('config.json 恢复失败: %s' % exc)
     dest_thumbs = os.path.join(target_dir, 'static', 'thumbnails')
     if saved_thumbs and os.path.islink(saved_thumbs):
         # 共享目录模式：恢复成同样的 symlink（不要 copytree，否则又把 1.8G 复制一遍）
@@ -423,7 +454,7 @@ def _do_upgrade_impl(ctx, new_version, asset_url, sha256_expected=None, sig_url=
     _write_progress("保存配置", 66)
     steps.append("保存配置...")
     try:
-        keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+        keep_tmpd, saved_cfg, saved_data, saved_thumbs, saved_root_cfg = _save_user_data(current_dir)
     except UserDataError as exc:
         _clear_progress()
         _cleanup(tarball, sig_file)
@@ -482,7 +513,7 @@ def _do_upgrade_impl(ctx, new_version, asset_url, sha256_expected=None, sig_url=
 
     # ── 恢复旧版本配置（原子替换；失败必须中止，绝不能切软链）──
     try:
-        _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
+        _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs, saved_root_cfg)
     except UserDataError as exc:
         _clear_progress()
         _cleanup(tarball, sig_file)
@@ -573,7 +604,7 @@ def _do_upgrade_from_tarball_impl(ctx, tarball_path, new_version):
 
     # 保存旧版本 config/data
     try:
-        keep_tmpd, saved_cfg, saved_data, saved_thumbs = _save_user_data(current_dir)
+        keep_tmpd, saved_cfg, saved_data, saved_thumbs, saved_root_cfg = _save_user_data(current_dir)
     except UserDataError as exc:
         _clear_progress()
         _cleanup(tarball, sig_file)
@@ -620,7 +651,7 @@ def _do_upgrade_from_tarball_impl(ctx, tarball_path, new_version):
 
     # 恢复用户数据（原子替换；失败必须中止）
     try:
-        _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs)
+        _restore_user_data(new_dir, saved_cfg, saved_data, saved_thumbs, saved_root_cfg)
     except UserDataError as exc:
         shutil.rmtree(new_dir, ignore_errors=True)
         return False, f"已中止升级（软链未切换，当前版本不受影响）：{exc}"
