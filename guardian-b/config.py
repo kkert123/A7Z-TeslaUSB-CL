@@ -88,6 +88,18 @@ class Config:
         # going_offline 缺省窗口长度（秒），A 未带 expected_until 时兜底。
         self.offline_default_s: int = _env_int("GUARD_OFFLINE_DEFAULT_S", 3600)
 
+        # 「最后一帧车态」的可信时限（秒）。**必须与 offline_default_s 分开**：
+        # 前者是「出车窗口能开多大」，后者是「A 死前那句话还能信多久」，
+        # 两个旋钮的取值依据完全不同（前者看行程时长，后者看心跳间隔）。
+        #
+        # 2026-11-15 实证（本项即由此而来）：两处共用 3600 导致**两道闸串联**——
+        #   10:17 A 报 going_offline(driving)，窗口到 11:17（闸①）；
+        #   11:17 窗口到期后，_evidence_fresh 又从「最后心跳 10:44」重算 3600，
+        #        拖到 11:44:39 才判死（闸②）。
+        #   实测告警时刻 11:44:39.962 = _recv_at(10:44:39.96) + 3600，误差 2ms。
+        # 600s = 10×T，够覆盖「A 正在切网/重连」的正常抖动，又不会盖住真断网。
+        self.evidence_max_s: int = _env_int("GUARD_EVIDENCE_MAX_S", 600)
+
         # ── 告警去重（§4：同 (fault,channel) 只推一次，间隔递增）──
         # 第一档必须等于旧的 dedup_s（30min），保证行为可预期；
         # 之后 2h / 6h / 24h 封顶——设备离线一整晚不该推 20 条（M135）。

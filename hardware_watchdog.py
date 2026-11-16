@@ -23,6 +23,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,37 @@ LOG_FILE = "/var/log/teslausb-watchdog.log"
 REBOOT_REQUEST_FILE = "/opt/radxa_data/teslausb/data/usb_guard_reboot_request.json"
 REBOOT_REQUEST_TTL = 600  # 秒
 
+# ── 网络致命判据（v0.3.1.91，2026-11-15 实证）─────────────────────
+# 那天 A7Z 断网 2h12m（61 次重连全无效），看门狗 717 行日志全是「健康检查通过」：
+# 网络不可达只进 issues、不改 healthy，`max_failures` 永远凑不齐，于是没有任何兜底，
+# 最后靠整车下电（A7Z 断电）才恢复。
+# 现在改为：连续 NET_FATAL_STREAK 次不可达（interval 5s × 30 = 150s）且护栏通过 → 致命。
+#
+# 护栏（缺一不可，否则「车开出地库没网」会被误重启）：
+#   · A 端 guard 快照新鲜（age_s 与文件 mtime 双校验），且 vehicle 不是 driving / speed<=3
+#   · 距上次「网络重启」超过当前冷却窗口（见下）
+#
+# ── 重启冷却（v0.3.1.91，按「重启是否有效」分级）────────────────────
+# 为什么不能用一个固定 30 分钟：quick-check 是 2min/轮、阶梯攒到第 15 档要 15 轮 = 30 分钟，
+# 而重启后 /var/run（tmpfs）被清空、计数归零 —— 又要 30 分钟才够再次触发。
+# 固定 30 分钟冷却刚好与「设备自己攒到该重启」等长，**等于没限流**：
+# MIFI 真没网时会表现为「每 30 分钟重启一次」，一天 48 次。
+#
+# 改为按「上次重启有没有救活」分级（判据是 A7Z 自己能不能上网，不需要外部参与）：
+#   有效（重启后网络恢复）   → 30min 防抖，只防判定抖动连着重启
+#   1 次无效（10min 仍无网） → 60min
+#   2 次无效                → 120min
+#   3 次无效                → 24h 熔断（基本可断定热点/运营商侧没网，重启 A7Z 无意义，只告警）
+# 网络一恢复就把 ineffective 清零（有效重启不该累积惩罚），但保留 at 做 30min 防抖。
+NET_FATAL_STREAK = 30
+NET_REBOOT_MIN_GAP = 1800          # 30min：有效重启后的防抖窗口
+NET_REBOOT_MAX_GAP = 14400         # 4h：指数退避上限
+NET_REBOOT_HARD_GAP = 86400        # 24h：连续无效达上限后的熔断
+NET_REBOOT_MAX_INVALID = 3         # 连续无效次数上限
+NET_REBOOT_VERIFY_S = 600          # 重启后多久仍无网，算「这次重启无效」
+NET_REBOOT_STAMP_FILE = "/opt/radxa_data/teslausb/data/watchdog_net_reboot_at"
+GUARD_STATUS_FILE = "/opt/radxa_data/teslausb/data/guard_status.json"
+
 
 class HardwareWatchdog:
     """硬件看门狗监控器"""
@@ -71,6 +103,10 @@ class HardwareWatchdog:
         self.watchdog_fd = None   # 保持打开的看门狗文件描述符
         # v0.3.1.66 / M107：已决定重启 → 信号处理器不得 magic close（要保持武装）
         self._want_reboot = False
+        # v0.3.1.91：网络连续不可达计数（ping 通一次即归零）
+        self._net_fail_streak = 0
+        # v0.3.1.91：本次启动是否已判定过「上次网络重启是否有效」（每次启动只判一次）
+        self._reboot_verified = False
         self.status = {
             "healthy": True,
             "last_check": None,
@@ -299,6 +335,177 @@ class HardwareWatchdog:
             logger.error("检查 Web 服务失败: %s", e)
             return False
 
+    def _net_fatal_allowed(self) -> Tuple[bool, str]:
+        """网络判死的护栏。返回 (是否允许, 否决原因)。
+
+        这个判据最终会触发**整机复位**：误判的代价是打断一次录制，漏判的代价是
+        「断网两小时没人管」（2026-11-15 实际发生）。所以证据缺一不可：
+          1. A 端 guard 快照新鲜（age_s<=600 且文件 mtime <=600），否则本地守护也停了
+          2. 车辆不在行驶（state=driving 或 speed>3）—— 车在开时脱离热点是常态
+          3. 距上次「网络重启」超过当前冷却窗口（按无效次数指数退避，见常量区注释）
+        """
+        rec = self._net_reboot_record()
+        last = float(rec.get("at") or 0)
+        if last > 0:
+            gap = self._net_reboot_gap(rec)
+            left = gap - (time.time() - last)
+            if left > 0:
+                ineff = int(rec.get("ineffective") or 0)
+                if ineff >= NET_REBOOT_MAX_INVALID:
+                    return False, ("熔断中（剩余 %d 分钟，已连续 %d 次重启无效，"
+                                   "疑似热点/运营商侧无网）"
+                                   % (int(left / 60), ineff))
+                return False, ("冷却中（剩余 %d 分钟，累计无效重启 %d 次）"
+                               % (int(left / 60), ineff))
+
+        try:
+            with open(GUARD_STATUS_FILE, "r", encoding="utf-8") as f:
+                snap = json.load(f)
+        except (OSError, ValueError) as e:
+            return False, "guard 快照不可读: %s" % e
+
+        # 注意：`age_s` 是**文件内**字段，文件本身可能是几小时前写的（guard 线程死了）。
+        # 只看 age_s 会把「一小时前的 age_s=60」当成新鲜证据，必须并列校验 mtime。
+        try:
+            if time.time() - os.path.getmtime(GUARD_STATUS_FILE) > 600:
+                return False, "guard 快照文件本身过期（mtime）"
+        except OSError as e:
+            return False, "guard 快照 mtime 读取失败: %s" % e
+
+        v = snap.get("vehicle") if isinstance(snap.get("vehicle"), dict) else {}
+        age = v.get("age_s")
+        if not isinstance(age, (int, float)) or age > 600:
+            return False, "guard 车态过期（age_s=%s）" % age
+        if str(v.get("state") or "").strip().lower() == "driving":
+            return False, "车在行驶（state=driving）"
+        sp = v.get("speed")
+        if isinstance(sp, (int, float)) and sp > 3:
+            return False, "车在行驶（speed=%s）" % sp
+        return True, ""
+
+    # ── 网络重启记录（v0.3.1.91）─────────────────────────────
+    def _net_reboot_record(self) -> Dict:
+        """读持久记录 `{"at": 上次网络重启时刻, "ineffective": 连续无效次数}`。
+
+        兼容 v0.3.1.91 初版：文件里只有一个裸浮点时间戳。
+        """
+        try:
+            with open(NET_REBOOT_STAMP_FILE, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        except OSError:
+            return {"at": 0.0, "ineffective": 0}
+        if not raw:
+            return {"at": 0.0, "ineffective": 0}
+        try:
+            return {"at": float(raw), "ineffective": 0}      # 旧格式（裸时间戳）
+        except ValueError:
+            pass
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            logger.warning("网络重启记录不可解析，按「未重启过」处理: %r", raw[:80])
+            return {"at": 0.0, "ineffective": 0}
+        if not isinstance(d, dict):
+            return {"at": 0.0, "ineffective": 0}
+        try:
+            at = float(d.get("at") or 0)
+        except (TypeError, ValueError):
+            at = 0.0
+        try:
+            ineff = int(d.get("ineffective") or 0)
+        except (TypeError, ValueError):
+            ineff = 0
+        return {"at": max(0.0, at), "ineffective": max(0, ineff)}
+
+    def _save_net_reboot_record(self, rec: Dict) -> None:
+        """原子写（mkstemp + os.replace）。
+
+        重启瞬间进程可能被硬件看门狗 kill，写一半的文件读回来会变成「未重启过」→
+        冷却直接失效 → 立刻二次重启。所以必须原子替换。
+        """
+        d = os.path.dirname(NET_REBOOT_STAMP_FILE) or "."
+        try:
+            os.makedirs(d, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".netreboot-", dir=d)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(rec, f)
+                os.replace(tmp, NET_REBOOT_STAMP_FILE)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError as e:
+            logger.warning("网络重启记录写入失败（冷却可能失效，但不阻止本次重启）: %s", e)
+
+    def _net_reboot_gap(self, rec: Dict) -> float:
+        """当前冷却窗口（秒）：30min → 60 → 120 → 240 封顶；无效达上限 → 24h 熔断。"""
+        n = int(rec.get("ineffective") or 0)
+        if n >= NET_REBOOT_MAX_INVALID:
+            return float(NET_REBOOT_HARD_GAP)
+        if n <= 0:
+            return float(NET_REBOOT_MIN_GAP)
+        return float(min(NET_REBOOT_MIN_GAP * (2 ** n), NET_REBOOT_MAX_GAP))
+
+    def _note_net_reboot(self) -> None:
+        """记录「因网络重启」—— 落持久分区（重启后仍生效），并保留无效计数。"""
+        rec = self._net_reboot_record()
+        rec["at"] = time.time()
+        self._save_net_reboot_record(rec)
+
+    def _verify_last_reboot(self, network_ok: bool) -> None:
+        """判定「上次网络重启是否有效」，每次启动只判一次。
+
+        时机：重启后 NET_REBOOT_VERIFY_S（10min）过的第一轮健康检查。
+        判据就是「网络自己回来了没有」——A7Z 能直接观察，不需要外部参与。
+        有效 → ineffective 清零（有效重启不该累积惩罚）；
+        无效 → ineffective+1，冷却按 `_net_reboot_gap` 指数退避。
+        """
+        if self._reboot_verified:
+            return
+        rec = self._net_reboot_record()
+        at = float(rec.get("at") or 0)
+        if at <= 0:
+            self._reboot_verified = True
+            return
+        age = time.time() - at
+        if age < NET_REBOOT_VERIFY_S:
+            return                      # 还没到判定窗口，下轮再看
+        self._reboot_verified = True
+        ineff = int(rec.get("ineffective") or 0)
+        if network_ok:
+            if ineff:
+                logger.info("上次网络重启有效（网络已恢复），无效计数 %d → 0", ineff)
+            rec["ineffective"] = 0
+            self._save_net_reboot_record(rec)
+            return
+        rec["ineffective"] = ineff + 1
+        self._save_net_reboot_record(rec)
+        gap = self._net_reboot_gap(rec)
+        if rec["ineffective"] >= NET_REBOOT_MAX_INVALID:
+            logger.critical("上次网络重启无效（%d 分钟仍无网），已连续 %d 次 → "
+                           "进入熔断，%d 小时内不再重启（疑似热点/运营商无网）",
+                           int(age / 60), rec["ineffective"], int(gap / 3600))
+        else:
+            logger.warning("上次网络重启无效（%d 分钟仍无网），连续无效 %d 次 → 冷却升至 %d 分钟",
+                           int(age / 60), rec["ineffective"], int(gap / 60))
+
+    def _clear_net_invalid(self) -> None:
+        """运行期网络恢复 → 无效计数清零（保留 `at`，30min 防抖仍然有效）。
+
+        没有这一步会留下一个死角：熔断（24h）期间网络自己好了，`ineffective` 仍是上限值，
+        下次再断网会继续按 24h 熔断 —— 相当于「一次误判罚一天」。
+        """
+        rec = self._net_reboot_record()
+        n = int(rec.get("ineffective") or 0)
+        if n <= 0:
+            return
+        logger.info("网络已恢复，网络重启无效计数 %d → 0", n)
+        rec["ineffective"] = 0
+        self._save_net_reboot_record(rec)
+
     def run_health_check(self) -> Dict:
         """
         执行完整健康检查
@@ -365,11 +572,34 @@ class HardwareWatchdog:
         if not service_all_ok:
             self.status["healthy"] = False
 
-        # 6. 网络检查
+        # 6. 网络检查（v0.3.1.91：连续不可达才算故障，单次抖动不算）
         network = self.check_network_connectivity()
         self.status["metrics"]["network"] = network
+        # v0.3.1.91：顺手判定「上次网络重启是否有效」（每次启动只判一次）
+        self._verify_last_reboot(network)
         if not network:
-            self.status["issues"].append("网络不可达")
+            self._net_fail_streak += 1
+            self.status["metrics"]["net_fail_streak"] = self._net_fail_streak
+            self.status["issues"].append(
+                "网络不可达（连续 %d/%d 次）" % (self._net_fail_streak, NET_FATAL_STREAK))
+            if self._net_fail_streak >= NET_FATAL_STREAK:
+                allowed, why = self._net_fatal_allowed()
+                if allowed:
+                    self.status["metrics"]["net_fatal"] = True
+                    self.status["issues"].append(
+                        "网络连续不可达 %d 次且护栏通过 → 判为致命" % self._net_fail_streak)
+                    self.status["healthy"] = False
+                else:
+                    # 护栏否决：车在开 / guard 快照过期 / 冷却中 —— 都记下来，便于复盘
+                    self.status["metrics"]["net_fatal_blocked"] = why
+        else:
+            if self._net_fail_streak:
+                logger.info("网络已恢复（此前连续不可达 %d 次）", self._net_fail_streak)
+                # 恢复瞬间清一次无效计数：否则熔断期内网络自己好了，
+                # ineffective 仍是 3，下次断网还要白等 24h
+                self._clear_net_invalid()
+            self._net_fail_streak = 0
+            self.status["metrics"]["net_fail_streak"] = 0
 
         # 7. Web 服务检查
         web_ok = self.check_web_service()
@@ -518,6 +748,11 @@ class HardwareWatchdog:
                                 "连续 %d 次健康检查失败，准备触发硬件重启...",
                                 max_failures,
                             )
+                            # v0.3.1.91：若是「网络致命」触发，先记 4h 冷却戳——
+                            # 否则 MIFI 本身没网时会变成重启风暴（重启后照样不通）
+                            if (status.get("metrics") or {}).get("net_fatal"):
+                                self._note_net_reboot()
+                                logger.critical("本次复位由网络故障触发，已记 4h 冷却戳")
                             # 不喂狗、不关闭看门狗，让硬件看门狗超时触发重启
                             self._want_reboot = True
 

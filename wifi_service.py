@@ -2559,6 +2559,16 @@ def stop_ap() -> dict:
 SMART_SWITCH_LOCK_FILE = "/var/run/wifi-smart-switch.lock"
 SMART_SWITCH_STATE_FILE = "/var/run/wifi-smart-switch.state"
 SMART_SWITCH_FAILURE_COUNT_FILE = "/var/run/wifi-failure-count"
+# ── 网络自愈阶梯（v0.3.1.91，2026-11-15 实证）───────────────────
+# 那天 10:44:41「网络不通」起，同一动作（nmcli 重连 + 强制刷 DHCP）重复了 61 次、
+# 每次都是「已关联但连通异常」，全部无效；12:56 整车下电（A7Z 断电重启）后
+# 12:57:56 立刻恢复。说明缺的不是次数，是**升级手段**。
+RECOVERY_STAGE_FILE = "/var/run/wifi-recovery-stage"           # 已执行到第几档（1..3）
+RECOVERY_REBOOT_STAMP = "/var/run/wifi-reboot-requested-at"    # 重启请求的限流时间戳
+RECOVERY_REBOOT_COOLDOWN_SEC = 7200                            # 2h 内最多请求重启一次
+RECOVERY_STAGE_COUNTS = (5, 10, 15)                            # 三档的连续失败次数阈值
+WIFI_DRIVER_MODULE = "aic8800_fdrv"                            # lsmod 实测（A733 + AIC8800D80）
+WIFI_REBOOT_REQUEST_FILE = "/opt/radxa_data/teslausb/data/usb_guard_reboot_request.json"
 SMART_SWITCH_LOG_FILE = "/var/log/wifi-smart-switch.log"
 LOCATION_STATE_FILE = "/opt/radxa_data/teslausb/data/location_state.json"  # M69: web 位置判定落盘
 SENTRY_CONFIG_FILE_WIFI = "/opt/radxa_data/teslausb/config/sentry.json"
@@ -2956,6 +2966,127 @@ class WifiSmartSwitch:
 
     # ── 快速检测 ──
 
+    # ── 网络自愈阶梯（v0.3.1.91）──────────────────────────────
+    def _recovery_stage(self) -> int:
+        """已执行到第几档（0=未执行）。文件在 /var/run（tmpfs），重启自动清零。"""
+        try:
+            with open(RECOVERY_STAGE_FILE, "r") as f:
+                return int(f.read().strip() or 0)
+        except Exception:
+            return 0
+
+    def _set_recovery_stage(self, n: int) -> None:
+        try:
+            with open(RECOVERY_STAGE_FILE, "w") as f:
+                f.write(str(n))
+        except Exception:
+            pass
+
+    def _escalate_recovery(self, count: int) -> None:
+        """连续不通时按阶梯升级恢复手段（每档只执行一次，联网后整体复位）。
+
+        2026-11-15 实证：10:44-12:50 期间「nmcli 重连 + 强制刷 DHCP」重复 61 次
+        全部无效，最终靠整车下电（A7Z 断电）恢复 —— 原实现**没有任何升级路径**。
+
+        阶梯：
+          ① count≥5  ：重建网络栈（`nmcli networking off/on`）
+          ② count≥10 ：卸载并重载无线驱动 `aic8800_fdrv`（「关联成功但 L3 不通」的靶心）
+          ③ count≥15 ：写 usb_guard 的重启请求，交给看门狗硬复位（2h 限流）
+
+        **不用 `systemctl restart NetworkManager`**：M53 实证会打断 AP+STA 并发，
+        把「没网」升级成「连 AP 都没了」，现场排障入口一起消失。
+        """
+        stage = self._recovery_stage()
+        if count < RECOVERY_STAGE_COUNTS[0] or stage >= 3:
+            return
+        try:
+            if count >= RECOVERY_STAGE_COUNTS[2] and stage < 3:
+                self.log.warning("网络连续失败 %d 次，阶梯用尽 → 请求看门狗重启设备", count)
+                if self._request_reboot(count):
+                    self._set_recovery_stage(3)
+                return
+            if count >= RECOVERY_STAGE_COUNTS[1] and stage < 2:
+                self.log.warning("网络连续失败 %d 次 → 重载无线驱动 %s",
+                                 count, WIFI_DRIVER_MODULE)
+                ok = self._reload_wifi_driver()
+                self._set_recovery_stage(2 if ok else 1)
+                return
+            if count >= RECOVERY_STAGE_COUNTS[0] and stage < 1:
+                self.log.warning("网络连续失败 %d 次 → 重建网络栈（nmcli networking off/on）",
+                                 count)
+                self._rebuild_network_stack()
+                self._set_recovery_stage(1)
+        except Exception as e:
+            self.log.error("恢复阶梯执行异常（不影响主流程）: %s", e)
+
+    def _rebuild_network_stack(self) -> None:
+        """第①档：让 NetworkManager 重建所有连接（不动 NM 进程，见 M53）。"""
+        for cmd in (["sudo", "-n", "nmcli", "networking", "off"],
+                    ["sudo", "-n", "nmcli", "networking", "on"]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+                if r.returncode != 0:
+                    self.log.warning("%s 返回 %d: %s", " ".join(cmd[-2:]),
+                                     r.returncode, (r.stderr or "").strip()[:160])
+            except Exception as e:
+                self.log.warning("执行 %s 失败: %s", " ".join(cmd[-2:]), e)
+            time.sleep(5)
+
+    def _reload_wifi_driver(self) -> bool:
+        """第②档：卸载/重载 aic8800_fdrv。返回是否成功（失败不升级档位，下轮重试）。"""
+        try:
+            r = subprocess.run(["sudo", "-n", "modprobe", "-r", WIFI_DRIVER_MODULE],
+                               capture_output=True, text=True, timeout=40)
+            if r.returncode != 0:
+                self.log.warning("卸载 %s 失败（可能仍被占用），下轮再试: %s",
+                                 WIFI_DRIVER_MODULE, (r.stderr or "").strip()[:200])
+                return False
+            time.sleep(2)
+            r2 = subprocess.run(["sudo", "-n", "modprobe", WIFI_DRIVER_MODULE],
+                                capture_output=True, text=True, timeout=40)
+            if r2.returncode != 0:
+                # 驱动没加载回来 = 彻底没网，比原来更糟，必须显式喊出来
+                self.log.error("重载 %s 失败，设备可能已无 WiFi，请人工介入: %s",
+                               WIFI_DRIVER_MODULE, (r2.stderr or "").strip()[:200])
+                return False
+            time.sleep(3)
+            self.log.info("无线驱动 %s 已重载", WIFI_DRIVER_MODULE)
+            return True
+        except Exception as e:
+            self.log.error("重载驱动异常: %s", e)
+            return False
+
+    def _request_reboot(self, count: int) -> bool:
+        """第③档：写重启请求（复用 M80 通道，由 hardware_watchdog 消费）。"""
+        now = time.time()
+        try:
+            if os.path.exists(RECOVERY_REBOOT_STAMP):
+                with open(RECOVERY_REBOOT_STAMP, "r") as f:
+                    last = float(f.read().strip() or 0)
+                if now - last < RECOVERY_REBOOT_COOLDOWN_SEC:
+                    self.log.info("重启请求限流中（剩余 %d 分钟），本轮跳过",
+                                  int((RECOVERY_REBOOT_COOLDOWN_SEC - (now - last)) / 60))
+                    return False
+        except Exception:
+            pass
+        try:
+            _write_json_atomic(WIFI_REBOOT_REQUEST_FILE, {
+                "requested_at": now,
+                "requested_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "reason": "wifi_service: 连续 %d 次自愈失败，阶梯已用尽" % count,
+                "detail": "nmcli 重连/刷 DHCP、网络栈重建、驱动重载均无效",
+            })
+        except Exception as e:
+            self.log.error("写重启请求失败: %s", e)
+            return False
+        try:
+            with open(RECOVERY_REBOOT_STAMP, "w") as f:
+                f.write(str(now))
+        except Exception:
+            pass
+        self.log.critical("已写入重启请求（%s），等待看门狗复位", WIFI_REBOOT_REQUEST_FILE)
+        return True
+
     def quick_check(self) -> None:
         """快速网络连通性检测，连续失败 2 次触发完整检查"""
         self.log.info("开始快速检测...")
@@ -3007,10 +3138,11 @@ class WifiSmartSwitch:
             pass
 
         if self._check_connectivity():
-            # 网络正常，重置失败计数
+            # 网络正常，重置失败计数与恢复阶梯（阶梯必须复位，否则下次故障直接跳高档）
             try:
-                if os.path.exists(SMART_SWITCH_FAILURE_COUNT_FILE):
-                    os.remove(SMART_SWITCH_FAILURE_COUNT_FILE)
+                for _f in (SMART_SWITCH_FAILURE_COUNT_FILE, RECOVERY_STAGE_FILE):
+                    if os.path.exists(_f):
+                        os.remove(_f)
             except Exception:
                 pass
             self.log.info("网络正常")
@@ -3053,6 +3185,12 @@ class WifiSmartSwitch:
         if count >= 2:
             self.log.info("连续失败，触发完整检测")
             self.full_check()
+
+        # ★ 恢复阶梯（v0.3.1.91）放在 full_check **之后**：
+        #   先让常规「切回最佳网络」跑完整一轮，再升级手段。
+        #   放在前面会让 modprobe -r 与同轮的 nmcli 重连互相干扰（wlan0 正在重建，
+        #   扫描/关联必然失败，日志会被一串假失败刷满）。
+        self._escalate_recovery(count)
 
     # ── 完整检测 ──
 

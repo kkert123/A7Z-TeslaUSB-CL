@@ -47,7 +47,7 @@ _ERR_STATUS = {
     "verifier_missing": 503,
 }
 
-VERSION = "1.1.7"
+VERSION = "1.1.8"
 
 
 def _notify_code(alerter, cfg, job, code, version, ttl, src_ip):

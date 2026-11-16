@@ -249,18 +249,27 @@ class Judge:
         age_ts = now - float(ls.get("ts", 0.0))
         age_https = now - float(ls.get("https", 0.0))
 
+        # 0.5) 恢复收敛：**必须排在所有静默闸之前**。
+        #      「设备重新有心跳」是客观事实，与「车该不该在线」无关。
+        #      旧实现把 recover 放在健康区分支（原第 3 步），而静默闸在它之前就 return，
+        #      于是 A 一旦恢复、但最后一帧车态仍是 driving，recover 就永远发不出来。
+        #      2026-11-15 实证：A 12:57 恢复联网，B 直到 15:52 才发「已恢复」（差 2h55m），
+        #      期间 active 一直为 True、退避已升到 2h 档 —— 这期间若真再失联，用户收不到告警。
+        recovered = self._maybe_recover(now, age_ts, age_https)
+
         # 1) 预期离线窗口 → 静默
         if now < float(data.get("offline_until", 0.0)):
-            return [{"type": "silent", "reason": "expected_offline"}]
+            return recovered + [{"type": "silent", "reason": "expected_offline"}]
 
         # 2) 车在开 / 已知离线 → 静默（防误报核心）
         online_expected, why = _classify_vehicle(data.get("last_body"))
         if online_expected is False and self._could_be_silent(why, now):
-            return [{"type": "silent", "reason": "not_expected_online", "why": why}]
+            return recovered + [{"type": "silent", "reason": "not_expected_online",
+                                 "why": why}]
         if online_expected is None and self.cfg.unknown_vehicle == "silent":
-            return [{"type": "silent", "reason": "unknown_vehicle", "why": why}]
+            return recovered + [{"type": "silent", "reason": "unknown_vehicle", "why": why}]
 
-        events = []
+        events = list(recovered)
         warn = self.cfg.warn_s
         alarm = self.cfg.alarm_s
 
@@ -277,9 +286,8 @@ class Judge:
         # 没有 TS（单通道部署）才退化看 https。
         primary_age = age_ts if ts_seen else age_https
 
-        # 3) 健康区：正常 + 检查恢复
+        # 3) 健康区：正常（恢复收敛已在 0.5 步做过，此处不再重复，避免双发 recover）
         if primary_age < warn:
-            events.extend(self._maybe_recover(now, age_ts, age_https))
             if not events:
                 events.append({"type": "ok", "age_ts": round(age_ts, 1),
                                "age_https": round(age_https, 1)})
@@ -322,10 +330,15 @@ class Judge:
         return self._evidence_fresh(now)
 
     def _evidence_fresh(self, now: float) -> bool:
-        """`last_body` 是「A 死前最后一句话」，只能替它顶 `offline_default_s`（默认 1h）。
+        """`last_body` 是「A 死前最后一句话」，只能替它顶 `evidence_max_s`（默认 10min）。
 
         超过这个时长仍无新心跳，就说明 A 已经不说话了，再拿这帧判「车在开、
-        不必告警」= 无限期静默。时长与出车静默窗口同源，运维只需理解一个旋钮。
+        不必告警」= 无限期静默。
+
+        ⚠️ 这个时限**不再复用 `offline_default_s`**（2026-11-15 实证）：两者共用 3600
+        时会形成「两道闸串联」——`going_offline` 窗口到期后，这里又从「最后心跳时刻」
+        重新计一次 3600，一次真实断网的告警于是从 5 分钟被拖到 60 分钟。
+        两个旋钮的语义不同：前者是「行程能有多长」，后者是「一帧车态能信多久」。
         """
         lb = self.store.data.get("last_body") or {}
         try:
@@ -340,7 +353,7 @@ class Judge:
                 recv_at = max(float(ls.get("ts") or 0.0), float(ls.get("https") or 0.0))
             except (TypeError, ValueError):
                 recv_at = 0.0
-        return recv_at > 0.0 and (now - recv_at) < float(self.cfg.offline_default_s)
+        return recv_at > 0.0 and (now - recv_at) < float(self.cfg.evidence_max_s)
 
     # ── 锁车代发（v1.1.4）────────────────────────────────────
     def on_board(self, sample: dict, now: float = None) -> dict:

@@ -1722,7 +1722,12 @@ class GuardSender:
             logger.info("补报 %d 条历史心跳（剩余 %d）", len(sent_items), self._queue_count)
 
     # ── 预期离线握手 ──
-    _OFFLINE_WINDOW = {"driving": None, "unlocked": 900, "user_present": 600}
+    # driving 单独给 1800s（30min），**不再回落到 offline_default_s**：
+    # 出车窗口要覆盖的是「下车 → 锁车 → A7Z 随车机断电」这一段，
+    # 原来落回 3600 会让一次出车把失联告警整整盖住一小时（2026-11-15 实证：
+    # 10:17 报 driving → 窗口到 11:17，再叠加 B 端 evidence 时限，
+    # 真实断网的告警被拖到 11:44，共 60min）。
+    _OFFLINE_WINDOW = {"driving": 1800, "unlocked": 900, "user_present": 600}
     # 同类跃迁的握手冷却（秒）。driving 为 0 = **不冷却**：一天多次出车是正常
     # 事件，冷却会把第二趟的静默窗口吞掉，B 在锁车断电后照样误报（审查 P1-2）。
     # unlocked / user_present 才是 TeslaMate 数据漂移的重灾区。

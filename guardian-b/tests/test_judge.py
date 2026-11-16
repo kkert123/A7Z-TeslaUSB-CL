@@ -47,6 +47,8 @@ def make_cfg(**over):
     cfg.alarm_mult = 5
     cfg.judge_interval = 30
     cfg.offline_default_s = 3600
+    # v1.1.8：车态证据的独立时限，默认 10T。与 offline_default_s 解耦是本轮修复的核心
+    cfg.evidence_max_s = 600
     cfg.dedup_s = 1800
     cfg.unknown_vehicle = "judge"
     for k, v in over.items():
@@ -512,6 +514,49 @@ def t_alert_text_no_overlong_lines():
             if jm._disp_width(ln) > jm.LINE_MAX:
                 bad.append("%d|%s" % (jm._disp_width(ln), ln))
     assert not bad, "存在超宽行（会在手机上折行）：\n" + "\n".join(bad)
+
+
+@case
+def t_evidence_uses_own_knob_not_offline_default():
+    """2026-11-15 实证：证据时限必须与「出车窗口」解耦。
+
+    当天 A 10:17:19 报 going_offline(driving)，窗口 3600s → 到 11:17:19；
+    10:44:39.96 断网（A 侧 wifi.log 10:44:41「网络不通」）。
+    窗口到期后 `_evidence_fresh` 又从「最后心跳」重算一次 3600，
+    把告警拖到 11:44:39.962（实测，误差 2ms），整整 60 分钟。
+
+    本用例钉住：offline_default_s 仍是 3600 时，evidence_max_s=600 依然 10 分钟判死。
+    """
+    cfg, store, al, j = make_judge()
+    assert cfg.offline_default_s == 3600 and cfg.evidence_max_s == 600
+    j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
+    # 601s：证据已过期 → 必须判死。旧实现共用 3600 时这里会一直 silent。
+    ev = j.tick(now=1000 + cfg.evidence_max_s + 1)
+    assert ev[0]["type"] == "alert" and ev[0]["fault"] == "device_offline", ev
+    assert len(al.sent) == 1
+
+
+@case
+def t_recover_not_swallowed_by_vehicle_silence():
+    """2026-11-15 实证：设备恢复但车态仍显示 driving 时，recover 不能被静默闸吞掉。
+
+    当天 A 12:57 恢复联网，B 直到 15:52 才发「已恢复」（差 2h55m）；
+    这期间 active 一直为 True、退避已升到 2h 档 —— 真失联也收不到新告警。
+    根因：tick 的第 2 步（车态静默）在 recover 之前就 return 了。
+    """
+    cfg, store, al, j = make_judge()
+    j.on_heartbeat("ts", 1, hb_body(DRIVING_STATE), now=1000)
+    ev = j.tick(now=1000 + cfg.evidence_max_s + 1)
+    assert ev[0]["type"] == "alert", ev
+    rec = store.data["alerts"]["device_offline"]
+    assert rec["active"] is True, rec
+
+    # A 回来了：心跳新鲜，但最后一帧仍是「车在开」（会命中 not_expected_online 静默）
+    j.on_heartbeat("ts", 2, hb_body(DRIVING_STATE), now=2000)
+    ev = j.tick(now=2001)
+    types = [e["type"] for e in ev]
+    assert "recover" in types, types
+    assert store.data["alerts"]["device_offline"]["active"] is False
 
 
 def main():
