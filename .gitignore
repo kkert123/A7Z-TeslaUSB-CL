@@ -69,3 +69,19 @@ upgrade_key
 guardian-b/signing/guard_push
 guardian-b/signing/*.pub.bak
 guardian-b/.tmp_pack/
+
+# ── 2026-11-16 清理（M150）：以下只留本地，不再入库 ─────────────
+# 判据：含真实凭据（RD-T 里是旧配置备份，含企微 webhook key）或内部运维信息。
+# 仓库是 public，这些内容一旦进去就等于公开。
+/RD-T/
+/src/
+/.workbuddy/memory/
+/.workbuddy/skills/
+/.workbuddy/overview.md
+/_release[0-9]*.py
+/README-v?.md
+/Sentry-USB-Rusty-*.md
+/add_to_app.py
+/add_to_style.css
+/deploy_to_a7z.py
+/upload_to_a7z.py
