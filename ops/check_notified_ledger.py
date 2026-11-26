@@ -48,6 +48,16 @@ def event_time(eid):
         return None
 
 
+def ledger_limit():
+    """账本上限：优先取运行中的常量，避免脚本里再写一份 20000 造成漂移。"""
+    try:
+        sys.path.insert(0, '/opt/radxa_data/teslausb')
+        import sentry_notify_queue as _sq
+        return int(_sq.NOTIFIED_MAX_KEEP)
+    except Exception:
+        return 20000
+
+
 def check_ledger(path):
     """返回 (ok, 信息行列表, 统计字典)"""
     lines = []
@@ -74,7 +84,7 @@ def check_ledger(path):
     keys = [(ts.get(i) or event_time(i) or 0.0, i) for i in ids]
     sorted_ok = all(keys[k][0] <= keys[k + 1][0] for k in range(len(keys) - 1))
 
-    limit = 20000
+    limit = ledger_limit()
     ratio = len(ids) / float(limit) if limit else 0
     oldest = min(keys)[1] if keys else '-'
     newest = max(keys)[1] if keys else '-'
@@ -109,8 +119,9 @@ def check_coverage(ledger_path, sentry_dir):
     try:
         data = json.load(open(ledger_path, encoding='utf-8'))
         known = set(data if isinstance(data, list) else (data.get('event_ids') or []))
-    except Exception:
-        known = set()
+    except Exception as exc:
+        # 读不到账本 ≠ 账本是空的：后者会得出"候选全缺"，是误报
+        return False, ['覆盖度: 账本读取失败，无法判断（%s）' % exc], {}
 
     cand, missing = [], []
     for name in os.listdir(sentry_dir):

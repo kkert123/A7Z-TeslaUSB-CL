@@ -169,6 +169,24 @@ def t_readback_fail():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def t_lock_degrade():
+    print("[12] 锁不可用时降级，且不掩盖临界区内的业务异常")
+    d = new_dir()
+    led = NotifiedLedger(os.path.join(d, "n.json"), max_keep=20000)
+    led.lock_path = "/proc/nonexistent/x.lock"      # 必然创建失败 → 走降级分支
+    raised = None
+    try:
+        with led._locked():
+            raise OSError("业务内的 OSError")
+    except OSError as exc:
+        raised = exc
+    except RuntimeError as exc:                     # 二次 yield 的典型症状
+        raised = exc
+    check("业务异常原样传播（未被 contextmanager 掩盖）",
+          isinstance(raised, OSError) and "业务内" in str(raised), repr(raised))
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def t_idempotent():
     print("[7] 重复 mark 幂等（第二次不写盘）")
     d = new_dir()
@@ -265,6 +283,7 @@ def main():
     t_idempotent()
     t_concurrent()
     t_compact()
+    t_lock_degrade()
     t_integration()
     t_legacy_reader()
     print("-" * 60)

@@ -171,6 +171,10 @@ class NotifiedLedger:
 
         没有它，两个写者会各自 `读 2000 条 → 加自己那条 → 全量覆盖`，
         后写的把先写的抹掉 —— 回读校验只能发现、救不回来。
+
+        注意：`except OSError` **只能包住取锁阶段**。若把它包住 `yield`，
+        业务代码在临界区里抛 OSError 时 contextmanager 会二次 yield →
+        `RuntimeError: generator didn't stop after throw()`，原始异常被掩盖。
         """
         f = None
         try:
@@ -179,9 +183,16 @@ class NotifiedLedger:
             f = open(self.lock_path, 'a+')
             if fcntl is not None:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            yield
         except OSError as exc:                        # 锁文件不可用时不阻断业务，但留痕
             logger.warning("账本锁不可用，退化为无锁写入: %s", exc)
+            if f is not None:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+                f = None
+
+        try:
             yield
         finally:
             if f is not None:
