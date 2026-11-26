@@ -96,6 +96,7 @@ class Config:
         "utils/hardware_stats.py",
         "utils/system_info.py",
         "utils/ssid_match.py",
+        "utils/notified_ledger.py",   # v0.3.1.94 已通知账本（真 FIFO + 回读校验，可换后端）
         # routes/
         "routes/__init__.py",
         "routes/lockchime_routes.py",
@@ -117,6 +118,8 @@ class Config:
         "sentry_watchdog.py",
         "sentry_service.py",
         "sentry_notify_queue.py",
+        # 账本健康检查（v0.3.1.94）：只读，用于确认"反复补发"是否断根
+        "ops/check_notified_ledger.py",
         "location_detector.py",
         "sync_service.py",
         "wifi_service.py",

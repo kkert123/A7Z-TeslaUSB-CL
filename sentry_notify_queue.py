@@ -58,7 +58,13 @@ RECONCILE_MAX_AGE_DAYS = 3        # 只补扫最近 N 天的事件，避免历�
 # reconcile 只是兜底极端情况(watchdog 标记 processed 后、通知完成前进程崩溃)，
 # 延迟补发可接受；断电期间事件由 watchdog 重启后扫描自行正常推送，不依赖此窗口。
 RECONCILE_MIN_AGE_SEC = 1800      # 30 分钟：远超 watchdog 任何正常推送耗时
-NOTIFIED_MAX_KEEP = 2000          # 已通知记录最多保留条数（FIFO 裁剪）
+# 已通知记录最多保留条数（真 FIFO 淘汰，按事件时间戳）
+# v0.3.1.94：2000 → 20000。旧上限下账本长期处于饱和，每次写入都要淘汰，
+# 而旧实现在 set 上做裁剪（随机丢条目）——被丢的若仍在 3 天对账窗口内就会被
+# 重复补发。上限放大 10 倍后，正常增长（约 20 条/天）三年内不会再触及上限，
+# 把"饱和裁剪"这条路径从高频降到几乎不发生；即便发生，也是按时间淘汰最老的。
+# 代价：文件约 1.2 MB（20000 条），data/ 整体 2.2 MB → 3.4 MB，可忽略。
+NOTIFIED_MAX_KEEP = 20000
 
 logger = logging.getLogger("SentryNotifyQueue")
 logger.setLevel(logging.INFO)
@@ -73,6 +79,17 @@ class SentryNotifyQueue:
         self.entries: List[Dict] = self._load()
         self._notifier = None
         self.notified_file = NOTIFIED_FILE
+        self._ledger_obj = None
+
+    def _ledger(self):
+        """已通知账本（懒加载）。JSON 后端封在 utils/notified_ledger.py，
+        后续换 SQLite 只改那一个模块，本文件与 reconcile 逻辑不动。"""
+        if self._ledger_obj is None:
+            from utils.notified_ledger import NotifiedLedger
+            self._ledger_obj = NotifiedLedger(
+                self.notified_file, max_keep=NOTIFIED_MAX_KEEP
+            )
+        return self._ledger_obj
 
     def _load(self) -> List[Dict]:
         if self.queue_file.exists():
@@ -135,42 +152,47 @@ class SentryNotifyQueue:
     # ═══════════════════════════════════════════════════════════════
 
     def _load_notified(self) -> set:
-        """加载已成功通知的事件 ID 集合"""
-        if self.notified_file.exists():
-            try:
-                with open(self.notified_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return set(data)
-                    if isinstance(data, dict):
-                        return set(data.get('event_ids', []))
-            except Exception as e:
-                logger.warning(f"加载已通知记录失败: {e}")
-        return set()
+        """加载已成功通知的事件 ID 集合（账本见 utils/notified_ledger.py）
 
-    def _save_notified(self, notified: set):
-        """保存已通知事件 ID 集合（原子写入，FIFO 裁剪）"""
+        兼容 v1（裸 list）与 v2（带 timestamps）两种文件格式；损坏/缺失返回空集，
+        让 reconcile 走"基线/补洞"分支，而不是把异常抛断整条补发链。
+        """
         try:
-            ids = list(notified)
-            if len(ids) > NOTIFIED_MAX_KEEP:
-                ids = ids[-NOTIFIED_MAX_KEEP:]
-            self.notified_file.parent.mkdir(parents=True, exist_ok=True)
-            # 原子写入：先写临时文件，再 os.replace（POSIX 原子操作，防止断电损坏）
-            tmp = str(self.notified_file) + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(ids, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(self.notified_file))
-        except Exception as e:
-            logger.error(f"保存已通知记录失败: {e}")
+            return self._ledger().ids()
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("加载已通知记录失败: %s", e)
+            return set()
+
+    def _save_notified(self, notified):
+        """整集合写入账本（基线初始化用）。真 FIFO + 上限裁剪 + 排他锁。"""
+        try:
+            return self._ledger().save_ids(notified, reason='baseline')
+        except Exception as e:                            # noqa: BLE001
+            logger.error("保存已通知记录失败: %s", e)
+            return False
 
     def mark_notified(self, event_id: str):
-        """标记事件已成功通知（推送成功 / 重试成功后调用，供对账去重）"""
+        """标记事件已成功通知（推送成功 / 重试成功后调用，供对账去重）
+
+        v0.3.1.94：改写为「排他锁 + 真 FIFO + 写后回读校验」。
+        旧实现是 `读集合 → add → list(set)[-2000:] → 全量覆盖`：
+          · set 无序 → 裁掉的是随机条目，不只是最老的；
+          · 无锁 → 与 sentry_service 并发时互相覆盖（丢更新）；
+          · 无回读校验 → 标记没落盘也毫无声息。
+        三者叠加就是"补发→标记→被裁掉→再补发"的循环燃料。
+        现在若回读发现标记缺失，会记 ERROR 并扩窗重试，且日志足以定位。
+        """
         if not event_id:
             return
-        notified = self._load_notified()
-        if event_id not in notified:
-            notified.add(event_id)
-            self._save_notified(notified)
+        try:
+            ok = self._ledger().add(event_id, source='mark')
+            if not ok:
+                logger.error(
+                    "标记已通知未生效: %s（账本 %s）—— 该事件可能被重复补发",
+                    event_id, self._ledger().describe()
+                )
+        except Exception as e:                            # noqa: BLE001
+            logger.error("标记已通知异常: %s: %s", event_id, e)
 
     def _find_existing_thumbnail(self, event_id: str) -> Optional[str]:
         """查找事件已有的缩略图，覆盖正常推送与补发约定的全部路径。
@@ -370,6 +392,7 @@ class SentryNotifyQueue:
             return 0
 
         notified = self._load_notified()
+        logger.debug("对账扫描: 候选=%d 账本=%s", len(candidates), self._ledger().describe())
 
         # 损坏检测：文件存在但 loaded set 为空 + 有候选事件 → 文件可能在断电中损坏
         # （JSON 被截断/清空导致加载失败返回空集，但文件路径仍存在）
@@ -396,7 +419,17 @@ class SentryNotifyQueue:
         for ev_id, folder in candidates:
             if ev_id in notified or ev_id in queued_ids:
                 continue
-            # 发现孤儿事件 → 补入重试队列
+            # 发现孤儿事件 → 补入重试队列。
+            # 诊断：把"为什么会判成遗漏"所需的上下文一次记全 —— 事件年龄（判断是否
+            # 刚补发过又被判遗漏）、账本规模（判断是否饱和裁剪）、是否已在队列。
+            try:
+                age_h = (now - folder.stat().st_mtime) / 3600.0
+            except OSError:
+                age_h = -1.0
+            logger.info(
+                "对账判定遗漏: %s (事件年龄 %.1fh, 账本条数=%d, 本批候选=%d, 已在队列=%s)",
+                ev_id, age_h, len(notified), len(candidates), ev_id in queued_ids
+            )
             location, reason, coords = self._read_event_meta(folder)
             file_count = sum(
                 1 for p in folder.iterdir()
@@ -419,7 +452,11 @@ class SentryNotifyQueue:
             added += 1
 
         if added:
-            logger.info(f"对账补发：发现 {added} 个遗漏的哨兵事件，已补入重试队列")
+            logger.info("对账补发：发现 %d 个遗漏的哨兵事件，已补入重试队列（账本 %s）",
+                        added, self._ledger().describe())
+        else:
+            logger.debug("对账完成：无遗漏（候选 %d，账本 %s）",
+                         len(candidates), self._ledger().describe())
         return added
 
     def _check_network(self) -> bool:
